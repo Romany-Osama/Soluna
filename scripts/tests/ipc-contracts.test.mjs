@@ -30,7 +30,9 @@ test("application code does not bypass the generated IPC entry point", () => {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) visit(path);
       else if (entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name)) {
-        if (/import\s*\{[^}]*\binvoke\b[^}]*\}\s*from\s*["']@tauri-apps\/api\/core["']/.test(readFileSync(path, "utf8"))) {
+        if (
+          /import\s*\{[^}]*\binvoke\b[^}]*\}\s*from\s*["']@tauri-apps\/api\/core["']/.test(readFileSync(path, "utf8"))
+        ) {
           matches.push(path.replaceAll("\\", "/"));
         }
       }
