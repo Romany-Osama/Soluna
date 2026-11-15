@@ -43,6 +43,8 @@ Build on Windows:
 
 ```powershell
 npm ci
+npm run check:ipc-bindings
+npm run test:scripts
 npm run build   # cargo needs the built ../dist folder to exist; `tauri build` repeats this step itself
 cd src-tauri
 cargo check --release --locked
@@ -50,6 +52,11 @@ cargo test --release --locked
 cd ..
 npx tauri build --no-bundle
 ```
+
+The TypeScript IPC surface is generated from the registered Rust commands. Run
+`npm run generate:ipc-bindings` after changing command signatures, and keep the
+generated `src/ipc/bindings.ts` checked in. `npm run check:ipc-bindings` fails
+when the generated file is stale.
 
 ## Privacy and advertising
 
