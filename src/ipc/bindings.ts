@@ -255,5 +255,5 @@ export function invokeApp<T = never, C extends IpcCommand = IpcCommand>(
   command: C,
   args?: IpcArgs<C>,
 ): Promise<T extends never ? IpcResult<C> : T> {
-  return invoke(command, args ?? {}) as Promise<T extends never ? IpcResult<C> : T>;
+  return invoke(command, args as IpcArgs<C>) as Promise<T extends never ? IpcResult<C> : T>;
 }
