@@ -163,6 +163,7 @@ export type YouTubeSyncResult = {
   playlists: number;
 };
 export type PlayerCacheUsage = { bytes: number; songs: number; limitMb: number };
+export type SpotifyLikedTracks = { tracks: SpotifyTrackItem[]; totalCount: number };
 export type UpdateSummary = {
   version: string;
   currentVersion: string;

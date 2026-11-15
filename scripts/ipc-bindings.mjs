@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // S5-011: generate the typed TypeScript IPC surface from the Rust command signatures.
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { registeredCommands, readRustSource } from "./lib/ui-invariants.mjs";
 
 const OUTPUT = "src/ipc/bindings.ts";
@@ -62,11 +62,16 @@ function typeToTs(type) {
   throw new Error(`unsupported Rust IPC type: ${normalized}`);
 }
 
-function commandSignatures() {
+function camelCase(name) {
+  return name.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+function commandSignatures(commands) {
   const source = readRustSource();
   const signatures = new Map();
   for (const match of source.matchAll(/#\[tauri::command\][\s\S]*?\bfn\s+(\w+)\s*\(/g)) {
     const name = match[1];
+    if (!commands.has(name)) continue;
     const open = match.index + match[0].lastIndexOf("(");
     const close = matchingParen(source, open);
     const after = source.slice(close + 1).match(/^\s*->\s*([^\\{]+)\{/);
@@ -92,8 +97,8 @@ function commandSignatures() {
 }
 
 function render() {
-  const signatures = commandSignatures();
-  const commands = registeredCommands(readRustSource());
+  const commands = registeredCommands(readFileSync("src-tauri/src/lib.rs", "utf8"));
+  const signatures = commandSignatures(new Set(commands));
   const missing = commands.filter((command) => !signatures.has(command));
   if (missing.length) throw new Error(`no Rust signature found for: ${missing.join(", ")}`);
   const lines = [
@@ -125,7 +130,7 @@ function render() {
   ];
   for (const command of commands) {
     const signature = signatures.get(command);
-    const fields = Object.entries(signature.args).map(([name, value]) => `${name}: ${value.optional ? `${value.type}` : value.type}`);
+    const fields = Object.entries(signature.args).map(([name, value]) => `${camelCase(name)}${value.optional ? "?" : ""}: ${value.type}`);
     lines.push(`  ${command}: { args: { ${fields.join("; ")} }; result: ResolveModel<${signature.result}> };`);
   }
   lines.push(
@@ -149,5 +154,6 @@ if (process.argv.includes("--check")) {
     process.exit(1);
   }
 } else {
+  mkdirSync("src/ipc", { recursive: true });
   writeFileSync(OUTPUT, output);
 }
