@@ -147,6 +147,14 @@ function render() {
     "  return invoke<IpcResult<C>>(command, args);",
     "}",
     "",
+    "/** Compatibility entry point for existing callers while they migrate from raw Tauri invoke. */",
+    "export function invokeApp<T = never, C extends IpcCommand = IpcCommand>(",
+    "  command: C,",
+    "  args?: IpcArgs<C>,",
+    "): Promise<T extends never ? IpcResult<C> : T> {",
+    "  return invoke(command, args ?? {}) as Promise<T extends never ? IpcResult<C> : T>;",
+    "}",
+    "",
   );
   return lines.join("\n");
 }

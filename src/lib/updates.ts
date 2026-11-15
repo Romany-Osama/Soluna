@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../ipc/bindings";
 
 export type UpdateSummary = {
   version: string;

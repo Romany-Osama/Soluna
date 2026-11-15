@@ -2,7 +2,9 @@ import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } fro
 import { listenEvent } from "./lib/events";
 import { invokeCancellable } from "./lib/cancellable";
 import { isIpcErrorCode } from "./lib/ipcError";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "./ipc/bindings";
+import { taskbarInvoke } from "./lib/taskbar";
 import "./App.css";
 import { parseAudioQuality, streamRequest } from "./lib/audioQuality";
 import { appendNewPlayable, removeAt } from "./lib/queue";
@@ -1727,6 +1729,7 @@ function App() {
         mimeType: "audio/*",
         bitrate: 0,
         expiresInSeconds: 0,
+        duration: 0,
       });
       playbackSessionRef.current = occurrence.session;
       setPlayer(occurrence);
@@ -2168,17 +2171,17 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void invoke("plugin:taskbar|initialize").catch(() => undefined);
+    void taskbarInvoke("plugin:taskbar|initialize").catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    void invoke("plugin:taskbar|set_playback_state", { isPlaying: Boolean(player && isPlaying) }).catch(
+    void taskbarInvoke("plugin:taskbar|set_playback_state", { isPlaying: Boolean(player && isPlaying) }).catch(
       () => undefined,
     );
   }, [isPlaying, player]);
 
   useEffect(() => {
-    void invoke("plugin:taskbar|set_navigation_enabled", {
+    void taskbarInvoke("plugin:taskbar|set_navigation_enabled", {
       previousEnabled: Boolean(player && queueIndex > 0),
       nextEnabled: Boolean(player && (queueIndex + 1 < queueItems.length || queueContinuation)),
     }).catch(() => undefined);

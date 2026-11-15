@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import type { HomePage, YtItem } from "../../types";
 import type { ResourceCache } from "../../data/resourceCache";
 import { useResource } from "../../data/useResource";
