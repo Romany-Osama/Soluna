@@ -1,5 +1,5 @@
 // Sleep timer (moved out of App.tsx, TR-M1).
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { errorMessage } from "../../lib/util";
 import type { SetNotice } from "../../app/notifications";
 import type { Dispatch, SetStateAction } from "react";

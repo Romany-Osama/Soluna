@@ -1,6 +1,6 @@
 import { errorMessage } from "./lib/util";
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "./ipc/bindings";
 import { CACHE_LIMIT_CHOICES_MB, limitLabel, usageSummary, type PlayerCacheUsage } from "./lib/cacheUsage";
 import type { SetNotice } from "./app/notifications";
 import type { Destructive } from "./app/destructive";

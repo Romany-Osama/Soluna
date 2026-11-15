@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../ipc/bindings";
 import type { AudioQuality } from "../lib/audioQuality";
 import type { LibraryItemState, SessionStatus, YtItem } from "../types";
 

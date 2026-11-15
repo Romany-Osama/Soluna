@@ -1,5 +1,5 @@
 // Edit a song's title and artist (moved out of App.tsx, TR-M1).
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { errorMessage } from "../../lib/util";
 import type { NavKey, YtItem } from "../../types";
 import type { Dispatch, SetStateAction } from "react";

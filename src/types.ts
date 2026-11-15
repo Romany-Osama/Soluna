@@ -122,6 +122,7 @@ export type PlayerPayload = {
   mimeType: string;
   bitrate: number;
   expiresInSeconds: number;
+  duration: number;
   sourceClient?: string | null;
 };
 export type QueuePage = {

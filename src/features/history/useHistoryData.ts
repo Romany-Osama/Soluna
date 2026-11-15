@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import type { RemoteHistoryPage, StatsPayload, YtItem } from "../../types";
 import type { StatsPeriod } from "../../app/routes";
 import type { ResourceCache } from "../../data/resourceCache";

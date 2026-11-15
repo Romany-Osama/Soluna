@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { useState, useRef, useMemo, useEffect, RefObject } from "react";
 import { errorMessage } from "../../lib/util";
 import { invokeCancellable } from "../../lib/cancellable";
