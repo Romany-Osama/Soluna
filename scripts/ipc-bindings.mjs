@@ -109,7 +109,7 @@ function render() {
     "  LyricsPayload, PlayerCacheUsage, PlayerPayload, PlaylistContinuationPage, PlaylistPage,",
     "  QueuePage, RemoteHistoryPage, SearchPage, SessionStatus, SettingEntry, StatsPayload,",
     "  SpotifyLibraryNode, SpotifyLikedTracks, SpotifyPlaylistItem, SpotifyProfile,",
-    "  SpotifySessionStatus, SpotifyTrackMatch, SpotifyTrackPage, UpdateSummary, YtItem,",
+    "  SpotifySessionStatus, SpotifyTrackMatch, SpotifyTrackPage, UpdateSummary, YtItem, YouTubeSyncResult,",
     "} from \"../types\";",
     "",
     "type RustModels = {",
