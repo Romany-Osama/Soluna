@@ -18,6 +18,7 @@
     "check:security": "node scripts/check-security-config.mjs",
     "check:ui": "node scripts/check-ui-invariants.mjs",
     "check:ipc-bindings": "node scripts/ipc-bindings.mjs --check",
+    "generate:ipc-bindings": "node scripts/ipc-bindings.mjs",
     "test": "vitest run",
     "check:tooling": "node scripts/check-tooling.mjs",
     "lint": "eslint . --max-warnings 8",
