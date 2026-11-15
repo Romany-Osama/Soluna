@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import { ipcContractState } from "../lib/ipc-contracts.mjs";
 
@@ -23,8 +24,18 @@ test("authenticated command contracts identify the account boundary", () => {
 });
 
 test("application code does not bypass the generated IPC entry point", () => {
-  const output = execFileSync("rg", ["-l", 'import.*invoke.*from "@tauri-apps/api/core"', "src"], {
-    encoding: "utf8",
-  });
-  assert.deepEqual(output.trim().split("\n").sort(), ["src/ipc/bindings.ts", "src/lib/taskbar.ts"]);
+  const matches = [];
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name)) {
+        if (/import\s*\{[^}]*\binvoke\b[^}]*\}\s*from\s*["']@tauri-apps\/api\/core["']/.test(readFileSync(path, "utf8"))) {
+          matches.push(path.replaceAll("\\", "/"));
+        }
+      }
+    }
+  };
+  visit("src");
+  assert.deepEqual(matches.sort(), ["src/ipc/bindings.ts", "src/lib/taskbar.ts"]);
 });
