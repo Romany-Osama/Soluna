@@ -1,8 +1,9 @@
 // Cancellable commands (S5-009, D-045). Long commands (search, page and playlist loads, library sync, lyrics)
 // accept a `requestId`; aborting the signal asks the backend to stop that request (`request_cancel`), which drops
 // its in-flight HTTP request instead of letting it finish for a screen nobody is looking at.
-import { invoke } from "@tauri-apps/api/core";
 import type { IpcError } from "./ipcError";
+import { invokeIpc } from "../ipc/bindings";
+import type { IpcArgs, IpcCommand } from "../ipc/bindings";
 
 let sequence = 0;
 
@@ -17,17 +18,17 @@ export function cancelledError(message = "Request was cancelled"): IpcError {
 }
 
 export async function invokeCancellable<T>(
-  command: string,
-  args: Record<string, unknown> = {},
+  command: IpcCommand,
+  args = {} as IpcArgs<typeof command>,
   signal?: AbortSignal,
 ): Promise<T> {
-  if (!signal) return invoke<T>(command, args);
+  if (!signal) return invokeIpc(command, args) as Promise<T>;
   if (signal.aborted) throw cancelledError();
   const requestId = newRequestId();
-  const onAbort = () => void invoke("request_cancel", { requestId }).catch(() => undefined);
+  const onAbort = () => void invokeIpc("request_cancel", { requestId }).catch(() => undefined);
   signal.addEventListener("abort", onAbort, { once: true });
   try {
-    return await invoke<T>(command, { ...args, requestId });
+    return (await invokeIpc(command, { ...args, requestId })) as T;
   } finally {
     signal.removeEventListener("abort", onAbort);
   }

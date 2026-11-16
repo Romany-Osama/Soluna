@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
+import type { IpcCommand } from "../../ipc/bindings";
 import type { YtItem } from "../../types";
 import type { LibraryMode } from "../../app/routes";
 import type { ResourceCache } from "../../data/resourceCache";
@@ -10,7 +11,7 @@ const LIBRARY_FALLBACK = { status: "idle" as const, data: [] as YtItem[] };
 /** Library modes whose items come from one command. */
 export type LibraryItemsMode = Exclude<LibraryMode, "playlists" | "podcasts">;
 
-const COMMANDS: Partial<Record<LibraryItemsMode, string>> = {
+const COMMANDS: Partial<Record<LibraryItemsMode, IpcCommand>> = {
   local: "library_local_files",
   songs: "library_songs",
   liked: "library_liked_songs",
@@ -21,7 +22,7 @@ const COMMANDS: Partial<Record<LibraryItemsMode, string>> = {
   artists: "library_artists",
 };
 
-const PODCAST_COMMANDS: Record<PodcastFilter, string> = {
+const PODCAST_COMMANDS: Record<PodcastFilter, IpcCommand> = {
   episodes: "library_saved_podcasts",
   channels: "ytm_podcast_channels",
   downloaded: "library_downloaded_podcasts",

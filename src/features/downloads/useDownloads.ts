@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { listenEvent } from "../../lib/events";
 import { useCallback, useEffect, useState } from "react";
 import { AudioQuality } from "../../lib/audioQuality";

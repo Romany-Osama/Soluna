@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { useState, useRef } from "react";
 import { arrangeQueue, shuffleAfterCurrent, moveItem } from "../../lib/queue";
 import { errorMessage } from "../../lib/util";

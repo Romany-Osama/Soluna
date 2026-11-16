@@ -28,7 +28,7 @@ Downloaded songs, temporary playback cache, imported local files, account sessio
 
 ## Getting started
 
-Download the latest portable package from the [Releases page](https://github.com/Romany-Osama/Meld-Desktop/releases). Extract the complete ZIP folder and start `meld-desktop-0.1.0-gap-batch.exe`. Keep the `icons/taskbar` folder beside the executable so the Windows taskbar thumbnail controls can load their icons.
+Download the latest portable package from the [Soluna Releases page](https://github.com/Romany-Osama/Soluna/releases). The current release is **Meld Desktop v0.3.0**. Extract the complete ZIP folder and start `Meld Desktop.exe`. Keep the `icons/taskbar` folder beside the executable so the Windows taskbar thumbnail controls can load their icons.
 
 The first screen can be used without connecting an account for supported public browsing and playback. Connect Google/YouTube Music when you want account library actions, saved shows, subscriptions, or synchronized personal content. Connect Spotify only when you want Spotify library and playlist features.
 
@@ -43,6 +43,8 @@ Build on Windows:
 
 ```powershell
 npm ci
+npm run check:ipc-bindings
+npm run test:scripts
 npm run build   # cargo needs the built ../dist folder to exist; `tauri build` repeats this step itself
 cd src-tauri
 cargo check --release --locked
@@ -50,6 +52,11 @@ cargo test --release --locked
 cd ..
 npx tauri build --no-bundle
 ```
+
+The TypeScript IPC surface is generated from the registered Rust commands. Run
+`npm run generate:ipc-bindings` after changing command signatures, and keep the
+generated `src/ipc/bindings.ts` checked in. `npm run check:ipc-bindings` fails
+when the generated file is stale.
 
 ## Privacy and advertising
 
@@ -63,7 +70,9 @@ Some mobile-only or service-dependent features are not part of the Windows appli
 
 ## Project status
 
-The current public release is [v0.1.2 — Safe parity gap batch](https://github.com/Romany-Osama/Meld-Desktop/releases/tag/v0.1.2-safe-gap-batch). Read [CHANGELOG.md](CHANGELOG.md) for the release history and the exact validation results.
+The current public release is [Meld Desktop v0.3.0](https://github.com/Romany-Osama/Soluna/releases/tag/v0.3.0). Read [CHANGELOG.md](CHANGELOG.md) for the release history and the exact validation results.
+
+The GitHub repository is named **Soluna**, while the application and existing release artifacts are still branded **Meld Desktop**. This README intentionally keeps that product name until a separate branding migration is approved.
 
 This project is an active independent desktop adaptation. It follows the user-facing ideas and publicly available behavior of Meld where a reliable Windows implementation is possible, but it does not claim to be the official Meld release or to be a byte-for-byte copy of the mobile application.
 

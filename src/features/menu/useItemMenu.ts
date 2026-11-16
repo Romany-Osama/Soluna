@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { useState, useEffect } from "react";
 import { parseLink } from "../../app/links";
 import { errorMessage } from "../../lib/util";
@@ -54,7 +54,7 @@ export function useItemMenu({ setNotice }: ItemMenuDeps) {
     return () => {
       activeRequest = false;
     };
-  }, [youtubeMatchItem?.item.id, youtubeMatchUrl]);
+  }, [youtubeMatchItem, youtubeMatchUrl]);
 
   const confirmYoutubeVersion = async () => {
     const match = youtubeMatchItem?.match;

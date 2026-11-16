@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invokeCancellable } from "../../lib/cancellable";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import type { DetailPage } from "../../types";
 import type { ResourceCache } from "../../data/resourceCache";
 import { useResource } from "../../data/useResource";
@@ -64,6 +64,8 @@ export function useDetailData({
   const loadDetailMore = async () => {
     if (!key || !detail || detail.status !== "ready" || !detail.data.continuation || detailMoreLoading) return;
     const page = detail.data;
+    const continuation = page.continuation;
+    if (!continuation) return;
     const token = cache.begin(`${key}:more`, "detail-more");
     setDetailMoreLoading(true);
     try {
@@ -71,9 +73,9 @@ export function useDetailData({
         page.kind === "browse"
           ? await invoke<DetailPage>("ytm_browse_continuation", {
               browseId: page.browseId ?? "",
-              continuation: page.continuation,
+              continuation,
             })
-          : await invoke<DetailPage>("ytm_detail_continuation", { kind: page.kind, continuation: page.continuation });
+          : await invoke<DetailPage>("ytm_detail_continuation", { kind: page.kind, continuation });
       if (page.kind === "podcast" && page.browseId)
         await invoke("ytm_podcast_cache_detail_page", { browseId: page.browseId, page: next });
       if (!token.isCurrent()) return;

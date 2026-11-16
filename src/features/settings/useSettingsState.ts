@@ -1,5 +1,5 @@
 import { SettingsPage } from "../../app/routes";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { useState, useCallback } from "react";
 import { AudioQuality } from "../../lib/audioQuality";
 import { errorMessage } from "../../lib/util";

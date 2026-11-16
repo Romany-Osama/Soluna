@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { Dispatch, SetStateAction, useState, useMemo, useCallback } from "react";
 import { errorMessage } from "../../lib/util";
 import { SessionStatus, YtItem, PlaylistSort } from "../../types";

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } fro
 import { listenEvent } from "./lib/events";
 import { invokeCancellable } from "./lib/cancellable";
 import { isIpcErrorCode } from "./lib/ipcError";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "./ipc/bindings";
+import { taskbarInvoke } from "./lib/taskbar";
 import "./App.css";
 import { parseAudioQuality, streamRequest } from "./lib/audioQuality";
 import { appendNewPlayable, removeAt } from "./lib/queue";
@@ -169,6 +171,7 @@ function App() {
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
   const searchBoxRef = useRef<HTMLDivElement>(null);
+  const playQueueIndexRef = useRef<(index: number) => void>(() => undefined);
   const [historySource, setHistorySource] = useState<HistorySource>("local");
   const [historyQuery, setHistoryQuery] = useState("");
   const [statsPeriod, setStatsPeriod] = useState<StatsPeriod>("all");
@@ -936,7 +939,7 @@ function App() {
     return () => document.removeEventListener("pointerdown", handleSearchOutsidePointer);
   }, []);
 
-  useEffect(() => {
+  const refreshActiveRoute = useEffectEvent(() => {
     if (active === "library") {
       if (libraryMode === "mix") void loadLibrary("mix");
       else if (libraryMode === "playlists") {
@@ -955,6 +958,9 @@ function App() {
       if (historySource === "remote") void loadRemoteHistory();
       else void loadHistory();
     }
+  });
+  useEffect(() => {
+    refreshActiveRoute();
   }, [
     active,
     historySource,
@@ -971,7 +977,7 @@ function App() {
     void loadSettings();
   });
   useEffect(() => loadStartupAccounts(), []);
-  useEffect(() => {
+  const refreshHomeOnAccountChange = useEffectEvent(() => {
     if (accountAuthStateRef.current === null) {
       accountAuthStateRef.current = sessionStatus.authenticated;
       return;
@@ -980,6 +986,9 @@ function App() {
       accountAuthStateRef.current = sessionStatus.authenticated;
       if (active === "home") void loadHome();
     }
+  });
+  useEffect(() => {
+    refreshHomeOnAccountChange();
   }, [active, sessionStatus.authenticated]);
   const refreshSpotifyProfile = useEffectEvent(() => void loadSpotifyProfile());
   useEffect(() => refreshSpotifyProfile(), [spotifyStatus.authenticated]);
@@ -1145,7 +1154,7 @@ function App() {
     return () => {
       activeRequest = false;
     };
-  }, [player?.item.id, setPlayerItemState]);
+  }, [player, player?.item.id, setPlayerItemState]);
 
   const isLocalLibraryMenuContext = (item: YtItem) =>
     Boolean(item.localPath) ||
@@ -1727,6 +1736,7 @@ function App() {
         mimeType: "audio/*",
         bitrate: 0,
         expiresInSeconds: 0,
+        duration: 0,
       });
       playbackSessionRef.current = occurrence.session;
       setPlayer(occurrence);
@@ -1805,7 +1815,7 @@ function App() {
     }
   };
 
-  useEffect(() => {
+  const syncAudioPlayer = useEffectEvent(() => {
     if (!player || !audioRef.current) return;
     const audio = audioRef.current;
     const playerId = player.item.id;
@@ -1852,12 +1862,11 @@ function App() {
     if (audio.readyState >= 1) start();
     else audio.addEventListener("loadedmetadata", start, { once: true });
     return () => audio.removeEventListener("loadedmetadata", start);
-    // Keyed on the occurrence (song id + session), not the whole player object: recoverStream() and metadata
-    // refreshes update `player` for the SAME occurrence and must not reset playback to 0 (PLAY-031, PLAY-035).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playbackEffectKey(player)]);
+  });
+  const currentPlaybackEffectKey = playbackEffectKey(player);
+  useEffect(() => syncAudioPlayer(), [currentPlaybackEffectKey]);
 
-  useEffect(() => {
+  const restorePersistentPlayback = useEffectEvent(() => {
     if (settings.persistentQueue !== true) {
       persistentQueueLoadedRef.current = false;
       persistentQueueSkipWriteRef.current = false;
@@ -1869,8 +1878,6 @@ function App() {
     }
     if (persistentQueueLoadedRef.current) return;
     persistentQueueLoadedRef.current = true;
-    // The write effect runs in the same commit as this hydration effect. Skip that
-    // first write so the initial in-memory queue cannot overwrite stored entries.
     persistentQueueSkipWriteRef.current = true;
     persistentSessionLoadedRef.current = true;
     persistentSessionSkipWriteRef.current = true;
@@ -1901,6 +1908,9 @@ function App() {
     } catch {
       localStorage.removeItem("meld:persistentQueue");
     }
+  });
+  useEffect(() => {
+    restorePersistentPlayback();
   }, [
     settings.persistentQueue,
     setNotice,
@@ -2016,10 +2026,10 @@ function App() {
         seekPlayback(Math.max(0, Math.min(durationSeconds || Number.MAX_SAFE_INTEGER, details.seekTime)));
     });
     setHandler("previoustrack", () => {
-      if (queueIndex > 0) void playQueueIndex(queueIndex - 1);
+      if (queueIndex > 0) void playQueueIndexRef.current(queueIndex - 1);
     });
     setHandler("nexttrack", () => {
-      if (queueIndex + 1 < queueItems.length || queueContinuation) void playQueueIndex(queueIndex + 1);
+      if (queueIndex + 1 < queueItems.length || queueContinuation) void playQueueIndexRef.current(queueIndex + 1);
     });
     return () => {
       mediaSession.metadata = null;
@@ -2046,6 +2056,7 @@ function App() {
     queueContinuation,
     queueIndex,
     queueItems.length,
+    player,
     setNotice,
     seekPlayback,
     audioRef,
@@ -2137,6 +2148,7 @@ function App() {
     }
     await playItem(item, items, index, continuation, autoMixEnabledRef.current, continuationKind);
   };
+  playQueueIndexRef.current = playQueueIndex;
 
   useEffect(() => {
     taskbarPreviousRef.current = () => {
@@ -2168,17 +2180,17 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void invoke("plugin:taskbar|initialize").catch(() => undefined);
+    void taskbarInvoke("plugin:taskbar|initialize").catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    void invoke("plugin:taskbar|set_playback_state", { isPlaying: Boolean(player && isPlaying) }).catch(
+    void taskbarInvoke("plugin:taskbar|set_playback_state", { isPlaying: Boolean(player && isPlaying) }).catch(
       () => undefined,
     );
   }, [isPlaying, player]);
 
   useEffect(() => {
-    void invoke("plugin:taskbar|set_navigation_enabled", {
+    void taskbarInvoke("plugin:taskbar|set_navigation_enabled", {
       previousEnabled: Boolean(player && queueIndex > 0),
       nextEnabled: Boolean(player && (queueIndex + 1 < queueItems.length || queueContinuation)),
     }).catch(() => undefined);

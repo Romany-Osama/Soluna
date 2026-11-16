@@ -14,5 +14,6 @@ export function streamRequest(
   item: { videoId?: string | null; playlistId?: string | null; playPlaylistId?: string | null },
   audioQuality: AudioQuality,
 ) {
+  if (!item.videoId) throw new Error("Cannot resolve a stream without a video id");
   return { videoId: item.videoId, playlistId: item.playlistId ?? item.playPlaylistId ?? null, audioQuality };
 }
