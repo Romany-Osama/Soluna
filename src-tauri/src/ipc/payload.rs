@@ -230,6 +230,21 @@ mod tests {
     }
 
     #[test]
+    fn every_validated_text_boundary_rejects_oversized_input() {
+        let oversized = "x".repeat(16_385);
+        assert!(serde_json::from_value::<VideoId>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<YtId>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<LibraryId>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<Token>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<SpotifyId>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<SpotifyUri>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<Keyword>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<Name>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<Text>(serde_json::json!(oversized)).is_err());
+        assert!(serde_json::from_value::<LongText>(serde_json::json!(oversized)).is_err());
+    }
+
+    #[test]
     fn youtube_ids_reject_query_and_path_injection() {
         for good in ["VLPL123-abc_DEF", "MPREb_x", "UC1234567890", "FEmusic_home"] {
             assert!(YtId::parse(good).is_ok(), "{good}");

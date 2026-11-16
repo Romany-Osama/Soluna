@@ -4,6 +4,7 @@ pub mod account;
 pub mod backup;
 pub mod cancel;
 pub mod catalog;
+mod contract;
 pub mod downloads;
 pub mod error;
 pub mod library;
