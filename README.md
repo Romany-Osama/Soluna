@@ -28,7 +28,7 @@ Downloaded songs, temporary playback cache, imported local files, account sessio
 
 ## Getting started
 
-Download the latest portable package from the [Soluna Releases page](https://github.com/Romany-Osama/Soluna/releases). The current release is **Meld Desktop v0.3.0**. Extract the complete ZIP folder and start `Meld-Desktop-0.3.0-x64-portable.exe`. Keep the `icons/taskbar` folder beside the executable so the Windows taskbar thumbnail controls can load their icons.
+Download the latest portable package from the [Soluna Releases page](https://github.com/Romany-Osama/Soluna/releases). The current release is **Meld Desktop v0.3.0**. Extract the complete ZIP folder and start `Meld Desktop.exe`. Keep the `icons/taskbar` folder beside the executable so the Windows taskbar thumbnail controls can load their icons.
 
 The first screen can be used without connecting an account for supported public browsing and playback. Connect Google/YouTube Music when you want account library actions, saved shows, subscriptions, or synchronized personal content. Connect Spotify only when you want Spotify library and playlist features.
 
