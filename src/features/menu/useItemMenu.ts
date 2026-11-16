@@ -54,7 +54,7 @@ export function useItemMenu({ setNotice }: ItemMenuDeps) {
     return () => {
       activeRequest = false;
     };
-  }, [youtubeMatchItem?.item.id, youtubeMatchUrl]);
+  }, [youtubeMatchItem, youtubeMatchUrl]);
 
   const confirmYoutubeVersion = async () => {
     const match = youtubeMatchItem?.match;

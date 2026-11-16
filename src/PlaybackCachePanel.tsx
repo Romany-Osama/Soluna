@@ -1,5 +1,5 @@
 import { errorMessage } from "./lib/util";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { invokeApp as invoke } from "./ipc/bindings";
 import { CACHE_LIMIT_CHOICES_MB, limitLabel, usageSummary, type PlayerCacheUsage } from "./lib/cacheUsage";
 import type { SetNotice } from "./app/notifications";
@@ -17,9 +17,10 @@ export function PlaybackCachePanel({ onNotice, destructive }: { onNotice: SetNot
       onNotice(`Playback cache size could not be read: ${errorMessage(error)}`, "error");
     }
   };
+  const refreshEffect = useEffectEvent(refresh);
 
   useEffect(() => {
-    void refresh();
+    void refreshEffect();
   }, []);
 
   const changeLimit = async (limitMb: number) => {
