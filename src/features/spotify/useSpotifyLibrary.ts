@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { Dispatch, SetStateAction, useState } from "react";
 import { AudioQuality } from "../../lib/audioQuality";
 import { errorMessage } from "../../lib/util";

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AudioQuality, streamRequest } from "../../lib/audioQuality";
 import { mediaSrc } from "../../lib/media";
@@ -82,7 +82,7 @@ export function usePlayer({ audioQuality, setNotice, settings }: PlayerDeps) {
     const localSource = isLocalStream(failedUrl);
     setNotice(recoveryNotice(reason, streamRecoveryRef.current.attempts, localSource));
     try {
-      if (reason === "rejected" || localSource)
+      if ((reason === "rejected" || localSource) && item.videoId)
         await invoke("ytm_report_stream_failure", { videoId: item.videoId, streamUrl: failedUrl }).catch(
           () => undefined,
         );

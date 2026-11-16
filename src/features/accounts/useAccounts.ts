@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { listenEvent } from "../../lib/events";
 import { useEffect, useState } from "react";
 import { errorMessage } from "../../lib/util";

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { Dispatch, SetStateAction } from "react";
 import { InlineLikeButton } from "../../components/InlineLikeButton";
 import { ItemCard } from "../../components/ItemCard";

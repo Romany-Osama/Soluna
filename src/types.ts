@@ -122,6 +122,7 @@ export type PlayerPayload = {
   mimeType: string;
   bitrate: number;
   expiresInSeconds: number;
+  duration: number;
   sourceClient?: string | null;
 };
 export type QueuePage = {
@@ -154,3 +155,20 @@ export type PersistentPlayback = {
 export type LibrarySongFilter = "liked" | "library" | "uploaded" | "downloaded" | "top";
 export type LibrarySort = "created" | "name" | "artist" | "playtime";
 export type PlaylistSort = "created" | "name" | "count";
+export type LibraryPlaylistItem = YtItem & { songCount: number; savedAt: number };
+export type LocalItem = YtItem & { localPath: string; duration: number };
+export type YouTubeSyncResult = {
+  likedSongs: number;
+  librarySongs: number;
+  uploadedSongs: number;
+  playlists: number;
+};
+export type PlayerCacheUsage = { bytes: number; songs: number; limitMb: number };
+export type SpotifyLikedTracks = { tracks: SpotifyTrackItem[]; totalCount: number };
+export type UpdateSummary = {
+  version: string;
+  currentVersion: string;
+  notes?: string | null;
+  date?: string | null;
+  portable: boolean;
+};
