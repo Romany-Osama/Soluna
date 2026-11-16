@@ -134,43 +134,101 @@ macro_rules! payload {
 
 payload!(
     /// A YouTube video id: exactly 11 characters of `[A-Za-z0-9_-]`.
-    VideoId, "video id", Rule::Charset { min: 11, max: 11, allowed: yt_char }, trim = true
+    VideoId,
+    "video id",
+    Rule::Charset {
+        min: 11,
+        max: 11,
+        allowed: yt_char
+    },
+    trim = true
 );
 payload!(
     /// Browse, playlist, channel, podcast, entity and setVideoId values for YouTube Music.
-    YtId, "YouTube Music id", Rule::Charset { min: 1, max: 256, allowed: yt_char }, trim = true
+    YtId,
+    "YouTube Music id",
+    Rule::Charset {
+        min: 1,
+        max: 256,
+        allowed: yt_char
+    },
+    trim = true
 );
 payload!(
     /// Ids of rows in the local Meld library (songs, playlists, artists, downloads).
-    LibraryId, "library id", Rule::Charset { min: 1, max: 256, allowed: library_char }, trim = true
+    LibraryId,
+    "library id",
+    Rule::Charset {
+        min: 1,
+        max: 256,
+        allowed: library_char
+    },
+    trim = true
 );
 payload!(
     /// InnerTube continuation tokens, feedback tokens and `params`.
-    Token, "token", Rule::Charset { min: 1, max: 16_384, allowed: token_char }, trim = true
+    Token,
+    "token",
+    Rule::Charset {
+        min: 1,
+        max: 16_384,
+        allowed: token_char
+    },
+    trim = true
 );
 payload!(
     /// A Spotify playlist id, track uid or other base62/hex identifier.
-    SpotifyId, "Spotify id", Rule::Charset { min: 1, max: 128, allowed: yt_char }, trim = true
+    SpotifyId,
+    "Spotify id",
+    Rule::Charset {
+        min: 1,
+        max: 128,
+        allowed: yt_char
+    },
+    trim = true
 );
 payload!(
     /// A `spotify:` URI (track, folder, playlist).
-    SpotifyUri, "Spotify URI", Rule::Charset { min: 9, max: 256, allowed: spotify_uri_char }, trim = true
+    SpotifyUri,
+    "Spotify URI",
+    Rule::Charset {
+        min: 9,
+        max: 256,
+        allowed: spotify_uri_char
+    },
+    trim = true
 );
 payload!(
     /// A short keyword: kinds, modes, periods, providers, audio qualities, setting keys.
-    Keyword, "keyword", Rule::Charset { min: 1, max: 64, allowed: yt_char }, trim = true
+    Keyword,
+    "keyword",
+    Rule::Charset {
+        min: 1,
+        max: 64,
+        allowed: yt_char
+    },
+    trim = true
 );
 payload!(
     /// A required name (playlist title, new name, song title): non-empty, no control characters.
-    Name, "name", Rule::Text { min: 1, max: 500 }, trim = true
+    Name,
+    "name",
+    Rule::Text { min: 1, max: 500 },
+    trim = true
 );
 payload!(
     /// Optional free text (artist, album, search query): may be empty, no control characters.
-    Text, "text", Rule::Text { min: 0, max: 1_000 }, trim = false
+    Text,
+    "text",
+    Rule::Text { min: 0, max: 1_000 },
+    trim = false
 );
 payload!(
     /// Longer values: setting values, thumbnails, stream URLs (never logged).
-    LongText, "value", Rule::Text { min: 0, max: 8_192 }, trim = false
+    LongText,
+    "value",
+    Rule::Text { min: 0, max: 8_192 },
+    trim = false
 );
 
 /// An optional argument: a missing key, `null` or a blank string is `None`; anything else must
