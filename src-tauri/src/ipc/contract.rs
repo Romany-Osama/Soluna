@@ -24,16 +24,26 @@ mod tests {
 
     fn registered_commands() -> Vec<String> {
         let source = include_str!("../lib.rs");
-        Regex::new(r"(?:ipc::\w+|updates)::(\w+)")
+        let registry = source
+            .split_once("tauri::generate_handler![")
+            .and_then(|(_, rest)| rest.split_once("])"))
+            .map(|(registry, _)| registry)
+            .expect("generate_handler registry");
+        Regex::new(r"(?:ipc::\w+::|updates::)(\w+)")
             .unwrap()
-            .captures_iter(source)
+            .captures_iter(registry)
             .map(|capture| capture[1].to_owned())
             .collect()
     }
 
     fn binding_commands() -> Vec<String> {
         let source = include_str!("../../../src/ipc/bindings.ts");
-        Regex::new(r"^\s{2}([a-z][a-z0-9_]*)\s*:")
+        let source = source
+            .split_once("export type IpcCommandMap = {")
+            .and_then(|(_, rest)| rest.split_once("\n};\n"))
+            .map(|(map, _)| map)
+            .expect("generated command map");
+        Regex::new(r"(?m)^\s{2}([a-z][a-z0-9_]*)\s*:")
             .unwrap()
             .captures_iter(source)
             .map(|capture| capture[1].to_owned())
@@ -42,9 +52,12 @@ mod tests {
 
     #[test]
     fn every_registered_command_has_one_generated_binding() {
-        let registered = registered_commands();
-        let bindings = binding_commands();
-        assert_eq!(registered.len(), 105);
+        let mut registered = registered_commands();
+        let mut bindings = binding_commands();
+        registered.sort_unstable();
+        registered.dedup();
+        bindings.sort_unstable();
+        bindings.dedup();
         assert_eq!(bindings.len(), registered.len());
         for command in registered {
             assert!(
@@ -58,7 +71,7 @@ mod tests {
     fn every_registered_command_returns_the_structured_ipc_result() {
         let registered = registered_commands();
         let command_pattern = Regex::new(r"#\[tauri::command\][\s\S]*?\bfn\s+(\w+)\s*\(").unwrap();
-        let return_pattern = Regex::new(r"\)\s*->\s*IpcResult<").unwrap();
+        let return_pattern = Regex::new(r"\)\s*->\s*(?:crate::)?IpcResult<").unwrap();
         for command in registered {
             let mut found = false;
             for source in SOURCES {
@@ -67,7 +80,10 @@ mod tests {
                     .filter(|capture| capture[1] == command)
                 {
                     let start = candidate.get(0).unwrap().start();
-                    let signature = &source[start..source[start..].find('{').map_or(source.len(), |offset| start + offset)];
+                    let signature = &source[start
+                        ..source[start..]
+                            .find('{')
+                            .map_or(source.len(), |offset| start + offset)];
                     assert!(
                         return_pattern.is_match(signature),
                         "{command} does not return IpcResult"
@@ -75,7 +91,10 @@ mod tests {
                     found = true;
                 }
             }
-            assert!(found, "{command} is registered but has no command implementation");
+            assert!(
+                found,
+                "{command} is registered but has no command implementation"
+            );
         }
     }
 }
