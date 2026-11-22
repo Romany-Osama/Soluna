@@ -133,7 +133,7 @@ export function ExpandedPlayer({
               )}
             </div>
             <div className="full-player-meta">
-              <p className="eyebrow">Now playing in Meld</p>
+              <p className="eyebrow">Now playing in Soluna</p>
               <h2 className="full-player-title" title={player.payload.title || player.item.title}>
                 {player.payload.title || player.item.title}
               </h2>
@@ -151,8 +151,8 @@ export function ExpandedPlayer({
                   <button
                     className={playerItemState?.liked ? "player-action active-control" : "player-action"}
                     onClick={() => void togglePlayerFavorite()}
-                    title={playerItemState?.liked ? "Remove from Meld Liked Songs" : "Add to Meld Liked Songs"}
-                    aria-label={playerItemState?.liked ? "Remove from Meld Liked Songs" : "Add to Meld Liked Songs"}
+                    title={playerItemState?.liked ? "Remove from Soluna Liked Songs" : "Add to Soluna Liked Songs"}
+                    aria-label={playerItemState?.liked ? "Remove from Soluna Liked Songs" : "Add to Soluna Liked Songs"}
                   >
                     {playerItemState?.liked ? "♥" : "♡"}
                   </button>
@@ -247,7 +247,7 @@ export function ExpandedPlayer({
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">Lyrics</p>
-                  <h3>{lyrics?.status === "ready" ? lyrics.data.provider : "Meld lyric providers"}</h3>
+                  <h3>{lyrics?.status === "ready" ? lyrics.data.provider : "Soluna lyric providers"}</h3>
                   <label className="lyrics-provider-picker">
                     <span>Provider</span>
                     <select

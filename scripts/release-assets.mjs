@@ -123,11 +123,11 @@ switch (command) {
     const vendored = vendoredPackages();
     writeFileSync(
       join(args[0], "sbom.cdx.json"),
-      `${JSON.stringify(cycloneDx({ appName: "Meld Desktop", appVersion: pkg.version, crates, npmPackages, vendored, timestamp: new Date().toISOString() }), null, 2)}\n`,
+      `${JSON.stringify(cycloneDx({ appName: "Soluna", appVersion: pkg.version, crates, npmPackages, vendored, timestamp: new Date().toISOString() }), null, 2)}\n`,
     );
     writeFileSync(
       join(args[0], "THIRD-PARTY-NOTICES.txt"),
-      thirdPartyNotices({ appName: "Meld Desktop", packages: [...crates, ...npmPackages, ...vendored] }),
+      thirdPartyNotices({ appName: "Soluna", packages: [...crates, ...npmPackages, ...vendored] }),
     );
     console.log(`metadata: ${crates.length} crates, ${npmPackages.length} npm packages, ${vendored.length} vendored`);
     break;

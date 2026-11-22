@@ -72,7 +72,7 @@ export function SettingsScreen({
             >
               {settingsPage === "main" ? "×" : "‹"}
             </button>
-            <p className="eyebrow">Meld Desktop</p>
+            <p className="eyebrow">Soluna Desktop</p>
             <h2>
               {settingsPage === "main"
                 ? "Settings"
@@ -126,8 +126,7 @@ export function SettingsScreen({
               <div className="settings-group">
                 <h3>Appearance</h3>
                 <p className="muted-copy">
-                  Meld’s source appearance screen contains Android-specific theme, palette, and density controls.
-                  Desktop keeps one native dark shell here until those controls have a real Windows renderer
+                  Soluna keeps one native dark shell here until theme controls have a real Windows renderer
                   implementation; no inert switches are shown.
                 </p>
               </div>
@@ -146,7 +145,7 @@ export function SettingsScreen({
                     onClick={async () => {
                       try {
                         const path = await invoke<string>("backup_create");
-                        setNotice(`Meld Desktop backup created at ${path}.`);
+                        setNotice(`Soluna backup created at ${path}.`);
                       } catch (error) {
                         if (!isIpcErrorCode(error, "cancelled"))
                           setNotice(`Backup could not be created: ${errorMessage(error)}`, "error");
@@ -160,7 +159,7 @@ export function SettingsScreen({
                     onClick={async () => {
                       try {
                         const path = await invoke<string>("backup_restore");
-                        setNotice(`Backup restored from ${path}. Restart Meld Desktop to reload the restored library.`);
+                        setNotice(`Backup restored from ${path}. Restart Soluna to reload the restored library.`);
                       } catch (error) {
                         if (!isIpcErrorCode(error, "cancelled"))
                           setNotice(`Backup could not be restored: ${errorMessage(error)}`, "error");
@@ -180,10 +179,10 @@ export function SettingsScreen({
             {settingsPage === "storage" && <PlaybackCachePanel onNotice={setNotice} destructive={destructive} />}
             {settingsPage === "about" && (
               <div className="settings-group">
-                <h3>About Meld Desktop</h3>
+                <h3>About Soluna</h3>
                 <p className="muted-copy">
-                  Native Tauri desktop adaptation of the live Meld/Metrolist source contracts. Source-dependent features
-                  remain tracked in the audit rather than being presented as complete.
+                  Native Tauri desktop client for YouTube Music and Spotify. Source-dependent features remain tracked in
+                  the audit rather than being presented as complete.
                 </p>
               </div>
             )}
@@ -306,7 +305,7 @@ export function SettingsScreen({
                         <strong>Use login for browse</strong>
                         <small>
                           Use the connected YouTube Music session for Home, search, details, playlists, and related
-                          browse requests, matching Meld’s Account setting.
+                          browse requests.
                         </small>
                       </span>
                       <input
@@ -324,7 +323,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Pause listen history</strong>
-                        <small>Do not add locally played items to Meld’s listening history.</small>
+                        <small>Do not add locally played items to Soluna’s listening history.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -335,7 +334,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Pause search history</strong>
-                        <small>Do not save submitted searches to Meld’s recent-search list.</small>
+                        <small>Do not save submitted searches to Soluna’s recent-search list.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -351,12 +350,12 @@ export function SettingsScreen({
                           key: "search-history-clear",
                           confirm: {
                             title: "Clear search history?",
-                            message: "Every saved search is removed from Meld.",
+                            message: "Every saved search is removed from Soluna.",
                             confirmLabel: "Clear searches",
                           },
                           commit: () => invoke("search_history_clear"),
                           refresh: loadSearchHistory,
-                          success: "Meld search history cleared.",
+                          success: "Soluna search history cleared.",
                           failure: "Search history could not be cleared",
                         })
                       }
@@ -369,8 +368,7 @@ export function SettingsScreen({
                   <div className="settings-group">
                     <h3>Lyrics provider order</h3>
                     <p className="muted-copy">
-                      Enabled providers are tried in this order. Disabled providers remain after them, matching Meld’s
-                      provider registry.
+                      Enabled providers are tried in this order. Disabled providers remain after them.
                     </p>
                     <div className="lyrics-provider-order">
                       {lyricsProviderOrder.map((provider, index) => {
@@ -438,7 +436,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Varispeed</strong>
-                        <small>When enabled, playback speed follows pitch like Meld’s varispeed mode.</small>
+                        <small>When enabled, playback speed follows pitch.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -449,9 +447,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Incremental seek skip</strong>
-                        <small>
-                          Repeated double-clicks on the player artwork increase the 5-second seek step, matching Meld.
-                        </small>
+                        <small>Repeated double-clicks on the player artwork increase the 5-second seek step.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -473,7 +469,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Persistent queue</strong>
-                        <small>Restore the current Meld queue after restarting the desktop app.</small>
+                        <small>Restore the current Soluna queue after restarting the desktop app.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -484,7 +480,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Load more automatically</strong>
-                        <small>Use Meld’s queue continuation and automix loading when available.</small>
+                        <small>Use Soluna’s queue continuation and automix loading when available.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -506,7 +502,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Disable load more on Repeat all</strong>
-                        <small>Keep Repeat all from appending automix content, matching Meld’s source option.</small>
+                        <small>Keep Repeat all from appending automix content.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -517,7 +513,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Auto-download on like</strong>
-                        <small>When enabled, liking a remote song starts Meld’s native offline cache download.</small>
+                        <small>When enabled, liking a remote song starts Soluna’s native offline cache download.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -577,7 +573,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Show Liked Songs playlist</strong>
-                        <small>Show Meld’s single liked-songs playlist in My Playlists.</small>
+                        <small>Show Soluna’s single liked-songs playlist in My Playlists.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -589,7 +585,7 @@ export function SettingsScreen({
                       <span>
                         <strong>Show Cached playlist</strong>
                         <small>
-                          Show songs cached during playback. This is separate from Meld’s explicit Downloaded playlist.
+                          Show songs cached during playback. This is separate from the explicit Downloaded playlist.
                         </small>
                       </span>
                       <input
@@ -623,7 +619,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Show Top Songs playlist</strong>
-                        <small>Show the source-style most-played playlist built from Meld listening history.</small>
+                        <small>Show the most-played playlist built from Soluna listening history.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -641,7 +637,7 @@ export function SettingsScreen({
                       <span>
                         {sessionStatus.authenticated
                           ? `Connected${sessionStatus.accountEmail ? ` as ${sessionStatus.accountEmail}` : ""}. Authenticated library actions can use the saved session.`
-                          : "Connect inside Meld Desktop to sync liked songs, account playlists, and library actions."}
+                          : "Connect inside Soluna to sync liked songs, account playlists, and library actions."}
                       </span>
                       {sessionStatus.authenticated ? (
                         <button className="secondary-button" onClick={() => void logoutGoogle()}>
@@ -658,7 +654,7 @@ export function SettingsScreen({
                       <span>
                         {spotifyStatus.authenticated
                           ? `Connected${spotifyProfile?.displayName ? ` as ${spotifyProfile.displayName}` : ""}. Spotify profileAttributes validated with the live GraphQL operation.`
-                          : "Connect inside Meld Desktop; the token is validated before the session is saved."}
+                          : "Connect inside Soluna; the token is validated before the session is saved."}
                       </span>
                       {spotifyStatus.authenticated ? (
                         <button className="secondary-button" onClick={() => void logoutSpotify()}>

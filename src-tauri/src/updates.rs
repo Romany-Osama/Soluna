@@ -11,7 +11,7 @@ use tauri_plugin_updater::UpdaterExt;
 /// Marker shipped inside the portable ZIP next to the executable.
 pub const PORTABLE_MARKER: &str = "portable.marker";
 /// Releases page opened when a portable copy has an update (portable self-update is not implemented yet).
-pub const RELEASES_URL: &str = "https://github.com/Romany-Osama/Meld-Desktop/releases/latest";
+pub const RELEASES_URL: &str = "https://github.com/Romany-Osama/Soluna/releases/latest";
 /// Number of pre-update database backups kept.
 pub const KEEP_PRE_UPDATE_BACKUPS: usize = 3;
 
@@ -105,7 +105,7 @@ pub async fn app_update_check(app: AppHandle) -> crate::IpcResult<Option<UpdateS
 }
 
 /// Downloads the signed update, verifies it (the plugin rejects a bad signature), backs up the database and
-/// starts the installer, which closes and restarts Meld Desktop. Only called after the user clicks Install.
+/// starts the installer, which closes and restarts Soluna. Only called after the user clicks Install.
 #[tauri::command]
 pub async fn app_update_install(app: AppHandle) -> crate::IpcResult<()> {
     if is_portable() {
@@ -120,7 +120,7 @@ pub async fn app_update_install(app: AppHandle) -> crate::IpcResult<()> {
         .check()
         .await
         .map_err(|error| format!("update check failed: {error}"))?
-        .ok_or_else(|| "Meld Desktop is already up to date.".to_owned())?;
+        .ok_or_else(|| "Soluna is already up to date.".to_owned())?;
     let progress_app = app.clone();
     let mut downloaded = 0_u64;
     let bytes = update
@@ -178,7 +178,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("meld-updates-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("soluna-updates-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("scratch");
         dir

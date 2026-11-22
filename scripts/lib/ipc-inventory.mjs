@@ -5,11 +5,11 @@
 
 /** What a command can do if any script in the main webview calls it. Ordered from least to most sensitive. */
 export const RISK_CLASSES = {
-  "read-local": "Reads Meld's own database, settings or files.",
-  "write-local": "Changes Meld's own data; the change can be reversed.",
+  "read-local": "Reads Soluna's own database, settings or files.",
+  "write-local": "Changes Soluna's own data; the change can be reversed.",
   "remote-read": "Calls YouTube Music, Spotify or a lyrics/update server; reads only (may cache the answer).",
   "remote-write": "Changes the signed-in YouTube Music or Spotify account; the change can be reversed.",
-  "destructive-local": "Deletes or replaces Meld data (history, cache, downloads, a backup restore).",
+  "destructive-local": "Deletes or replaces Soluna data (history, cache, downloads, a backup restore).",
   "remote-destructive": "Deletes something from the signed-in YouTube Music or Spotify account.",
   system: "Reaches outside the app: file dialogs, opening a browser, installing an update, writing a backup file.",
   credentials: "Opens a login window or creates, refreshes or deletes a stored session.",
@@ -74,7 +74,7 @@ export const COMMANDS = {
   search_history_add: c("catalog", "write-local"),
   search_history_items: c("catalog", "read-local"),
   search_history_clear: c("catalog", "destructive-local"),
-  // library (Meld's library, history, stats, and the YouTube Music library)
+  // library (Soluna's library, history, stats, and the YouTube Music library)
   ytm_history: c("library", "remote-read"),
   ytm_remove_from_history: c("library", "remote-destructive"),
   ytm_delete_uploaded_song: c("library", "remote-destructive"),

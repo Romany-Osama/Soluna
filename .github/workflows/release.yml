@@ -120,20 +120,20 @@ jobs:
           set -euo pipefail
           out=release-assets; mkdir -p "$out"
           nsis=src-tauri/target/release/bundle/nsis
-          setup="$out/Meld-Desktop-$VERSION-x64-setup.exe"
-          cp "$nsis/Meld Desktop_${VERSION}_x64-setup.exe" "$setup"
-          cp "$nsis/Meld Desktop_${VERSION}_x64-setup.exe.sig" "$setup.sig"
+          setup="$out/Soluna-$VERSION-x64-setup.exe"
+          cp "$nsis/Soluna_${VERSION}_x64-setup.exe" "$setup"
+          cp "$nsis/Soluna_${VERSION}_x64-setup.exe.sig" "$setup.sig"
 
           node scripts/release-assets.mjs metadata "$out"
           node scripts/release-assets.mjs notes "$VERSION" notes.md
 
-          portable_dir="Meld-Desktop-$VERSION-x64-portable"
+          portable_dir="Soluna-$VERSION-x64-portable"
           mkdir -p "$portable_dir/icons/taskbar"
-          cp src-tauri/target/release/meld-desktop.exe "$portable_dir/Meld Desktop.exe"
+          cp src-tauri/target/release/soluna-desktop.exe "$portable_dir/Soluna.exe"
           cp src-tauri/icons/taskbar/*.ico "$portable_dir/icons/taskbar/"
           cp LICENSE NOTICE "$out/THIRD-PARTY-NOTICES.txt" "$portable_dir/"
           cp packaging/README-portable.txt "$portable_dir/"
-          printf 'This file marks a portable copy of Meld Desktop. Updates are offered as a download link.\n' > "$portable_dir/portable.marker"
+          printf 'This file marks a portable copy of Soluna. Updates are offered as a download link.\n' > "$portable_dir/portable.marker"
           portable="$out/$portable_dir.zip"
           pwsh -NoProfile -Command "Compress-Archive -Path '$portable_dir/*' -DestinationPath '$portable' -CompressionLevel Optimal"
           npx tauri signer sign "$portable"
@@ -143,7 +143,7 @@ jobs:
           {
             cat notes.md
             printf '\n---\n\n**Downloads:** `%s` (installer, recommended) or `%s` (portable; needs the Microsoft Edge WebView2 Runtime, which Windows 10/11 normally include).\n\n' "$(basename "$setup")" "$(basename "$portable")"
-            printf 'The installer and executable are **not Authenticode-signed yet**, so Windows SmartScreen may show "Windows protected your PC" — choose *More info → Run anyway*. Verify downloads against `SHA256SUMS.txt`; updates are verified with the Meld Desktop update signing key before they are installed.\n'
+            printf 'The installer and executable are **not Authenticode-signed yet**, so Windows SmartScreen may show "Windows protected your PC" — choose *More info → Run anyway*. Verify downloads against `SHA256SUMS.txt`; updates are verified with the Soluna update signing key before they are installed.\n'
           } > release-notes.md
           node scripts/release-assets.mjs sums "$out/SHA256SUMS.txt" "$out"/*
           ls -la "$out"
@@ -201,7 +201,7 @@ jobs:
         run: |
           set -euo pipefail
           tag=$(cat release-tag.txt)
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Meld Desktop ${tag#v}" --notes-file release-notes.md release-assets/*
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Soluna ${tag#v}" --notes-file release-notes.md release-assets/*
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   dry-run:

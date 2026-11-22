@@ -151,7 +151,7 @@ it("restores the last safe page after a restart (U4-006)", async () => {
   localStorage.clear();
   const first = await act(async () => render(<App />));
   await act(async () => void fireEvent.click(screen.getByTitle("Open album")));
-  expect(JSON.parse(localStorage.getItem("meld:lastRoute") ?? "null")).toEqual({
+  expect(JSON.parse(localStorage.getItem("soluna:lastRoute") ?? "null")).toEqual({
     path: "/album/MPREb_test",
     tab: "home",
   });
@@ -164,7 +164,7 @@ it("restores the last safe page after a restart (U4-006)", async () => {
     expect.objectContaining({ kind: "album", browseId: "MPREb_test", requestId: expect.any(String) }),
   );
   // Settings is never restored; the page under it is.
-  localStorage.setItem("meld:lastRoute", JSON.stringify({ path: "/settings/integrations", tab: "home" }));
+  localStorage.setItem("soluna:lastRoute", JSON.stringify({ path: "/settings/integrations", tab: "home" }));
   cleanup();
   const again = await act(async () => render(<App />));
   expect(again.container.querySelector("main")?.getAttribute("data-route")).toBe("/home");
@@ -346,7 +346,7 @@ it("asks before a permanent removal and reports the result in the notification c
   await click(screen.getByRole("button", { name: "Retry" }));
   expect(screen.queryByRole("alertdialog")).toBeNull();
   expect(invoke).toHaveBeenCalledWith("history_clear", undefined);
-  expect(screen.getByText("Meld playback history cleared.")).toBeTruthy();
+  expect(screen.getByText("Soluna playback history cleared.")).toBeTruthy();
   expect(screen.queryByRole("alert")).toBeNull();
 });
 

@@ -30,7 +30,7 @@ export type MenuAction =
   | "radio"
   | "play_next"
   | "remove_history"
-  | "meld_like"
+  | "soluna_like"
   | "add_library"
   | "remove_library"
   | "episode_save"
@@ -41,7 +41,7 @@ export type MenuContext = {
   surface: "item" | "player";
   googleSignedIn: boolean;
   spotifySignedIn: boolean;
-  /** The item is shown in a Meld-local list (library, local history, a local playlist) or is a local file. */
+  /** The item is shown in a Soluna-local list (library, local history, a local playlist) or is a local file. */
   localContext: boolean;
   /** The Library page's "Playback cache" list is open. */
   playbackCacheList: boolean;
@@ -73,7 +73,7 @@ export function itemMenuEntries(item: YtItem, context: MenuContext): MenuEntry[]
     add("advanced_playback", `Advanced playback · x${context.playbackSpeed.toFixed(2)}`);
     add("sleep_timer", "Sleep timer");
   }
-  if (!player && isTrack(item)) add("play", "Play in Meld");
+  if (!player && isTrack(item)) add("play", "Play in Soluna");
   if (item.kind === "podcast") {
     add("podcast_save", state.podcastSaved ? "Remove from library" : "Save to Podcasts", true);
     add("share", "Share", true);
@@ -128,7 +128,7 @@ export function itemMenuEntries(item: YtItem, context: MenuContext): MenuEntry[]
   if (item.kind === "song") {
     if (!player && item.historyRemoveToken) add("remove_history", "Remove from YouTube Music history");
     if (!player && context.localContext)
-      add("meld_like", state.liked ? "Remove from Meld Liked Songs" : "Add to Meld Liked Songs");
+      add("soluna_like", state.liked ? "Remove from Soluna Liked Songs" : "Add to Soluna Liked Songs");
     if (!item.localPath)
       add(
         state.inLibrary ? "remove_library" : "add_library",

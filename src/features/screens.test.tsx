@@ -30,7 +30,7 @@ describe("HomeScreen", () => {
 
   it("shows the boot screen while Home loads", () => {
     const html = renderToStaticMarkup(<HomeScreen {...props} home={{ status: "loading", data: { sections: [] } }} />);
-    expect(html).toContain("Loading Meld");
+    expect(html).toContain("Loading Soluna");
   });
 
   it("renders Home sections and their items", () => {
@@ -42,7 +42,7 @@ describe("HomeScreen", () => {
     );
     expect(html).toContain("Quick picks");
     expect(html).toContain("First song");
-    expect(html).not.toContain("Loading Meld");
+    expect(html).not.toContain("Loading Soluna");
   });
 });
 

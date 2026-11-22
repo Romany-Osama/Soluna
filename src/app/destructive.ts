@@ -6,7 +6,7 @@ import type { SetNotice } from "./notifications";
 /**
  * - `permanent`: cannot be taken back (a deleted upload, cleared history, a removed download file) → confirm first.
  * - `undoable`: has an exact reverse (unlike, unpin, remove from library) → no question, Undo in the notification.
- * - `disposable`: only throws away something Meld recreates on demand (playback cache) → neither.
+ * - `disposable`: only throws away something Soluna recreates on demand (playback cache) → neither.
  */
 export type Severity = "permanent" | "undoable" | "disposable";
 

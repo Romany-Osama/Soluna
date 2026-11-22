@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Meld Desktop",
+  "productName": "Soluna",
   "version": "../package.json",
-  "identifier": "com.romany-osama.meld-desktop",
+  "identifier": "com.romany-osama.soluna",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:1420",
@@ -12,22 +12,19 @@
   "app": {
     "windows": [
       {
-        "title": "Meld Desktop",
+        "title": "Soluna",
         "width": 1120,
         "height": 720,
         "minWidth": 860,
-        "minHeight": 600
+        "minHeight": 600,
+        "decorations": false
       }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https: asset: https://asset.localhost http://asset.localhost; media-src 'self' https://*.googlevideo.com asset: https://asset.localhost http://asset.localhost; connect-src 'self' asset: https://asset.localhost http://asset.localhost https://ipc.localhost http://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "$DATA/Meld Desktop/downloads/**",
-          "$DATA/Meld Desktop/player-cache/**",
-          "$DATA/Meld Desktop/artwork/**"
-        ]
+        "scope": ["$DATA/Soluna/downloads/**", "$DATA/Soluna/player-cache/**", "$DATA/Soluna/artwork/**"]
       }
     }
   },
@@ -57,7 +54,7 @@
     },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJDOURCMzI0MzU0MTZERTkKUldUcGJVRTFKTE9kTE5tNnRoZGp6bURzeEQ2RUE5eWM3blBXU3psdHU1UEtpcGpwQ3hGQWlkNE0K",
-      "endpoints": ["https://github.com/Romany-Osama/Meld-Desktop/releases/latest/download/latest.json"],
+      "endpoints": ["https://github.com/Romany-Osama/Soluna/releases/latest/download/latest.json"],
       "windows": {
         "installMode": "passive"
       }
@@ -81,10 +78,10 @@
       "icons/taskbar/NEXT_THUMB_DISABLED.ico"
     ],
     "publisher": "Romany-Osama",
-    "copyright": "Copyright (C) 2026 Romany-Osama and Meld contributors. GPL-3.0-only.",
+    "copyright": "Copyright (C) 2026 Romany-Osama and Soluna contributors. GPL-3.0-only.",
     "category": "Music",
     "shortDescription": "Lightweight native Windows client for YouTube Music",
-    "longDescription": "Meld Desktop is a Windows-native Tauri/Rust/React adaptation of the open-source Meld music client. It is not an official Meld release.",
+    "longDescription": "Soluna is a Windows-native Tauri/Rust/React desktop music client.",
     "license": "GPL-3.0-only",
     "licenseFile": "../LICENSE",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],

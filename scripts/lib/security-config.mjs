@@ -1,8 +1,8 @@
 // Security regression guards for tauri.conf.json and capabilities (TR-C3, S5-013, S5-037).
 export const ALLOWED_ASSET_SCOPE = [
-  "$DATA/Meld Desktop/downloads/**",
-  "$DATA/Meld Desktop/player-cache/**",
-  "$DATA/Meld Desktop/artwork/**",
+  "$DATA/Soluna/downloads/**",
+  "$DATA/Soluna/player-cache/**",
+  "$DATA/Soluna/artwork/**",
 ];
 
 export function parseCsp(csp) {
@@ -50,7 +50,7 @@ export function checkSecurityConfig(tauriConf, capabilities = []) {
   if (security.assetProtocol?.enable) {
     for (const entry of scopeList)
       if (!ALLOWED_ASSET_SCOPE.includes(entry))
-        problems.push(`asset protocol scope entry "${entry}" is broader than the Meld data folders`);
+        problems.push(`asset protocol scope entry "${entry}" is broader than the Soluna data folders`);
   }
   for (const capability of capabilities) {
     if (capability.remote) problems.push(`capability "${capability.identifier}" grants IPC to remote URLs`);

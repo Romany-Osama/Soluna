@@ -185,7 +185,7 @@ export const DESTRUCTIVE_MENU_ACTIONS = [
   "cache_remove",
   "delete_uploaded",
   "remove_history",
-  "meld_like",
+  "soluna_like",
   "remove_from_playlist",
   'pin" || action === "unpin',
   'add_library" || action === "remove_library',

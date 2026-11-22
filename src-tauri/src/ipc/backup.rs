@@ -6,8 +6,8 @@ use crate::*;
 #[tauri::command]
 pub fn backup_create(state: tauri::State<'_, RuntimeState>) -> IpcResult<String> {
     let output_path = FileDialog::new()
-        .set_title("Create Meld Desktop backup")
-        .add_filter("Meld Desktop backup", &["backup"])
+        .set_title("Create Soluna backup")
+        .add_filter("Soluna backup", &["backup"])
         .save_file()
         .ok_or_else(|| IpcError::cancelled("Backup cancelled"))?;
     let temp_db = output_path.with_extension("sqlite3.part");
@@ -78,8 +78,8 @@ pub fn backup_create(state: tauri::State<'_, RuntimeState>) -> IpcResult<String>
 #[tauri::command]
 pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String> {
     let input_path = FileDialog::new()
-        .set_title("Restore Meld Desktop backup")
-        .add_filter("Meld Desktop backup", &["backup"])
+        .set_title("Restore Soluna backup")
+        .add_filter("Soluna backup", &["backup"])
         .pick_file()
         .ok_or_else(|| IpcError::cancelled("Restore cancelled"))?;
     let file =
@@ -141,7 +141,7 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
     if required_tables != 4 {
         let _ = fs::remove_file(&temp_db);
         return Err(IpcError::from(
-            "backup database is missing required Meld tables".to_owned(),
+            "backup database is missing required Soluna tables".to_owned(),
         ));
     }
     candidate

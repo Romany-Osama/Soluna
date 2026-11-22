@@ -17,8 +17,8 @@ export function LogoutDialog({ confirmGoogleLogout, setLogoutDialogOpen }: Logou
         <p className="eyebrow">Google / YouTube Music</p>
         <h2>Disconnect account?</h2>
         <p className="muted-copy">
-          Choose whether to keep your Meld library. Offline downloaded files are kept when local library data is
-          cleared, matching Meld’s logout choices.
+          Choose whether to keep your Soluna library. Offline downloaded files are kept when local library data is
+          cleared.
         </p>
         <div className="dialog-actions">
           <button className="secondary-button" onClick={() => void confirmGoogleLogout(true)}>

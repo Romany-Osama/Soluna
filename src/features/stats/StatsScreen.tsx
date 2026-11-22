@@ -31,7 +31,7 @@ export function StatsScreen({
           <div className="search-intro">
             <p className="eyebrow">Listening statistics</p>
             <h2>Stats</h2>
-            <p>Most-played songs and listening time from Meld playback history on this device.</p>
+            <p>Most-played songs and listening time from Soluna playback history on this device.</p>
             <div className="history-tabs" role="tablist" aria-label="Stats period">
               {(["all", "day", "week", "month", "year"] as const).map((period) => (
                 <button
@@ -167,7 +167,7 @@ export function StatsScreen({
                             className="row-action"
                             onClick={() => void openItem(row.item, statsQueueItems, index)}
                           >
-                            Play in Meld
+                            Play in Soluna
                           </button>
                           <button
                             className="row-action menu-trigger"

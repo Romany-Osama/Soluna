@@ -2504,7 +2504,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "meld-desktop"
+name = "soluna-desktop"
 version = "0.3.0"
 dependencies = [
  "aes-gcm",

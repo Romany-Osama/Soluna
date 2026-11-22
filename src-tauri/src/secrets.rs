@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::Mutex;
 
 const PREFIX: &str = "enc1:";
-const SERVICE: &str = "Meld Desktop";
+const SERVICE: &str = "Soluna";
 const KEY_USER: &str = "session-encryption-key";
 const NONCE_LEN: usize = 12;
 
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn migration_encrypts_every_plaintext_secret_and_leaves_no_plaintext_in_the_file() {
         let path = std::env::temp_dir().join(format!(
-            "meld-secret-migration-{}-{}.db",
+            "soluna-secret-migration-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

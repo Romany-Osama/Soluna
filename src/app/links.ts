@@ -69,8 +69,8 @@ function parseSpotify(url: URL): LinkTarget | null {
   return parts.length === 2 ? spotifyTarget(parts[0], parts[1]) : null;
 }
 
-/** `meld://album/MPREb_x`, `meld:/search?q=x`, `meld://song/<videoId>`. */
-function parseMeld(rest: string): LinkTarget | null {
+/** `soluna://album/MPREb_x`, `soluna:/search?q=x`, `soluna://song/<videoId>` (and legacy `meld:`). */
+function parseSoluna(rest: string): LinkTarget | null {
   const path = "/" + rest.replace(/^\/+/, "");
   const song = path.match(/^\/song\/([^/?#]+)$/);
   if (song) return video(song[1]);
@@ -78,12 +78,12 @@ function parseMeld(rest: string): LinkTarget | null {
   return parsed ? { kind: "route", route: parsed } : null;
 }
 
-/** Parses a pasted or opened link; returns null for plain text and for anything Meld does not open. */
+/** Parses a pasted or opened link; returns null for plain text and for anything Soluna does not open. */
 export function parseLink(input: string): LinkTarget | null {
   const text = input.trim();
   if (!text || text.length > 2000 || /\s/.test(text)) return null;
-  const meld = text.match(/^meld:(.*)$/i);
-  if (meld) return parseMeld(meld[1]);
+  const soluna = text.match(/^(?:soluna|meld):(.*)$/i);
+  if (soluna) return parseSoluna(soluna[1]);
   const spotifyUri = text.match(/^spotify:(track|album|artist|playlist):([A-Za-z0-9]+)$/i);
   if (spotifyUri) return spotifyTarget(spotifyUri[1].toLowerCase(), spotifyUri[2]);
   if (text.startsWith("/")) {

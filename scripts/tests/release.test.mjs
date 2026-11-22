@@ -63,7 +63,7 @@ test("SBOM and notices list every package with an SPDX license", () => {
   assert.equal(spdx("MIT/Apache-2.0"), "MIT OR Apache-2.0");
   assert.equal(spdx(undefined), "NOASSERTION");
   const sbom = cycloneDx({
-    appName: "Meld Desktop",
+    appName: "Soluna",
     appVersion: "0.2.0",
     crates: [{ name: "serde", version: "1.0.0", license: "MIT OR Apache-2.0" }],
     npmPackages: [{ name: "@tauri-apps/api", version: "2.12.1", license: "Apache-2.0 OR MIT" }],
@@ -75,7 +75,7 @@ test("SBOM and notices list every package with an SPDX license", () => {
     ["pkg:cargo/serde@1.0.0", "pkg:npm/%40tauri-apps/api@2.12.1"],
   );
   const notices = thirdPartyNotices({
-    appName: "Meld Desktop",
+    appName: "Soluna",
     packages: [
       { ecosystem: "cargo", name: "zz", version: "1", license: "MIT", licenseTexts: ["--- LICENSE ---\nMIT text"] },
       { ecosystem: "cargo", name: "aa", version: "2", license: "Apache-2.0" },

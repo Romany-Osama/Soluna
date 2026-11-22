@@ -1,4 +1,4 @@
-//! IPC commands: Meld's library, playlists, history, stats, Speed Dial and the YouTube Music library (S5-003; owner `library` in docs/ipc-commands.md)
+//! IPC commands: Soluna's library, playlists, history, stats, Speed Dial and the YouTube Music library (S5-003; owner `library` in docs/ipc-commands.md)
 #![allow(unused_imports)]
 
 use crate::*;
@@ -292,7 +292,7 @@ pub fn library_edit_item(
     let updated = tx.execute("UPDATE songs SET title = ?1, subtitle = CASE WHEN ?2 <> '' THEN ?2 ELSE subtitle END WHERE id = ?3", params![title, artist.trim(), id]).map_err(|error| format!("song edit failed: {error}"))?;
     if updated == 0 {
         return Err(IpcError::from(
-            "song edit target was not found in the local Meld database".to_owned(),
+            "song edit target was not found in the local Soluna database".to_owned(),
         ));
     }
     if !artist.trim().is_empty() {
@@ -333,9 +333,9 @@ pub fn library_toggle_liked(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, CASE WHEN ?13 = 1 THEN ?10 ELSE NULL END, 0, ?14)
          ON CONFLICT(id) DO UPDATE SET title=excluded.title, subtitle=excluded.subtitle, thumbnail=excluded.thumbnail, browse_id=excluded.browse_id, playlist_id=excluded.playlist_id, video_id=excluded.video_id, set_video_id=excluded.set_video_id, kind=excluded.kind, explicit=excluded.explicit, music_video_type=excluded.music_video_type, liked=excluded.liked, liked_date=excluded.liked_date, is_video=excluded.is_video",
         params![item.id, item.title, item.subtitle, item.thumbnail, item.browse_id, item.playlist_id, item.video_id, item.set_video_id, item.kind, now, if item.explicit { 1 } else { 0 }, item.music_video_type, if liked { 1 } else { 0 }, if item.music_video_type.as_deref().is_some_and(|value| value != "MUSIC_VIDEO_TYPE_ATV") { 1 } else { 0 }],
-    ).map_err(|e| format!("Meld liked state save failed: {e}"))?;
+    ).map_err(|e| format!("Soluna liked state save failed: {e}"))?;
     if !liked {
-        db.execute("DELETE FROM songs WHERE id = ?1 AND liked = 0 AND in_library = 0 AND NOT EXISTS (SELECT 1 FROM playlist_songs WHERE playlist_songs.song_id = songs.id) AND NOT EXISTS (SELECT 1 FROM downloads WHERE downloads.song_id = songs.id)", params![item.id]).map_err(|e| format!("Meld liked cleanup failed: {e}"))?;
+        db.execute("DELETE FROM songs WHERE id = ?1 AND liked = 0 AND in_library = 0 AND NOT EXISTS (SELECT 1 FROM playlist_songs WHERE playlist_songs.song_id = songs.id) AND NOT EXISTS (SELECT 1 FROM downloads WHERE downloads.song_id = songs.id)", params![item.id]).map_err(|e| format!("Soluna liked cleanup failed: {e}"))?;
     }
     Ok(())
 }
@@ -722,7 +722,7 @@ pub fn local_files_pick(
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<Vec<LocalItem>> {
     let paths = FileDialog::new()
-        .set_title("Import audio files into Meld Desktop")
+        .set_title("Import audio files into Soluna")
         .add_filter(
             "Audio",
             &[
@@ -747,7 +747,7 @@ pub fn local_files_pick(
         if !path.is_file() {
             continue;
         }
-        // The asset protocol scope defaults to Meld's own app-data folders only (see tauri.conf.json); an
+        // The asset protocol scope defaults to Soluna's own app-data folders only (see tauri.conf.json); an
         // imported file can be anywhere on disk (any drive), so it needs an individual grant to be playable.
         let _ = app.asset_protocol_scope().allow_file(&path);
         let Some(item) = local_item_from_path(&path, &artwork_dir) else {

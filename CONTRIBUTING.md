@@ -1,6 +1,6 @@
-# Contributing to Meld Desktop
+# Contributing to Soluna
 
-Thanks for helping. Meld Desktop is a Windows port (Tauri 2, Rust, React, SQLite) of [Meld](https://github.com/FrancescoGrazioso/Meld) and is licensed **GPL-3.0-only**. By contributing you agree that your contribution is licensed under the same terms.
+Thanks for helping. Soluna is a Windows port (Tauri 2, Rust, React, SQLite) of [Meld](https://github.com/FrancescoGrazioso/Meld) and is licensed **GPL-3.0-only**. By contributing you agree that your contribution is licensed under the same terms.
 
 ## Ground rules
 

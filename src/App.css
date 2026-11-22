@@ -120,11 +120,12 @@ input:focus-visible {
   display: grid;
   place-items: center;
   border-radius: 10px;
-  background: #9da7e9;
-  color: #16182a;
+  background: #121526;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #bac2ff;
   font-size: 20px;
   font-weight: 800;
-  box-shadow: 0 7px 24px rgba(157, 167, 233, 0.28);
+  box-shadow: 0 4px 18px rgba(0, 210, 255, 0.18);
 }
 .brand strong {
   display: block;
@@ -220,6 +221,45 @@ input:focus-visible {
   border-bottom: 1px solid rgba(255, 255, 255, 0.055);
   overflow: visible;
   background: #0e1018;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+.topbar [data-tauri-drag-region="false"],
+.topbar button,
+.topbar input,
+.topbar form,
+.topbar a {
+  -webkit-app-region: no-drag;
+}
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+.window-control-button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #32374e;
+  background: transparent;
+  color: #a4accd;
+  font-size: 13px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.window-control-button:hover {
+  background: #252a3d;
+  color: #ffffff;
+  border-color: #4b5375;
+}
+.window-control-button.close:hover {
+  background: #dc2626;
+  border-color: #ef4444;
+  color: #ffffff;
 }
 .eyebrow {
   margin: 0 0 5px;
@@ -2742,17 +2782,17 @@ h2 {
   }
 }
 
-/* Rebuilt desktop layer geometry: preserve the Meld palette while isolating scroll containers. */
+/* Rebuilt desktop layer geometry: preserve the palette while isolating scroll containers. */
 :root {
-  --meld-topbar-height: 104px;
-  --meld-layer-gutter: clamp(12px, 2.2vw, 28px);
+  --soluna-topbar-height: 104px;
+  --soluna-layer-gutter: clamp(12px, 2.2vw, 28px);
 }
 .detail-overlay {
   position: fixed;
-  inset: var(--meld-topbar-height) 0 0;
+  inset: var(--soluna-topbar-height) 0 0;
   display: grid;
   place-items: center;
-  padding: var(--meld-layer-gutter);
+  padding: var(--soluna-layer-gutter);
   overflow: hidden;
   z-index: 80;
 }
@@ -2760,10 +2800,10 @@ h2 {
 .menu-panel,
 .queue-panel,
 .full-player-panel {
-  max-height: calc(100dvh - var(--meld-topbar-height) - (2 * var(--meld-layer-gutter)));
+  max-height: calc(100dvh - var(--soluna-topbar-height) - (2 * var(--soluna-layer-gutter)));
 }
 .detail-panel {
-  width: min(860px, calc(100vw - (2 * var(--meld-layer-gutter))));
+  width: min(860px, calc(100vw - (2 * var(--soluna-layer-gutter))));
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -2786,8 +2826,8 @@ h2 {
   justify-items: end;
 }
 .queue-panel {
-  width: min(430px, calc(100vw - (2 * var(--meld-layer-gutter))));
-  max-height: calc(100dvh - var(--meld-topbar-height) - (2 * var(--meld-layer-gutter)));
+  width: min(430px, calc(100vw - (2 * var(--soluna-layer-gutter))));
+  max-height: calc(100dvh - var(--soluna-topbar-height) - (2 * var(--soluna-layer-gutter)));
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -2797,13 +2837,13 @@ h2 {
   place-items: center;
 }
 .full-player-panel {
-  width: min(1180px, calc(100vw - (2 * var(--meld-layer-gutter))));
-  height: min(780px, calc(100dvh - var(--meld-topbar-height) - (2 * var(--meld-layer-gutter))));
+  width: min(1180px, calc(100vw - (2 * var(--soluna-layer-gutter))));
+  height: min(780px, calc(100dvh - var(--soluna-topbar-height) - (2 * var(--soluna-layer-gutter))));
   min-height: 0;
 }
 @media (max-width: 860px) {
   :root {
-    --meld-topbar-height: 128px;
+    --soluna-topbar-height: 128px;
   }
   .detail-overlay {
     padding: 12px;
@@ -2812,14 +2852,14 @@ h2 {
   .menu-panel,
   .queue-panel,
   .full-player-panel {
-    max-height: calc(100dvh - var(--meld-topbar-height) - 24px);
+    max-height: calc(100dvh - var(--soluna-topbar-height) - 24px);
   }
   .detail-panel {
     width: min(100%, 720px);
   }
   .full-player-panel {
     width: min(100%, 620px);
-    height: min(100%, calc(100dvh - var(--meld-topbar-height) - 24px));
+    height: min(100%, calc(100dvh - var(--soluna-topbar-height) - 24px));
     overflow-y: auto;
   }
 }

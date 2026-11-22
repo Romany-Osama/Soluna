@@ -102,7 +102,7 @@ pub async fn open_google_login(app: tauri::AppHandle) -> IpcResult<()> {
                     }
                 }
                 handled_for_task.store(false, Ordering::Release);
-                events::emit_error(&app_handle, events::AppEvent::AccountStatusError, "Google login timed out before Meld received the authenticated session".to_owned());
+                events::emit_error(&app_handle, events::AppEvent::AccountStatusError, "Google login timed out before Soluna received the authenticated session".to_owned());
             });
         })
         .build()
@@ -206,7 +206,7 @@ pub async fn open_spotify_login(app: tauri::AppHandle) -> IpcResult<()> {
             events::emit_error(
                 &app_handle,
                 events::AppEvent::SpotifyStatusError,
-                "Spotify login timed out before Meld received the authenticated session".to_owned(),
+                "Spotify login timed out before Soluna received the authenticated session".to_owned(),
             );
         });
     })

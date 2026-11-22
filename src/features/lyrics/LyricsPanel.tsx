@@ -52,7 +52,7 @@ export function LyricsPanel({
             {lyrics.status === "loading" && (
               <div className="state-panel">
                 <div className="spinner" />
-                <p>Loading lyrics from Meld providers…</p>
+                <p>Loading lyrics from Soluna providers…</p>
               </div>
             )}
             {lyrics.status === "error" && (

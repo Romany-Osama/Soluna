@@ -141,7 +141,7 @@ payload!(
     YtId, "YouTube Music id", Rule::Charset { min: 1, max: 256, allowed: yt_char }, trim = true
 );
 payload!(
-    /// Ids of rows in the local Meld library (songs, playlists, artists, downloads).
+    /// Ids of rows in the local Soluna library (songs, playlists, artists, downloads).
     LibraryId, "library id", Rule::Charset { min: 1, max: 256, allowed: library_char }, trim = true
 );
 payload!(

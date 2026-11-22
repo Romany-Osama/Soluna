@@ -50,8 +50,8 @@ export function useNotice(now: () => number = Date.now) {
       key: "update-available",
       persistent: true,
       message: update.portable
-        ? `Meld Desktop ${update.version} is available. Settings → About has the download page.`
-        : `Meld Desktop ${update.version} is available. Install it from Settings → About.`,
+        ? `Soluna ${update.version} is available. Settings → About has the download page.`
+        : `Soluna ${update.version} is available. Install it from Settings → About.`,
     }),
   );
 

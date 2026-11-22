@@ -4,6 +4,8 @@ import { invokeCancellable } from "./lib/cancellable";
 import { isIpcErrorCode } from "./lib/ipcError";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import "./App.css";
+import { SolunaLogo } from "./components/SolunaLogo";
+import { WindowControls } from "./components/WindowControls";
 import { parseAudioQuality, streamRequest } from "./lib/audioQuality";
 import { appendNewPlayable, removeAt } from "./lib/queue";
 import { playbackEffectKey, resumeStartPosition, shouldAutoplay, startOccurrence } from "./lib/playbackSession";
@@ -764,7 +766,7 @@ function App() {
     setNotice(
       playNext
         ? `Queued ${selectedItems.length} selected item${selectedItems.length === 1 ? "" : "s"} to play next.`
-        : `Added ${selectedItems.length} selected item${selectedItems.length === 1 ? "" : "s"} to the Meld queue.`,
+        : `Added ${selectedItems.length} selected item${selectedItems.length === 1 ? "" : "s"} to the Soluna queue.`,
     );
     closeSelection();
   };
@@ -788,8 +790,8 @@ function App() {
       const preposition = allLiked ? "from" : "to";
       setNotice(
         syncFailures > 0
-          ? `${verb} selected items ${preposition} Meld Liked Songs; Google sync failed for ${syncFailures} item${syncFailures === 1 ? "" : "s"}.`
-          : `${verb} selected items ${preposition} Meld Liked Songs.`,
+          ? `${verb} selected items ${preposition} Soluna Liked Songs; Google sync failed for ${syncFailures} item${syncFailures === 1 ? "" : "s"}.`
+          : `${verb} selected items ${preposition} Soluna Liked Songs.`,
         "warning",
       );
       if (active === "library" && libraryMode === "liked") void loadLibrary("liked");
@@ -1046,7 +1048,7 @@ function App() {
       if (navigator.share) await navigator.share({ title: item.title, text: item.title, url });
       else {
         await navigator.clipboard.writeText(url);
-        setNotice("Meld link copied to clipboard.");
+        setNotice("Soluna link copied to clipboard.");
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
@@ -1061,7 +1063,7 @@ function App() {
     }
     try {
       await navigator.clipboard.writeText(`https://music.youtube.com/watch?v=${encodeURIComponent(item.videoId)}`);
-      setNotice("Meld link copied to clipboard.");
+      setNotice("Soluna link copied to clipboard.");
     } catch (error) {
       setNotice(`Copy link unavailable: ${errorMessage(error)}`, "error");
     }
@@ -1086,14 +1088,14 @@ function App() {
       if (active === "library" && libraryMode === "liked") void loadLibrary("liked");
       setNotice(
         !synced
-          ? "Meld Liked Songs was updated locally; Google sync could not be completed."
+          ? "Soluna Liked Songs was updated locally; Google sync could not be completed."
           : !current.liked
-            ? `Added “${player.item.title}” to Meld Liked Songs.`
-            : `Removed “${player.item.title}” from Meld Liked Songs.`,
+            ? `Added “${player.item.title}” to Soluna Liked Songs.`
+            : `Removed “${player.item.title}” from Soluna Liked Songs.`,
         "warning",
       );
     } catch (error) {
-      setNotice(`Meld Liked Songs update failed: ${errorMessage(error)}`, "error");
+      setNotice(`Soluna Liked Songs update failed: ${errorMessage(error)}`, "error");
     }
   };
 
@@ -1247,7 +1249,7 @@ function App() {
       try {
         const refreshed = await invoke<YtItem | null>("library_refetch_item", { id: item.videoId });
         if (!refreshed) {
-          setNotice(`Meld could not refetch metadata for “${item.title}”.`, "warning");
+          setNotice(`Soluna could not refetch metadata for “${item.title}”.`, "warning");
           return;
         }
         setPlayer((current) =>
@@ -1432,13 +1434,13 @@ function App() {
       });
       return;
     }
-    if (action === "meld_like") {
+    if (action === "soluna_like") {
       const nextLiked = !menuState.liked;
       const setLiked = async (liked: boolean) => {
         await invoke("library_toggle_liked", { item, liked });
         maybeAutoDownloadOnLike(item, liked);
         if (!(await syncLikeToYoutube(item, liked)))
-          setNotice("Meld Liked Songs was updated locally; Google sync could not be completed.", "warning");
+          setNotice("Soluna Liked Songs was updated locally; Google sync could not be completed.", "warning");
       };
       const refresh = () => {
         if (active === "library" && libraryMode === "liked") void loadLibrary("liked");
@@ -1448,16 +1450,16 @@ function App() {
           setMenuState((current) => ({ ...current, liked: true }));
           await setLiked(true);
           refresh();
-          setNotice(`Added “${item.title}” to Meld Liked Songs.`, "success");
+          setNotice(`Added “${item.title}” to Soluna Liked Songs.`, "success");
         } catch (error) {
           setMenuState((current) => ({ ...current, liked: false }));
-          setNotice(`Meld Liked Songs update failed: ${errorMessage(error)}`, "error");
+          setNotice(`Soluna Liked Songs update failed: ${errorMessage(error)}`, "error");
         }
         return;
       }
       await destructive({
         severity: "undoable",
-        key: `meld-like:${item.id}`,
+        key: `soluna-like:${item.id}`,
         optimistic: () => {
           setMenuState((current) => ({ ...current, liked: false }));
           return () => setMenuState((current) => ({ ...current, liked: true }));
@@ -1465,9 +1467,9 @@ function App() {
         commit: () => setLiked(false),
         undo: () => setLiked(true),
         refresh,
-        success: `Removed “${item.title}” from Meld Liked Songs.`,
-        undone: `“${item.title}” is back in Meld Liked Songs.`,
-        failure: "Meld Liked Songs update failed",
+        success: `Removed “${item.title}” from Soluna Liked Songs.`,
+        undone: `“${item.title}” is back in Soluna Liked Songs.`,
+        failure: "Soluna Liked Songs update failed",
       });
       return;
     }
@@ -1652,7 +1654,7 @@ function App() {
       const next = [...withoutItem, item];
       return shuffleQueueAfterCurrent(next, currentId);
     });
-    setNotice(`Added “${item.title}” to the Meld queue.`, "success");
+    setNotice(`Added “${item.title}” to the Soluna queue.`, "success");
   };
 
   const clearQueue = () => {
@@ -1734,7 +1736,7 @@ function App() {
       return;
     }
     if (!item.videoId) {
-      setNotice("This typed item has no watchEndpoint videoId, so Meld cannot send it to the player.", "warning");
+      setNotice("This typed item has no watchEndpoint videoId, so Soluna cannot send it to the player.", "warning");
       return;
     }
     setNotice("");
@@ -1863,31 +1865,32 @@ function App() {
       persistentQueueSkipWriteRef.current = false;
       persistentSessionLoadedRef.current = false;
       persistentSessionSkipWriteRef.current = false;
-      localStorage.removeItem("meld:persistentQueue");
-      localStorage.removeItem("meld:persistentPlayback");
+      [
+        "soluna:persistentQueue",
+        "soluna:persistentPlayback",
+        "meld:persistentQueue",
+        "meld:persistentPlayback",
+      ].forEach((k) => localStorage.removeItem(k));
       return;
     }
     if (persistentQueueLoadedRef.current) return;
     persistentQueueLoadedRef.current = true;
-    // The write effect runs in the same commit as this hydration effect. Skip that
-    // first write so the initial in-memory queue cannot overwrite stored entries.
     persistentQueueSkipWriteRef.current = true;
     persistentSessionLoadedRef.current = true;
     persistentSessionSkipWriteRef.current = true;
     try {
-      const queue = restoreQueue<YtItem>(JSON.parse(localStorage.getItem("meld:persistentQueue") ?? "null"));
+      const qRaw = localStorage.getItem("soluna:persistentQueue") ?? localStorage.getItem("meld:persistentQueue");
+      const queue = restoreQueue<YtItem>(JSON.parse(qRaw ?? "null"));
       const items = queue?.items ?? [];
       if (queue) {
         setQueueItems(queue.items);
         setQueueIndex(queue.index);
         setQueueContinuation(queue.continuation);
         setQueueContinuationKind(queue.continuationKind);
-        setNotice(`Restored ${items.length} item${items.length === 1 ? "" : "s"} in the Meld queue.`, "success");
+        setNotice(`Restored ${items.length} item${items.length === 1 ? "" : "s"} in the Soluna queue.`, "success");
       }
-      const session = restoreSession<YtItem>(
-        JSON.parse(localStorage.getItem("meld:persistentPlayback") ?? "null"),
-        items,
-      );
+      const sRaw = localStorage.getItem("soluna:persistentPlayback") ?? localStorage.getItem("meld:persistentPlayback");
+      const session = restoreSession<YtItem>(JSON.parse(sRaw ?? "null"), items);
       if (session) {
         setQueueItems(session.items);
         setQueueIndex(session.index);
@@ -1899,6 +1902,7 @@ function App() {
         void playItem(session.item, session.items, session.index, session.continuation, false, session.kind);
       }
     } catch {
+      localStorage.removeItem("soluna:persistentQueue");
       localStorage.removeItem("meld:persistentQueue");
     }
   }, [
@@ -1912,15 +1916,19 @@ function App() {
 
   useEffect(() => {
     if (settings.persistentQueue !== true) {
-      localStorage.removeItem("meld:persistentQueue");
-      localStorage.removeItem("meld:persistentPlayback");
+      [
+        "soluna:persistentQueue",
+        "soluna:persistentPlayback",
+        "meld:persistentQueue",
+        "meld:persistentPlayback",
+      ].forEach((k) => localStorage.removeItem(k));
       return;
     }
     if (persistentQueueSkipWriteRef.current) persistentQueueSkipWriteRef.current = false;
     else {
       try {
         localStorage.setItem(
-          "meld:persistentQueue",
+          "soluna:persistentQueue",
           JSON.stringify({
             items: queueItems,
             index: queueIndex,
@@ -1940,7 +1948,7 @@ function App() {
     try {
       const sessionItem = player?.item ?? (queueIndex >= 0 ? queueItems[queueIndex] : null);
       localStorage.setItem(
-        "meld:persistentPlayback",
+        "soluna:persistentPlayback",
         JSON.stringify({
           items: queueItems,
           index: queueIndex,
@@ -1994,7 +2002,7 @@ function App() {
     mediaSession.metadata = new MediaMetadata({
       title: player.payload.title || player.item.title,
       artist: player.payload.artist || player.item.subtitle,
-      album: player.item.albumTitle || "Meld Desktop",
+      album: player.item.albumTitle || "Soluna Desktop",
     });
     setHandler("play", () => {
       if (audioRef.current)
@@ -2132,7 +2140,7 @@ function App() {
     }
     const item = items[index];
     if (!item) {
-      setNotice("Meld reached the end of the available queue.");
+      setNotice("Soluna reached the end of the available queue.");
       return;
     }
     await playItem(item, items, index, continuation, autoMixEnabledRef.current, continuationKind);
@@ -2245,7 +2253,7 @@ function App() {
       return;
     }
     setNotice(
-      `Meld could not open this ${item.kind}: the live item did not include a supported navigation endpoint.`,
+      `Soluna could not open this ${item.kind}: the live item did not include a supported navigation endpoint.`,
       "warning",
     );
   };
@@ -2459,7 +2467,8 @@ function App() {
   // U4-006: show the last safe page again after a restart, and remember the page being shown.
   const lastRouteRestoredRef = useRef(false);
   const restoreLastRoute = useEffectEvent(() => {
-    const saved = parseLastRoute(localStorage.getItem(LAST_ROUTE_KEY));
+    const saved =
+      parseLastRoute(localStorage.getItem(LAST_ROUTE_KEY)) ?? parseLastRoute(localStorage.getItem("meld:lastRoute"));
     if (saved) void showRoute(saved.route, saved.tab);
   });
   useEffect(() => restoreLastRoute(), []);
@@ -2471,7 +2480,10 @@ function App() {
       return;
     }
     if (lastRouteValue) localStorage.setItem(LAST_ROUTE_KEY, lastRouteValue);
-    else localStorage.removeItem(LAST_ROUTE_KEY);
+    else {
+      localStorage.removeItem(LAST_ROUTE_KEY);
+      localStorage.removeItem("meld:lastRoute");
+    }
   }, [lastRouteValue]);
 
   const restorePendingScroll = useEffectEvent(() => {
@@ -2501,10 +2513,12 @@ function App() {
     <div className={settings.sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">M</div>
+          <div className="brand-mark" title="Soluna">
+            <SolunaLogo size={22} />
+          </div>
           {!settings.sidebarCollapsed && (
             <div>
-              <strong>Meld</strong>
+              <strong>Soluna</strong>
               <span>Desktop</span>
             </div>
           )}
@@ -2556,13 +2570,18 @@ function App() {
       </aside>
 
       <main className="main-area" data-route={routePath(currentRoute)}>
-        <header className="topbar">
+        <header className="topbar" data-tauri-drag-region>
           <div className="topbar-title">
             <div>
-              <p className="eyebrow">Meld Desktop</p>
+              <p className="eyebrow">Soluna Desktop</p>
               <h1>{visibleTitle}</h1>
             </div>
-            <div className="nav-history-controls" role="group" aria-label="Navigation history">
+            <div
+              className="nav-history-controls"
+              role="group"
+              aria-label="Navigation history"
+              data-tauri-drag-region="false"
+            >
               <button
                 className="topbar-button icon-button"
                 onClick={goBack}
@@ -2583,7 +2602,7 @@ function App() {
               </button>
             </div>
           </div>
-          <div ref={searchBoxRef} className="search-box">
+          <div ref={searchBoxRef} className="search-box" data-tauri-drag-region="false">
             <form
               className="search-form"
               onSubmit={(event) => {
@@ -2617,7 +2636,7 @@ function App() {
                 </div>
               )}
           </div>
-          <div className="topbar-actions">
+          <div className="topbar-actions" data-tauri-drag-region="false">
             <button
               className="topbar-button"
               onClick={() => {
@@ -2653,6 +2672,7 @@ function App() {
                   : "Guest"}
               </span>
             </div>
+            <WindowControls />
           </div>
         </header>
 
