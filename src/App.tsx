@@ -11,7 +11,7 @@ import { WindowControls } from "./components/WindowControls";
 import { parseAudioQuality, streamRequest } from "./lib/audioQuality";
 import { appendNewPlayable, removeAt } from "./lib/queue";
 import { playbackEffectKey, resumeStartPosition, shouldAutoplay, startOccurrence } from "./lib/playbackSession";
-import { restoreQueue, restoreSession } from "./lib/persistentPlayback";
+import { clearPersistedPlayback, restoreQueue, restoreSession } from "./lib/persistentPlayback";
 import { errorMessage, shuffled } from "./lib/util";
 import { mediaSrc } from "./lib/media";
 import {
@@ -1874,12 +1874,7 @@ function App() {
       persistentQueueSkipWriteRef.current = false;
       persistentSessionLoadedRef.current = false;
       persistentSessionSkipWriteRef.current = false;
-      [
-        "soluna:persistentQueue",
-        "soluna:persistentPlayback",
-        "meld:persistentQueue",
-        "meld:persistentPlayback",
-      ].forEach((k) => localStorage.removeItem(k));
+      clearPersistedPlayback();
       return;
     }
     if (persistentQueueLoadedRef.current) return;
@@ -1928,12 +1923,7 @@ function App() {
 
   useEffect(() => {
     if (settings.persistentQueue !== true) {
-      [
-        "soluna:persistentQueue",
-        "soluna:persistentPlayback",
-        "meld:persistentQueue",
-        "meld:persistentPlayback",
-      ].forEach((k) => localStorage.removeItem(k));
+      clearPersistedPlayback();
       return;
     }
     if (persistentQueueSkipWriteRef.current) persistentQueueSkipWriteRef.current = false;
