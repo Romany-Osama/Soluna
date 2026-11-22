@@ -209,7 +209,8 @@ mod tests {
     }
 
     fn part(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("soluna-download-resume-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("soluna-download-resume-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{name}.audio.part"));
         let _ = std::fs::remove_file(&path);

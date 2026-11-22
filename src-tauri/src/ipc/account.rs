@@ -206,7 +206,8 @@ pub async fn open_spotify_login(app: tauri::AppHandle) -> IpcResult<()> {
             events::emit_error(
                 &app_handle,
                 events::AppEvent::SpotifyStatusError,
-                "Spotify login timed out before Soluna received the authenticated session".to_owned(),
+                "Spotify login timed out before Soluna received the authenticated session"
+                    .to_owned(),
             );
         });
     })

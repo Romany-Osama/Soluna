@@ -345,8 +345,7 @@ mod tests {
 
     #[test]
     fn filesystem_paths_are_removed() {
-        let windows =
-            sanitize(r"could not open C:\Users\romany\AppData\Roaming\Soluna\song.db");
+        let windows = sanitize(r"could not open C:\Users\romany\AppData\Roaming\Soluna\song.db");
         assert!(!windows.contains("romany"), "{windows}");
         assert!(windows.contains("<path>"));
         let unix = sanitize("could not open /home/user/.local/share/song.db now");
@@ -393,7 +392,10 @@ mod tests {
                 "audioQuality must be auto, high, or low",
                 ErrorCode::InvalidArgument,
             ),
-            ("unsupported Soluna setting: foo", ErrorCode::InvalidArgument),
+            (
+                "unsupported Soluna setting: foo",
+                ErrorCode::InvalidArgument,
+            ),
             (
                 "song edit target was not found in the local Soluna database",
                 ErrorCode::NotFound,
