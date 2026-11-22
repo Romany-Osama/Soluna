@@ -31,6 +31,7 @@ npm run check:versions
 npm run check:security
 npm run check:ui
 npm run check:tooling
+npm run check:ipc-bindings
 npm run lint            # ESLint (flat config); no new warnings allowed
 npm run format:check    # Prettier; fix with `npm run format`
 npm run test:scripts

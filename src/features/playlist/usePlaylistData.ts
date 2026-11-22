@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeApp as invoke } from "../../ipc/bindings";
 import { invokeCancellable } from "../../lib/cancellable";
 import type { PlaylistPage, YtItem } from "../../types";
 import type { ResourceCache } from "../../data/resourceCache";

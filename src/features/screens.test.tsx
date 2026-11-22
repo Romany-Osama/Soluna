@@ -64,6 +64,7 @@ describe("QueuePanel", () => {
         mimeType: "audio/webm",
         bitrate: 0,
         expiresInSeconds: 0,
+        duration: 0,
       },
       session: 1,
     },

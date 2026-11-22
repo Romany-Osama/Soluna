@@ -6392,7 +6392,10 @@ fn extract_backup<R: Read + std::io::Seek>(
         let mut entry = archive
             .by_index(index)
             .map_err(|error| format!("backup entry read failed: {error}"))?;
-        let (name, limit) = match entry.name() {
+        let entry_name = entry
+            .name()
+            .map_err(|error| format!("backup entry name read failed: {error}"))?;
+        let (name, limit) = match entry_name.as_ref() {
             "song.db" => ("song.db", max_database),
             "settings.json" => ("settings.json", max_settings),
             _ => continue,
