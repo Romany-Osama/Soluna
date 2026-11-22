@@ -146,8 +146,8 @@ function PlayerControls({
             <button
               className={playerItemState?.liked ? "player-action active-control" : "player-action"}
               onClick={() => void togglePlayerFavorite()}
-              title={playerItemState?.liked ? "Remove from Meld Liked Songs" : "Add to Meld Liked Songs"}
-              aria-label={playerItemState?.liked ? "Remove from Meld Liked Songs" : "Add to Meld Liked Songs"}
+              title={playerItemState?.liked ? "Remove from Soluna Liked Songs" : "Add to Soluna Liked Songs"}
+              aria-label={playerItemState?.liked ? "Remove from Soluna Liked Songs" : "Add to Soluna Liked Songs"}
             >
               {playerItemState?.liked ? "♥" : "♡"}
             </button>

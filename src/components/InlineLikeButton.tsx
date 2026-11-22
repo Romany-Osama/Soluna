@@ -41,7 +41,7 @@ export function InlineLikeButton({
           const session = await invoke<SessionStatus>("session_status");
           if (session.authenticated) await invoke("ytm_toggle_like", { videoId: item.videoId, liked: nextLiked, item });
         } catch {
-          // Meld keeps the local favorite when the optional signed-in sync is unavailable.
+          // Soluna keeps the local favorite when the optional signed-in sync is unavailable.
         }
       }
     } catch {
@@ -56,7 +56,7 @@ export function InlineLikeButton({
       className={liked ? "inline-like liked" : "inline-like"}
       disabled={(!item.videoId && !item.localPath) || busy}
       onClick={() => void toggle()}
-      title={liked ? "Remove from Meld Liked Songs" : "Add to Meld Liked Songs"}
+      title={liked ? "Remove from Soluna Liked Songs" : "Add to Soluna Liked Songs"}
       aria-label={liked ? `Unlike ${item.title}` : `Like ${item.title}`}
     >
       {liked ? "♥" : "♡"}

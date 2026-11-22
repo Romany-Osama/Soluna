@@ -5,12 +5,16 @@ import { parseLink } from "./links";
 const SPOTIFY = "37i9dQZF1DXcBWIGoYBM5M";
 
 describe("parseLink", () => {
-  it("opens Meld routes from meld: links and app paths", () => {
+  it("opens Soluna routes from soluna: / meld: links and app paths", () => {
+    expect(parseLink("soluna://album/MPREb_abc")).toEqual({
+      kind: "route",
+      route: { name: "album", browseId: "MPREb_abc" },
+    });
+    expect(parseLink("soluna:/library/liked")).toEqual({ kind: "route", route: { name: "library", mode: "liked" } });
     expect(parseLink("meld://album/MPREb_abc")).toEqual({
       kind: "route",
       route: { name: "album", browseId: "MPREb_abc" },
     });
-    expect(parseLink("meld:/library/liked")).toEqual({ kind: "route", route: { name: "library", mode: "liked" } });
     expect(parseLink("meld://search?q=daft%20punk")).toEqual({
       kind: "route",
       route: { name: "search", query: "daft punk" },

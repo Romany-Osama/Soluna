@@ -29,12 +29,12 @@ pub fn settings_set(
     let key = key.into_inner();
     let value = value.into_inner();
     if !allowed_setting(&key) {
-        return Err(IpcError::from(format!("unsupported Meld setting: {key}")));
+        return Err(IpcError::from(format!("unsupported Soluna setting: {key}")));
     }
     if key == "repeatMode" {
         if !matches!(value.as_str(), "0" | "1" | "2") {
             return Err(IpcError::from(
-                "Meld repeatMode must be 0 (off), 1 (one), or 2 (all)".to_owned(),
+                "Soluna repeatMode must be 0 (off), 1 (one), or 2 (all)".to_owned(),
             ));
         }
     } else if key == "playerCacheLimitMb" {
@@ -103,7 +103,7 @@ pub fn settings_set(
         }
     } else if !matches!(value.as_str(), "true" | "false") {
         return Err(IpcError::from(
-            "Meld boolean settings require true or false".to_owned(),
+            "Soluna boolean settings require true or false".to_owned(),
         ));
     }
     let db = state.db.lock().map_err(|_| "database state poisoned")?;

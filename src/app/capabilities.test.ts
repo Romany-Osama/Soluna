@@ -58,7 +58,7 @@ describe("item capabilities (U4-011)", () => {
   it("derives entries from the item's source", () => {
     const local: YtItem = { ...song, videoId: null, localPath: "C:/music/a.mp3", albumId: null };
     const result = actions(local, context({ localContext: true }));
-    expect(result).toEqual(["play", "edit", "playlist", "pin", "info", "play_next", "meld_like", "queue"]);
+    expect(result).toEqual(["play", "edit", "playlist", "pin", "info", "play_next", "soluna_like", "queue"]);
     expect(result).not.toContain("share");
     expect(result).not.toContain("download");
     expect(result).not.toContain("add_library");

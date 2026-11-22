@@ -10,7 +10,7 @@ export type UpdateSummary = {
 export type UpdateProgress = { downloaded: number; total?: number | null };
 
 export const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-export const LAST_UPDATE_CHECK_KEY = "meld.lastUpdateCheck";
+export const LAST_UPDATE_CHECK_KEY = "soluna.lastUpdateCheck";
 
 /** Automatic checks run at most once per interval; a missing or unreadable timestamp means "check now". */
 export function shouldCheckForUpdates(

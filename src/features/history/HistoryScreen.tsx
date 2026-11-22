@@ -68,8 +68,8 @@ export function HistoryScreen({
             <h2>History</h2>
             <p>
               {historySource === "remote"
-                ? "Your YouTube Music history, grouped the same way as Meld."
-                : "Tracks opened in Meld are kept locally on this device."}
+                ? "Your YouTube Music history, grouped by date."
+                : "Tracks opened in Soluna are kept locally on this device."}
             </p>
             <div className="history-toolbar">
               <div className="history-tabs" role="tablist" aria-label="History source">
@@ -110,12 +110,12 @@ export function HistoryScreen({
                       key: "history-clear",
                       confirm: {
                         title: "Clear local history?",
-                        message: "Every song in Meld's playback history is removed. Stats lose these plays too.",
+                        message: "Every song in Soluna's playback history is removed. Stats lose these plays too.",
                         confirmLabel: "Clear history",
                       },
                       commit: () => invoke("history_clear"),
                       refresh: loadHistory,
-                      success: "Meld playback history cleared.",
+                      success: "Soluna playback history cleared.",
                       failure: "History could not be cleared",
                     })
                   }
@@ -175,7 +175,7 @@ export function HistoryScreen({
                   )}
                   <div className="row-actions">
                     <button className="row-action" onClick={() => void openItem(item, visibleLocalHistory, index)}>
-                      Play in Meld
+                      Play in Soluna
                     </button>
                     {item.kind === "song" && (
                       <button className="row-action" onClick={() => void openLyrics(item)}>
@@ -252,7 +252,7 @@ export function HistoryScreen({
                         )}
                         <div className="row-actions">
                           <button className="row-action" onClick={() => void openItem(item, songs, index)}>
-                            Play in Meld
+                            Play in Soluna
                           </button>
                           {item.kind === "song" && (
                             <button className="row-action" onClick={() => void openLyrics(item)}>

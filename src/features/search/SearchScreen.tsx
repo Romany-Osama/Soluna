@@ -50,7 +50,7 @@ export function SearchScreen({
           <div className="search-intro">
             <p className="eyebrow">Online search</p>
             <h2>{submittedQuery ? `Results for “${submittedQuery}”` : "Search YouTube Music"}</h2>
-            <p>Results remain typed as Meld YTItems: songs, albums, playlists, artists, podcasts and episodes.</p>
+            <p>Results remain typed as Soluna YTItems: songs, albums, playlists, artists, podcasts and episodes.</p>
             <button
               className="secondary-button"
               onClick={() => (selectionMode ? closeSelection() : setSelectionMode(true))}
@@ -101,7 +101,7 @@ export function SearchScreen({
                   )}
                   <div className="row-actions">
                     <button className="row-action" onClick={() => void openItem(item)}>
-                      {item.kind === "song" ? "Play in Meld" : "Open"}
+                      {item.kind === "song" ? "Play in Soluna" : "Open"}
                     </button>
                     {item.kind === "song" && (
                       <button className="row-action" onClick={() => void openLyrics(item)}>

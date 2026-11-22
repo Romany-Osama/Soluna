@@ -28,8 +28,8 @@ export function checkVersions({ packageJson, packageLock, cargoToml, cargoLock, 
     problems.push(`package-lock.json packages[""] version ${packageLock.packages[""].version} != ${version}`);
   const cargo = cargoPackageVersion(cargoToml);
   if (cargo !== version) problems.push(`src-tauri/Cargo.toml version ${cargo} != ${version}`);
-  const lock = cargoLockVersion(cargoLock, "meld-desktop");
-  if (lock !== version) problems.push(`src-tauri/Cargo.lock meld-desktop version ${lock} != ${version}`);
+  const lock = cargoLockVersion(cargoLock, "soluna-desktop") ?? cargoLockVersion(cargoLock, "meld-desktop");
+  if (lock !== version) problems.push(`src-tauri/Cargo.lock soluna-desktop version ${lock} != ${version}`);
   if (tag) {
     const tagVersion = tag.replace(/^refs\/tags\//, "").replace(/^v/, "");
     if (tagVersion !== version) problems.push(`tag ${tag} does not match package.json version ${version}`);

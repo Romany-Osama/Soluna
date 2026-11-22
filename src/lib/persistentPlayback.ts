@@ -72,3 +72,16 @@ export function restoreSession<T extends StoredItem>(stored: unknown, queueItems
     playing: session?.playing !== false,
   };
 }
+
+/** The saved queue and playback session, under the current "soluna:" keys and the pre-rename "meld:" ones. */
+const PERSISTED_PLAYBACK_KEYS = [
+  "soluna:persistentQueue",
+  "soluna:persistentPlayback",
+  "meld:persistentQueue",
+  "meld:persistentPlayback",
+];
+
+/** Forget the saved queue and playback session, including any copy left under the old "meld:" keys. */
+export function clearPersistedPlayback(): void {
+  PERSISTED_PLAYBACK_KEYS.forEach((key) => localStorage.removeItem(key));
+}

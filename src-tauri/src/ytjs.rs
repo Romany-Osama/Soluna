@@ -181,13 +181,13 @@ pub fn solve(
             format!("solver script error: {}", truncate(&detail, 300))
         };
         ctx.globals()
-            .set("__meld_input", input.to_string())
+            .set("__soluna_input", input.to_string())
             .map_err(|e| format!("solver input failed: {e}"))?;
         ctx.eval::<(), _>(format!(
             "{SOLVER_LIB}\nObject.assign(globalThis, lib);\n{SOLVER_CORE}"
         ))
         .map_err(|e| describe(&ctx, e))?;
-        ctx.eval::<String, _>("JSON.stringify(jsc(JSON.parse(globalThis.__meld_input)))")
+        ctx.eval::<String, _>("JSON.stringify(jsc(JSON.parse(globalThis.__soluna_input)))")
             .map_err(|e| describe(&ctx, e))
     })?;
     parse_output(&raw, n, sig)

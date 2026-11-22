@@ -201,11 +201,11 @@ export function LibraryScreen({
             </h2>
             <p>
               {libraryMode === "top"
-                ? `Most-played songs from Meld history (${topPeriod === "all" ? "all time" : topPeriod}).`
+                ? `Most-played songs from Soluna history (${topPeriod === "all" ? "all time" : topPeriod}).`
                 : libraryMode === "cache"
-                  ? "Songs cached during Meld playback, separate from explicit offline downloads."
+                  ? "Songs cached during Soluna playback, separate from explicit offline downloads."
                   : ["songs", "liked", "uploaded", "downloads"].includes(libraryMode)
-                    ? "Songs are filtered by Liked, Library, Uploaded, or Downloaded exactly like Meld’s Songs screen."
+                    ? "Songs are filtered by Liked, Library, Uploaded, or Downloaded by category."
                     : libraryMode === "playlists"
                       ? "Local playlists and YouTube Music playlists saved by the connected account."
                       : libraryMode === "albums"
@@ -599,7 +599,7 @@ export function LibraryScreen({
                     <div className="item-art empty-art">♥</div>
                   </div>
                   <strong>Liked Songs</strong>
-                  <span>Meld’s single liked-songs playlist</span>
+                  <span>Liked Songs playlist</span>
                 </button>
               )}
               {settings.show_downloaded_playlist !== false && matchesLibraryQuery("Downloaded") && (
@@ -620,7 +620,7 @@ export function LibraryScreen({
                     <div className="item-art empty-art">★</div>
                   </div>
                   <strong>Top Songs</strong>
-                  <span>Most played in Meld</span>
+                  <span>Most played in Soluna</span>
                 </button>
               )}
               {settings.show_uploaded_playlist !== false && matchesLibraryQuery("Uploaded") && (
@@ -659,7 +659,7 @@ export function LibraryScreen({
                   <span className="library-auto-icon">♥</span>
                   <span>
                     <strong>Liked Songs</strong>
-                    <small>Meld’s single liked-songs playlist</small>
+                    <small>Liked Songs playlist</small>
                   </span>
                 </button>
               )}
@@ -677,7 +677,7 @@ export function LibraryScreen({
                   <span className="library-auto-icon">★</span>
                   <span>
                     <strong>Top Songs</strong>
-                    <small>Most played in Meld history</small>
+                    <small>Most played in Soluna history</small>
                   </span>
                 </button>
               )}
@@ -702,7 +702,7 @@ export function LibraryScreen({
                   )}
                   <div className="row-actions">
                     <button className="row-action" onClick={() => void openItem(item)}>
-                      {item.kind === "song" ? "Play in Meld" : "Open"}
+                      {item.kind === "song" ? "Play in Soluna" : "Open"}
                     </button>
                     <button
                       className="row-action menu-trigger"
@@ -788,7 +788,7 @@ export function LibraryScreen({
                       <div className="item-art empty-art">♥</div>
                     </div>
                     <strong>Liked Songs</strong>
-                    <span>Meld’s single liked-songs playlist</span>
+                    <span>Liked Songs playlist</span>
                   </button>
                 )}
                 {settings.show_downloaded_playlist !== false && matchesLibraryQuery("Downloaded") && (
@@ -809,7 +809,7 @@ export function LibraryScreen({
                       <div className="item-art empty-art">★</div>
                     </div>
                     <strong>Top Songs</strong>
-                    <span>Most played songs from Meld history</span>
+                    <span>Most played songs from Soluna history</span>
                   </button>
                 )}
                 {settings.show_uploaded_playlist !== false && matchesLibraryQuery("Uploaded") && (
@@ -966,7 +966,7 @@ export function LibraryScreen({
                     )}
                     <div className="row-actions">
                       <button className="row-action" onClick={() => void openItem(item)}>
-                        {item.kind === "song" ? "Play in Meld" : "Open"}
+                        {item.kind === "song" ? "Play in Soluna" : "Open"}
                       </button>
                       {item.kind === "song" && (
                         <button className="row-action" onClick={() => void openLyrics(item)}>

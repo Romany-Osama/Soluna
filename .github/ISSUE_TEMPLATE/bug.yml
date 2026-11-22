@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in Meld Desktop does not work as expected
+description: Something in Soluna does not work as expected
 labels: [bug]
 body:
   - type: markdown
@@ -9,7 +9,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: Meld Desktop version
+      label: Soluna version
       description: Settings → About, e.g. 0.2.0
     validations:
       required: true

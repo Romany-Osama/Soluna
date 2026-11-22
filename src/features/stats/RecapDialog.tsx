@@ -16,10 +16,10 @@ export function RecapDialog({ setRecapOpen, stats }: RecapDialogProps) {
         <button className="close-button" title="Close" aria-label="Close" onClick={() => setRecapOpen(false)}>
           ×
         </button>
-        <p className="eyebrow">Meld Desktop</p>
+        <p className="eyebrow">Soluna Desktop</p>
         <h2>Local listening recap</h2>
         <p className="muted-copy">
-          A device-only recap calculated from your Meld playback history. It is not the remote YouTube Music Wrapped
+          A device-only recap calculated from your Soluna playback history. It is not the remote YouTube Music Wrapped
           feed.
         </p>
         <div className="recap-grid">

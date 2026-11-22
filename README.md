@@ -1,6 +1,6 @@
-# Meld Desktop
+# Soluna
 
-**Meld Desktop** is a lightweight music player for Windows 10 and Windows 11. It brings the calm, dark blue-black Meld/Spotify-style experience to the desktop while keeping the application native, fast, and easy to use.
+**Soluna** is a lightweight music player for Windows 10 and Windows 11. It brings the calm, dark blue-black Meld/Spotify-style experience to the desktop while keeping the application native, fast, and easy to use.
 
 This is an independent Windows project. It is not the official Meld mobile application, and this repository contains only the desktop implementation. It does not include Android, Kotlin, Gradle, or mobile application files.
 
@@ -22,7 +22,7 @@ This is an independent Windows project. It is not the official Meld mobile appli
 
 ## Offline listening
 
-When you choose **Download**, Meld Desktop saves a supported audio file to the Windows downloads folder. It also attempts to save the artwork and lyrics. Interrupted downloads can resume when the source supports it, and downloaded songs remain available from the Downloaded library without needing the online player.
+When you choose **Download**, Soluna saves a supported audio file to the Windows downloads folder. It also attempts to save the artwork and lyrics. Interrupted downloads can resume when the source supports it, and downloaded songs remain available from the Downloaded library without needing the online player.
 
 Downloaded songs, temporary playback cache, imported local files, account sessions, and backups are kept separate. Backups include the local library and non-sensitive settings, but they intentionally do not include passwords, account sessions, or media files.
 
@@ -60,11 +60,11 @@ when the generated file is stale.
 
 ## Privacy and advertising
 
-Meld Desktop does not add advertisements, advertising SDKs, tracking accounts, or a project-owned online server. Account sessions are stored locally for the account features you choose to use. The upstream service may still control content returned by its own service; this application does not bypass those decisions.
+Soluna does not add advertisements, advertising SDKs, tracking accounts, or a project-owned online server. Account sessions are stored locally for the account features you choose to use. The upstream service may still control content returned by its own service; this application does not bypass those decisions.
 
 ## Important boundaries
 
-Meld Desktop uses supported direct audio responses. Some upstream responses require protected or transformed stream handling that is not included in this project. The application therefore does not provide DRM circumvention, token extraction, signature or cipher bypass, SABR bypass, ad bypass, ripping, browser-tab playback, or a localhost playback service.
+Soluna uses supported direct audio responses. Some upstream responses require protected or transformed stream handling that is not included in this project. The application therefore does not provide DRM circumvention, token extraction, signature or cipher bypass, SABR bypass, ad bypass, ripping, browser-tab playback, or a localhost playback service.
 
 Some mobile-only or service-dependent features are not part of the Windows application, including Android Auto, Android notification and audio-focus services, Listen Together without a synchronization service, remote Wrapped feeds, ShazamKit recognition, and integrations that require an authorized third-party application or signing contract. The application does not show inactive buttons for features that it cannot actually perform.
 
@@ -78,8 +78,8 @@ This project is an active independent desktop adaptation. It follows the user-fa
 
 ## License and attribution
 
-Meld Desktop is distributed under the [GNU General Public License v3.0](LICENSE). The project was developed as an independent desktop adaptation using the publicly available [Meld/Metrolist project](https://github.com/FrancescoGrazioso/Meld) as a behavioral and design reference. The upstream project remains credited here in accordance with its license and attribution requirements. This repository contains the Windows desktop code only.
+Soluna is distributed under the [GNU General Public License v3.0](LICENSE). The project was developed as an independent desktop adaptation using the publicly available [Meld/Metrolist project](https://github.com/FrancescoGrazioso/Meld) as a behavioral and design reference. The upstream project remains credited here in accordance with its license and attribution requirements. This repository contains the Windows desktop code only.
 
 ## Feedback
 
-If you find a problem, include the Windows version, the Meld Desktop release, the screen where it happened, and the exact action that caused it. Please do not include passwords, cookies, account tokens, or private session data in an issue.
+If you find a problem, include the Windows version, the Soluna release, the screen where it happened, and the exact action that caused it. Please do not include passwords, cookies, account tokens, or private session data in an issue.

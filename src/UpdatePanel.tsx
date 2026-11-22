@@ -43,7 +43,7 @@ export function UpdatePanel() {
       const found = await checkForUpdate();
       localStorage.setItem(LAST_UPDATE_CHECK_KEY, String(Date.now()));
       setUpdate(found);
-      setStatus(found ? `Meld Desktop ${found.version} is available.` : "Meld Desktop is up to date.");
+      setStatus(found ? `Soluna ${found.version} is available.` : "Soluna is up to date.");
     } catch (error) {
       setStatus(`Could not check for updates: ${message(error)}`);
     } finally {
@@ -57,7 +57,7 @@ export function UpdatePanel() {
     setStatus("Downloading the update…");
     try {
       await installUpdate();
-      setStatus("Installing — Meld Desktop will restart.");
+      setStatus("Installing — Soluna will restart.");
     } catch (error) {
       setStatus(`The update could not be installed: ${message(error)}. Your current version is unchanged.`);
       setBusy(false);
@@ -68,8 +68,8 @@ export function UpdatePanel() {
     <div className="settings-group">
       <h3>Updates</h3>
       <p className="muted-copy">
-        {version ? `You are using Meld Desktop ${version}.` : "Meld Desktop"} Updates are downloaded from GitHub
-        Releases and their signature is verified before anything is installed. Your library is backed up first.
+        {version ? `You are using Soluna ${version}.` : "Soluna"} Updates are downloaded from GitHub Releases and their
+        signature is verified before anything is installed. Your library is backed up first.
       </p>
       {status && (
         <p className="muted-copy" role="status">
@@ -97,7 +97,7 @@ export function UpdatePanel() {
         )}
       </div>
       {update && !update.portable && (
-        <p className="muted-copy">Installing closes Meld Desktop, so playback stops until it restarts.</p>
+        <p className="muted-copy">Installing closes Soluna, so playback stops until it restarts.</p>
       )}
       {update?.portable && (
         <p className="muted-copy">

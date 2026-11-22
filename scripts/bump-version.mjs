@@ -30,6 +30,6 @@ writeFileSync(
 const cargoLock = readFileSync("src-tauri/Cargo.lock", "utf8");
 writeFileSync(
   "src-tauri/Cargo.lock",
-  cargoLock.replace(/(\[\[package\]\]\nname = "meld-desktop"\nversion = ")[^"]+(")/, `$1${version}$2`),
+  cargoLock.replace(/(\[\[package\]\]\nname = "(soluna-desktop|meld-desktop)"\nversion = ")[^"]+(")/, `$1${version}$3`),
 );
 console.log(`version set to ${version}`);

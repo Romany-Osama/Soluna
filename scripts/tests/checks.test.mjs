@@ -48,8 +48,8 @@ import {
 const goodRepo = () => ({
   packageJson: { version: "0.2.0" },
   packageLock: { version: "0.2.0", packages: { "": { version: "0.2.0" } } },
-  cargoToml: '[package]\nname = "meld-desktop"\nversion = "0.2.0"\n\n[dependencies]\nfoo = { version = "1" }\n',
-  cargoLock: '[[package]]\nname = "meld-desktop"\nversion = "0.2.0"\n',
+  cargoToml: '[package]\nname = "soluna-desktop"\nversion = "0.2.0"\n\n[dependencies]\nfoo = { version = "1" }\n',
+  cargoLock: '[[package]]\nname = "soluna-desktop"\nversion = "0.2.0"\n',
   tauriConf: { version: "../package.json" },
 });
 
@@ -67,7 +67,7 @@ test("versions: each divergent source is reported (PLAY-091)", () => {
   );
   assert.equal(checkVersions({ ...goodRepo(), cargoToml: '[package]\nversion = "0.1.0"\n' }).length, 1);
   assert.equal(
-    checkVersions({ ...goodRepo(), cargoLock: '[[package]]\nname = "meld-desktop"\nversion = "0.1.8"\n' }).length,
+    checkVersions({ ...goodRepo(), cargoLock: '[[package]]\nname = "soluna-desktop"\nversion = "0.1.8"\n' }).length,
     1,
   );
   assert.equal(checkVersions({ ...goodRepo(), packageLock: { version: "0.1.8" } }).length, 1);
@@ -80,8 +80,8 @@ test("versions: Cargo.toml dependency versions are not mistaken for the package 
   );
   assert.equal(
     cargoLockVersion(
-      '[[package]]\nname = "other"\nversion = "1.0.0"\n\n[[package]]\nname = "meld-desktop"\nversion = "0.2.0"\n',
-      "meld-desktop",
+      '[[package]]\nname = "other"\nversion = "1.0.0"\n\n[[package]]\nname = "soluna-desktop"\nversion = "0.2.0"\n',
+      "soluna-desktop",
     ),
     "0.2.0",
   );
@@ -187,7 +187,7 @@ test('bundle: main\'s targets "all" without bootstrapper is rejected; NSIS + emb
 
 test("tracked files: committed release binaries are rejected (TR-M12)", () => {
   assert.equal(
-    checkTrackedFiles(["release/meld-desktop-0.1.8-portable.zip", "release/notes.md", "src/App.tsx", "dist/x.EXE"])
+    checkTrackedFiles(["release/soluna-desktop-0.1.8-portable.zip", "release/notes.md", "src/App.tsx", "dist/x.EXE"])
       .length,
     3,
   );
@@ -207,11 +207,11 @@ test("logout: both sign-out commands clear WebView data (TR-H6)", () => {
 });
 
 test("security: asset scope points at the real data folder, not Tauri's identifier folder", () => {
-  // database_path() is %APPDATA%\Meld Desktop, which Tauri calls $DATA. $APPDATA would be
-  // %APPDATA%\com.romany-osama.meld-desktop and blocked every cached/downloaded song in 0.2.0.
-  assert.ok(ALLOWED_ASSET_SCOPE.every((entry) => entry.startsWith("$DATA/Meld Desktop/")));
+  // database_path() is %APPDATA%\Soluna, which Tauri calls $DATA. $APPDATA would be
+  // %APPDATA%\com.romany-osama.soluna and blocked every cached/downloaded song in 0.2.0.
+  assert.ok(ALLOWED_ASSET_SCOPE.every((entry) => entry.startsWith("$DATA/Soluna/")));
   const legacy = checkSecurityConfig(
-    conf({ ...goodSecurity, assetProtocol: { enable: true, scope: ["$APPDATA/Meld Desktop/player-cache/**"] } }),
+    conf({ ...goodSecurity, assetProtocol: { enable: true, scope: ["$APPDATA/Soluna/player-cache/**"] } }),
   );
   assert.ok(legacy.some((problem) => problem.includes("asset protocol scope")));
 });

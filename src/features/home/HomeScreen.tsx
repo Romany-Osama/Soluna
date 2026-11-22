@@ -27,8 +27,8 @@ export function HomeScreen({
     <>
       {home.status === "loading" && (
         <div className="boot-screen">
-          <div className="brand-mark">M</div>
-          <h2>Loading Meld</h2>
+          <div className="brand-mark">S</div>
+          <h2>Loading Soluna</h2>
           <p>Connecting to YouTube Music…</p>
           <div className="spinner" />
         </div>
@@ -40,7 +40,7 @@ export function HomeScreen({
               <div>
                 <p className="eyebrow">Discover</p>
                 <h2>Explore YouTube Music</h2>
-                <p>Open the live source discovery pages without leaving Meld Desktop.</p>
+                <p>Open the live source discovery pages without leaving Soluna.</p>
               </div>
             </div>
             <div className="library-filter-chips" role="navigation" aria-label="Discover">

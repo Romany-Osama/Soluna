@@ -1,15 +1,15 @@
 [package]
-name = "meld-desktop"
+name = "soluna-desktop"
 version = "0.3.0"
-description = "Meld Desktop — a Windows-native GPLv3 port of Meld"
-authors = ["Meld contributors"]
+description = "Soluna — An obsidian-dark, lightweight native Windows client for YouTube Music"
+authors = ["Romany-Osama and Soluna contributors"]
 edition = "2021"
 license = "GPL-3.0-only"
 rust-version = "1.89"
-repository = "https://github.com/Romany-Osama/Meld-Desktop"
+repository = "https://github.com/Romany-Osama/Soluna"
 
 [lib]
-name = "meld_desktop_lib"
+name = "soluna_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

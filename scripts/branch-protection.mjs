@@ -5,7 +5,7 @@ import { checkProtection, desiredProtection } from "./lib/branch-protection.mjs"
 
 const args = process.argv.slice(2);
 const apply = args.includes("--apply");
-const repo = args.find((arg) => !arg.startsWith("--")) ?? "Romany-Osama/Meld-Desktop";
+const repo = args.find((arg) => !arg.startsWith("--")) ?? "Romany-Osama/Soluna";
 const token = process.env.GH_TOKEN;
 if (!token) {
   console.error("branch protection: set GH_TOKEN to a token with admin rights on the repository");

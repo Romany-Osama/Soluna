@@ -2,7 +2,7 @@
 import { parseLink } from "./links";
 import { parseRoutePath, Route, routePath, TopLevel } from "./routes";
 
-export const LAST_ROUTE_KEY = "meld:lastRoute";
+export const LAST_ROUTE_KEY = "soluna:lastRoute";
 const TABS: readonly TopLevel[] = ["home", "search_input", "library", "history", "stats"];
 
 /**

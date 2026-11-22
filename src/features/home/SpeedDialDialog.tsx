@@ -25,7 +25,7 @@ export function SpeedDialDialog({
         <h2>{settings.varispeed === true ? "Playback speed" : "Tempo and pitch"}</h2>
         <p className="muted-copy">
           {settings.varispeed === true
-            ? "Change speed with pitch following, matching Meld’s varispeed mode."
+            ? "Change speed with pitch following."
             : "Change playback tempo. Desktop keeps pitch with the native audio element when varispeed is off."}
         </p>
         <label className="speed-control">

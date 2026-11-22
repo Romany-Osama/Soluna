@@ -20,7 +20,7 @@ export function checkTag(tag, version) {
     : [`tag ${tag} does not match package.json version ${version} (expected v${version})`];
 }
 
-/** Tauri v2 updater manifest; `portable` is Meld's own extra entry for the portable ZIP. */
+/** Tauri v2 updater manifest; `portable` is Soluna's own extra entry for the portable ZIP. */
 export function latestJson({ version, notes, pubDate, setupUrl, setupSignature, portableUrl, portableSignature }) {
   for (const [name, value] of Object.entries({ version, setupUrl, setupSignature, portableUrl, portableSignature })) {
     if (!value || typeof value !== "string" || !value.trim()) throw new Error(`latest.json: ${name} is required`);

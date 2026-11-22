@@ -283,7 +283,7 @@ mod tests {
 
     fn part_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir()
-            .join(format!("meld-player-cache-test-{}", std::process::id()))
+            .join(format!("soluna-player-cache-test-{}", std::process::id()))
             .join(format!("{name}.part"))
     }
 

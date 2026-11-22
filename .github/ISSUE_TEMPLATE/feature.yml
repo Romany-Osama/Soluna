@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an improvement or a missing Meld feature
+description: Suggest an improvement or a missing Soluna feature
 labels: [enhancement]
 body:
   - type: markdown
@@ -14,8 +14,8 @@ body:
   - type: textarea
     id: reference
     attributes:
-      label: Does Meld (Android) have it?
-      description: Link to the upstream feature or release, if any.
+      label: Does another client or service have it?
+      description: Link to reference feature or release, if any.
   - type: textarea
     id: notes
     attributes:

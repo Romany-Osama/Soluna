@@ -375,10 +375,10 @@ impl RuntimeState {
     /// exists) and exit cleanly instead.
     fn fail_to_start(context: &str, error: impl std::fmt::Display) -> ! {
         let description =
-            format!("{context}:\n\n{error}\n\nMeld Desktop cannot continue and will now close.");
+            format!("{context}:\n\n{error}\n\nSoluna cannot continue and will now close.");
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
-            .set_title("Meld Desktop failed to start")
+            .set_title("Soluna failed to start")
             .set_description(&description)
             .set_buttons(rfd::MessageButtons::Ok)
             .show();
@@ -423,7 +423,17 @@ fn database_path() -> PathBuf {
                     .unwrap_or_else(|| PathBuf::from("."))
             })
     };
-    root.join("Meld Desktop").join("meld.sqlite3")
+    let soluna_dir = root.join("Soluna");
+    let legacy_dir = root.join("Meld Desktop");
+    if !soluna_dir.exists() && legacy_dir.exists() {
+        let _ = fs::rename(&legacy_dir, &soluna_dir);
+    }
+    let db_path = soluna_dir.join("soluna.sqlite3");
+    let legacy_db = soluna_dir.join("meld.sqlite3");
+    if !db_path.exists() && legacy_db.exists() {
+        let _ = fs::rename(&legacy_db, &db_path);
+    }
+    db_path
 }
 
 fn now_seconds() -> i64 {
@@ -2598,7 +2608,7 @@ fn parse_browse_response(response: &Value, browse_id: &str) -> DetailPage {
     DetailPage {
         kind: "browse".to_owned(),
         title,
-        subtitle: "Meld browse results".to_owned(),
+        subtitle: "Soluna browse results".to_owned(),
         thumbnail: None,
         items,
         continuation,
@@ -4291,7 +4301,7 @@ async fn paxsenix_fetch(
             http()
                 .get("https://lyrics.paxsenix.org/apple-music/search")
                 .query(&[("q", query.as_str())])
-                .header("User-Agent", "Meld/0.1"),
+                .header("User-Agent", "Soluna/0.1"),
         )
         .await
         else {
@@ -4346,7 +4356,7 @@ async fn paxsenix_fetch(
             http()
                 .get("https://lyrics.paxsenix.org/apple-music/lyrics")
                 .query(&[("id", id)])
-                .header("User-Agent", "Meld/0.1"),
+                .header("User-Agent", "Soluna/0.1"),
         )
         .await
         else {
@@ -5250,7 +5260,7 @@ async fn fetch_lyrics_inner(
             return Ok(payload);
         }
     }
-    Err("Lyrics unavailable from enabled Meld providers".to_owned())
+    Err("Lyrics unavailable from enabled Soluna providers".to_owned())
 }
 
 fn token_from_feedback_endpoint(value: &Value) -> Option<String> {
@@ -6364,7 +6374,7 @@ const MAX_BACKUP_DATABASE_BYTES: u64 = 500 * 1024 * 1024;
 /// Largest `settings.json` accepted from a backup (TR-H4).
 const MAX_BACKUP_SETTINGS_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Reads a Meld Desktop backup archive. `song.db` is streamed straight to `database_out` (never held in
+/// Reads a Soluna backup archive. `song.db` is streamed straight to `database_out` (never held in
 /// memory) and `settings.json` is returned. Only those two entries are read and entry names are never used
 /// to build a path, so there is no zip-slip risk. Both the declared and the actual size of each entry are
 /// capped, so a hostile archive cannot exhaust memory or disk (TR-H4).
@@ -6375,7 +6385,7 @@ fn extract_backup<R: Read + std::io::Seek>(
     max_settings: u64,
 ) -> Result<Vec<u8>, String> {
     let mut archive =
-        ZipArchive::new(reader).map_err(|error| format!("invalid Meld Desktop backup: {error}"))?;
+        ZipArchive::new(reader).map_err(|error| format!("invalid Soluna backup: {error}"))?;
     let mut database_written = false;
     let mut settings_bytes = None;
     for index in 0..archive.len() {
@@ -6498,7 +6508,7 @@ pub fn run() {
             };
             let scope = app.asset_protocol_scope();
             for path in db_paths { let _ = scope.allow_file(&path); }
-            // Downloads, the player cache and artwork live next to the database (`%APPDATA%\\Meld Desktop`),
+            // Downloads, the player cache and artwork live next to the database (`%APPDATA%\\Soluna`),
             // not in Tauri's identifier-based `$APPDATA`. Grant exactly those directories at runtime so
             // cached/downloaded songs keep playing whatever the configured scope resolves to.
             for directory in media_directories() {
@@ -6642,11 +6652,11 @@ mod tests {
         let scope = conf["app"]["security"]["assetProtocol"]["scope"]
             .as_array()
             .unwrap();
-        assert!(root.ends_with("Meld Desktop"));
+        assert!(root.ends_with("Soluna"));
         assert!(
             scope
                 .iter()
-                .all(|entry| entry.as_str().unwrap().starts_with("$DATA/Meld Desktop/")),
+                .all(|entry| entry.as_str().unwrap().starts_with("$DATA/Soluna/")),
             "{scope:?}"
         );
     }
@@ -6739,7 +6749,7 @@ mod tests {
 
     #[test]
     fn player_cache_quota_evicts_oldest_files_and_never_downloads() {
-        let root = std::env::temp_dir().join(format!("meld-quota-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("soluna-quota-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let db = cache_test_db();
         db.execute(
@@ -6788,7 +6798,7 @@ mod tests {
 
     #[test]
     fn startup_cleanup_removes_orphans_but_keeps_downloads_and_resumable_parts() {
-        let root = std::env::temp_dir().join(format!("meld-cleanup-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("soluna-cleanup-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let cache = root.join("player-cache");
         let downloads = root.join("downloads");
@@ -6845,7 +6855,7 @@ mod tests {
     fn playback_cache_serves_only_the_requested_quality() {
         // PLAY-021: switching Audio quality must not keep playing a copy cached at the other quality.
         let db = cache_test_db();
-        let dir = std::env::temp_dir().join(format!("meld-quality-cache-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("soluna-quality-cache-{}", std::process::id()));
         let low = dir.join("low.audio");
         write_file(&low, 16);
         db.execute(
@@ -7242,17 +7252,17 @@ mod tests {
     fn account_parser_reads_active_account_avatar() {
         let response = json!({
             "activeAccountHeaderRenderer": {
-                "accountName": { "simpleText": "Meld User" },
+                "accountName": { "simpleText": "Soluna User" },
                 "email": { "simpleText": "user@example.com" },
-                "channelHandle": { "simpleText": "@melduser" },
+                "channelHandle": { "simpleText": "@solunauser" },
                 "avatar": { "thumbnails": [{ "url": "https://example.invalid/avatar-small" }, { "url": "https://example.invalid/avatar-large" }] }
             }
         });
         let (name, email, handle, avatar) =
             account_info_from_response(&response).expect("account header must parse");
-        assert_eq!(name, "Meld User");
+        assert_eq!(name, "Soluna User");
         assert_eq!(email.as_deref(), Some("user@example.com"));
-        assert_eq!(handle.as_deref(), Some("@melduser"));
+        assert_eq!(handle.as_deref(), Some("@solunauser"));
         assert_eq!(
             avatar.as_deref(),
             Some("https://example.invalid/avatar-large")
@@ -7297,7 +7307,7 @@ mod tests {
     #[test]
     fn backup_copy_scrub_removes_credentials_from_the_file_itself() {
         let dir = std::env::temp_dir().join(format!(
-            "meld-backup-test-{}-{}",
+            "soluna-backup-test-{}-{}",
             std::process::id(),
             now_millis()
         ));
@@ -7498,7 +7508,7 @@ mod tests {
             .expect("row");
         assert_eq!(
             local_like, 0,
-            "a YouTube like must not flip the local Meld like flag"
+            "a YouTube like must not flip the local Soluna like flag"
         );
     }
 
@@ -7554,7 +7564,7 @@ mod tests {
     #[test]
     fn upgrade_from_a_v0_1_8_database_seals_secrets_and_keeps_the_library() {
         let dir = std::env::temp_dir().join(format!(
-            "meld-upgrade-test-{}-{}",
+            "soluna-upgrade-test-{}-{}",
             std::process::id(),
             now_millis()
         ));
@@ -7756,7 +7766,7 @@ mod tests {
     }
 
     fn scratch_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("meld-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("soluna-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("scratch dir");
         dir.join("restore.part")

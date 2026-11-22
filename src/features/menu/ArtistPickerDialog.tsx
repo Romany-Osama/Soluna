@@ -23,7 +23,7 @@ export function ArtistPickerDialog({ artistPickerItem, openItem, setArtistPicker
         </button>
         <p className="eyebrow">Artist selection</p>
         <h2>{artistPickerItem.title}</h2>
-        <p className="muted-copy">Meld found more than one source artist for this item.</p>
+        <p className="muted-copy">Found more than one source artist for this item.</p>
         <div className="picker-list">
           {artistPickerItem.artists
             .filter((artist) => artist.id)

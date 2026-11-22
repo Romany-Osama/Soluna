@@ -26,7 +26,7 @@ describe("stream recovery", () => {
   });
 
   it("recognises local cached files and words notices", () => {
-    expect(isLocalStream("C:\\Users\\me\\AppData\\Roaming\\Meld Desktop\\player-cache\\a.audio")).toBe(true);
+    expect(isLocalStream("C:\\Users\\me\\AppData\\Roaming\\Soluna\\player-cache\\a.audio")).toBe(true);
     expect(isLocalStream("https://rr1---sn-x.googlevideo.com/videoplayback")).toBe(false);
     expect(isLocalStream(null)).toBe(false);
     expect(recoveryNotice("rejected", 1, true)).toMatch(/cached/);

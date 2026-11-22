@@ -44,7 +44,7 @@ export function useAccounts({ setNotice }: AccountsDeps) {
     try {
       await invoke("open_google_login");
       setNotice(
-        "Google sign-in opened in Meld Desktop. Finish sign-in there; Meld will validate the session before saving it.",
+        "Google sign-in opened in Soluna. Finish sign-in there; Soluna will validate the session before saving it.",
       );
     } catch (error) {
       setNotice(`Google sign-in could not open: ${errorMessage(error)}`, "error");
@@ -54,7 +54,7 @@ export function useAccounts({ setNotice }: AccountsDeps) {
   const connectSpotify = async () => {
     try {
       await invoke("open_spotify_login");
-      setNotice("Spotify sign-in opened in Meld Desktop. The session is saved only after token validation.");
+      setNotice("Spotify sign-in opened in Soluna. The session is saved only after token validation.");
     } catch (error) {
       setNotice(`Spotify sign-in could not open: ${errorMessage(error)}`, "error");
     }

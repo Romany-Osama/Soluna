@@ -59,7 +59,7 @@ pub fn ytm_playback_report(video_id: VideoId) -> IpcResult<String> {
         .cloned()
         .unwrap_or_default();
     let mut lines = vec![
-        format!("Meld Desktop {} playback report", env!("CARGO_PKG_VERSION")),
+        format!("Soluna {} playback report", env!("CARGO_PKG_VERSION")),
         format!("Solver: yt-dlp EJS {}", ytjs::EJS_VERSION),
     ];
     if attempts.is_empty() {

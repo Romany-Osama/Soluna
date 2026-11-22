@@ -20,7 +20,7 @@ describe("event contract (S5-010)", () => {
   it("listens to events only through listenEvent", () => {
     expect(Object.keys(sources).length).toBeGreaterThan(20);
     for (const [file, text] of Object.entries(sources)) {
-      // The generated bindings import the event module for tauri-specta helpers Meld does not use.
+      // The generated bindings import the event module for tauri-specta helpers Soluna does not use.
       if (file === "./events.ts" || file === "../ipc/bindings.ts") continue;
       expect(text, file).not.toMatch(/from "@tauri-apps\/api\/event"/);
     }
