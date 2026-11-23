@@ -1,6 +1,9 @@
 import type { HistoryEntry } from "../../app/history";
 import { RefObject, Dispatch, SetStateAction } from "react";
 import { LoadState, LyricsPayload } from "../../types";
+import { LyricLines } from "./LyricLines";
+import { InstrumentalInterlude } from "./InstrumentalInterlude";
+import { findInstrumentalSection } from "./instrumental";
 
 export type LyricsPanelProps = {
   activeLyricIndex: number;
@@ -18,6 +21,9 @@ export type LyricsPanelProps = {
   lyricsProviderSelection: string;
   navigateForward: () => void;
   playerExpanded: boolean;
+  playbackSeconds: number;
+  /** Track duration in seconds; 0 when unknown (the outro/whole-track end). */
+  durationSeconds: number;
   setLyrics: Dispatch<SetStateAction<LoadState<LyricsPayload> | null>>;
   setLyricsAutoScrollEnabled: Dispatch<SetStateAction<boolean>>;
 };
@@ -38,9 +44,22 @@ export function LyricsPanel({
   lyricsProviderSelection,
   navigateForward,
   playerExpanded,
+  playbackSeconds,
+  durationSeconds,
   setLyrics,
   setLyricsAutoScrollEnabled,
 }: LyricsPanelProps) {
+  // Whole-track instrumental: the wavy circle spans the track (0 to the
+  // track duration when known) and completes at the end of the music.
+  const instrumentalSection =
+    lyrics?.status === "ready" && lyrics.data.instrumental
+      ? findInstrumentalSection({
+          lines: [],
+          playbackMs: playbackSeconds * 1000,
+          durationMs: durationSeconds * 1000,
+          instrumental: true,
+        })
+      : null;
   return (
     <>
       {!playerExpanded && lyrics && (
@@ -67,7 +86,7 @@ export function LyricsPanel({
                   <div>
                     <p className="eyebrow">
                       {lyrics.data.provider}
-                      {lyrics.data.synced ? " · Synced" : " · Plain"}
+                      {lyrics.data.instrumental ? " · Instrumental" : lyrics.data.synced ? " · Synced" : " · Plain"}
                     </p>
                     <h2>{lyrics.data.matchedTitle}</h2>
                     <p>{lyrics.data.matchedArtist}</p>
@@ -109,29 +128,27 @@ export function LyricsPanel({
                     </button>
                   </div>
                 </div>
-                {lyrics.data.synced && lyrics.data.lines.length > 0 ? (
-                  <div
-                    ref={lyricsContainerRef}
-                    className="lyrics-lines"
-                    onWheel={() => setLyricsAutoScrollEnabled(false)}
-                    onTouchMove={() => setLyricsAutoScrollEnabled(false)}
-                    onPointerDown={() => setLyricsAutoScrollEnabled(false)}
-                    onKeyDown={() => setLyricsAutoScrollEnabled(false)}
-                  >
-                    {lyrics.data.lines.map((line, index) => (
-                      <button
-                        ref={index === activeLyricIndex ? activeLyricRef : undefined}
-                        key={`${line.timeMs}-${index}`}
-                        className={index === activeLyricIndex ? "lyric-line active" : "lyric-line"}
-                        onClick={() => {
-                          setLyricsAutoScrollEnabled(true);
-                          if (audioRef.current) audioRef.current.currentTime = line.timeMs / 1000;
-                        }}
-                      >
-                        {line.text}
-                      </button>
-                    ))}
+                {lyrics.data.instrumental && instrumentalSection ? (
+                  <div className="lyrics-lines lyrics-lines--standalone">
+                    <InstrumentalInterlude
+                      label="Instrumental — no lyrics, just the music"
+                      section={instrumentalSection}
+                      playbackMs={playbackSeconds * 1000}
+                      audioRef={audioRef}
+                      size={84}
+                    />
                   </div>
+                ) : lyrics.data.synced && lyrics.data.lines.length > 0 ? (
+                  <LyricLines
+                    lines={lyrics.data.lines}
+                    activeLyricIndex={activeLyricIndex}
+                    activeLyricRef={activeLyricRef}
+                    audioRef={audioRef}
+                    lyricsContainerRef={lyricsContainerRef}
+                    playbackSeconds={playbackSeconds}
+                    durationSeconds={durationSeconds}
+                    setLyricsAutoScrollEnabled={setLyricsAutoScrollEnabled}
+                  />
                 ) : (
                   <pre className="lyrics-text">{lyrics.data.text}</pre>
                 )}

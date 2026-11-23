@@ -3184,6 +3184,8 @@ function App() {
           lyricsProviderSelection={lyricsProviderSelection}
           navigateForward={navigateForward}
           playerExpanded={playerExpanded}
+          playbackSeconds={playbackSeconds}
+          durationSeconds={durationSeconds}
           setLyrics={setLyrics}
           setLyricsAutoScrollEnabled={setLyricsAutoScrollEnabled}
         />

@@ -1269,6 +1269,7 @@ h2 {
   overflow-x: hidden;
   overflow-y: auto;
   display: grid;
+  grid-auto-rows: max-content;
   align-content: start;
   gap: 4px;
   padding: min(28vh, 220px) 8px min(42vh, 340px);
@@ -1299,6 +1300,152 @@ h2 {
   background: #30365a;
   font-weight: 700;
   transform: none;
+}
+/* Instrumental interlude: floating notes over pulsing bars, pure CSS. */
+.lyrics-interlude {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 220px;
+  padding: 32px 16px;
+  color: #9da3bc;
+  text-align: center;
+}
+/* In-flow (between lyric lines) the interlude stays compact; the
+   standalone whole-track one keeps its full height. It sizes to its
+   own content instead of stretching to the grid row. */
+.lyrics-lines .lyrics-interlude {
+  align-self: start;
+  min-height: 0;
+  padding: 20px 16px;
+}
+/* A lone interlude (a whole instrumental track) lives in the same
+   scrollable list as the synced lines, so it can scroll in a short
+   window — but without the karaoke top/bottom padding, which would
+   push the circle below the fold, and with a smaller ring so the
+   circle itself fits in the visible area. */
+.full-player-lyrics .lyrics-lines.lyrics-lines--standalone,
+.lyrics-lines--standalone {
+  padding: 12px 8px;
+}
+.lyrics-lines--standalone .lyrics-interlude {
+  padding: 12px 16px;
+  gap: 10px;
+}
+.lyrics-interlude p {
+  margin: 0;
+  font-size: 14px;
+}
+.lyrics-interlude-notes {
+  display: flex;
+  gap: 18px;
+  font-size: 28px;
+  line-height: 1;
+  color: #8fd8ff;
+}
+.lyrics-interlude-notes span {
+  display: inline-block;
+  animation: lyrics-note-float 2.4s ease-in-out infinite;
+}
+.lyrics-interlude-notes span:nth-child(2) {
+  animation-delay: 0.35s;
+}
+.lyrics-interlude-notes span:nth-child(3) {
+  animation-delay: 0.7s;
+}
+.lyrics-interlude-notes span:nth-child(4) {
+  animation-delay: 1.05s;
+}
+.lyrics-interlude-notes span:nth-child(5) {
+  animation-delay: 1.4s;
+}
+@keyframes lyrics-note-float {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translateY(-12px);
+    opacity: 1;
+  }
+}
+.lyrics-interlude-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 36px;
+}
+.lyrics-interlude-bars span {
+  width: 5px;
+  height: 30%;
+  border-radius: 3px;
+  background: #00d2ff;
+  opacity: 0.7;
+  animation: lyrics-bar-pulse 1.1s ease-in-out infinite;
+}
+.lyrics-interlude-bars span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.lyrics-interlude-bars span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+.lyrics-interlude-bars span:nth-child(4) {
+  animation-delay: 0.45s;
+}
+.lyrics-interlude-bars span:nth-child(5) {
+  animation-delay: 0.6s;
+}
+@keyframes lyrics-bar-pulse {
+  0%,
+  100% {
+    height: 25%;
+  }
+  50% {
+    height: 100%;
+  }
+}
+/* Wavy completing circle: the ring fills across the instrumental section.
+   The wave itself is drawn by WavyCircle.tsx (one SVG path, recomputed per
+   frame); this only paints the track, the accent stroke and the centre. */
+.wavy-circle {
+  position: relative;
+  /* Default size; the component sets its exact size inline from its
+     `size` prop so the centre text stays centred on the ring. */
+  width: 120px;
+  height: 120px;
+  flex: none;
+}
+.wavy-circle svg {
+  display: block;
+}
+.wavy-circle-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.14);
+  stroke-width: 5.5;
+}
+.wavy-circle-progress {
+  stroke: #00d2ff;
+  stroke-width: 5.5;
+  filter: drop-shadow(0 0 6px rgba(0, 210, 255, 0.35));
+}
+.wavy-circle-head {
+  fill: #8fd8ff;
+  filter: drop-shadow(0 4px 18px rgba(0, 210, 255, 0.18));
+}
+.wavy-circle-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #eef0ff;
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 .lyrics-text {
   max-height: 56vh;

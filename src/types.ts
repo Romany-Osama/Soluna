@@ -56,13 +56,17 @@ export type DetailPage = {
   continuation?: string | null;
   browseId?: string | null;
 };
+export type LyricWord = { timeMs: number; endMs: number; text: string };
+export type LyricLine = { timeMs: number; text: string; words?: LyricWord[] };
 export type LyricsPayload = {
   provider: string;
   text: string;
   synced: boolean;
   matchedTitle: string;
   matchedArtist: string;
-  lines: { timeMs: number; text: string }[];
+  lines: LyricLine[];
+  /** LrcLib flagged the track instrumental and no provider returned lyrics. */
+  instrumental: boolean;
 };
 export type SettingEntry = { key: string; value: string };
 export type SessionStatus = {

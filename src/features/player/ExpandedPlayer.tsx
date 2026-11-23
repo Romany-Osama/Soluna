@@ -2,6 +2,9 @@ import type { HistoryEntry } from "../../app/history";
 import { RefObject, Dispatch, SetStateAction } from "react";
 import { mediaSrc } from "../../lib/media";
 import { LoadState, LyricsPayload, YtItem, PlayerPayload, LibraryItemState } from "../../types";
+import { LyricLines } from "../lyrics/LyricLines";
+import { InstrumentalInterlude } from "../lyrics/InstrumentalInterlude";
+import { findInstrumentalSection } from "../lyrics/instrumental";
 
 export type ExpandedPlayerProps = {
   activeLyricIndex: number;
@@ -94,6 +97,17 @@ export function ExpandedPlayer({
   updateVolume,
   volume,
 }: ExpandedPlayerProps) {
+  // Whole-track instrumental: the wavy circle spans the track (0 to the
+  // track duration when known) and completes at the end of the music.
+  const instrumentalSection =
+    lyrics?.status === "ready" && lyrics.data.instrumental
+      ? findInstrumentalSection({
+          lines: [],
+          playbackMs: playbackSeconds * 1000,
+          durationMs: durationSeconds * 1000,
+          instrumental: true,
+        })
+      : null;
   return (
     <>
       {playerExpanded && player && (
@@ -247,7 +261,13 @@ export function ExpandedPlayer({
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">Lyrics</p>
-                  <h3>{lyrics?.status === "ready" ? lyrics.data.provider : "Soluna lyric providers"}</h3>
+                  <h3>
+                    {lyrics?.status === "ready"
+                      ? lyrics.data.instrumental
+                        ? `${lyrics.data.provider} · Instrumental`
+                        : lyrics.data.provider
+                      : "Soluna lyric providers"}
+                  </h3>
                   <label className="lyrics-provider-picker">
                     <span>Provider</span>
                     <select
@@ -291,29 +311,27 @@ export function ExpandedPlayer({
                   </button>
                 )}
               </div>
-              {lyrics?.status === "ready" && lyrics.data.synced && lyrics.data.lines.length > 0 ? (
-                <div
-                  ref={lyricsContainerRef}
-                  className="lyrics-lines"
-                  onWheel={() => setLyricsAutoScrollEnabled(false)}
-                  onTouchMove={() => setLyricsAutoScrollEnabled(false)}
-                  onPointerDown={() => setLyricsAutoScrollEnabled(false)}
-                  onKeyDown={() => setLyricsAutoScrollEnabled(false)}
-                >
-                  {lyrics.data.lines.map((line, index) => (
-                    <button
-                      ref={index === activeLyricIndex ? activeLyricRef : undefined}
-                      key={`${line.timeMs}-${index}`}
-                      className={index === activeLyricIndex ? "lyric-line active" : "lyric-line"}
-                      onClick={() => {
-                        setLyricsAutoScrollEnabled(true);
-                        if (audioRef.current) audioRef.current.currentTime = line.timeMs / 1000;
-                      }}
-                    >
-                      {line.text}
-                    </button>
-                  ))}
+              {lyrics?.status === "ready" && instrumentalSection ? (
+                <div className="lyrics-lines lyrics-lines--standalone">
+                  <InstrumentalInterlude
+                    label="Instrumental — no lyrics, just the music"
+                    section={instrumentalSection}
+                    playbackMs={playbackSeconds * 1000}
+                    audioRef={audioRef}
+                    size={84}
+                  />
                 </div>
+              ) : lyrics?.status === "ready" && lyrics.data.synced && lyrics.data.lines.length > 0 ? (
+                <LyricLines
+                  lines={lyrics.data.lines}
+                  activeLyricIndex={activeLyricIndex}
+                  activeLyricRef={activeLyricRef}
+                  audioRef={audioRef}
+                  lyricsContainerRef={lyricsContainerRef}
+                  playbackSeconds={playbackSeconds}
+                  durationSeconds={durationSeconds}
+                  setLyricsAutoScrollEnabled={setLyricsAutoScrollEnabled}
+                />
               ) : lyrics?.status === "ready" ? (
                 <pre className="lyrics-text">{lyrics.data.text}</pre>
               ) : (

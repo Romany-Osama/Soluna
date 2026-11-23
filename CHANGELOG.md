@@ -4,6 +4,8 @@ All notable changes are listed here. Soluna was called Meld Desktop up to 0.3.0.
 
 ## [Unreleased]
 
+- **Wavy circle for music-only parts.** During an intro, an instrumental break or an outro — and for a whole instrumental track — the lyrics area shows a wavy circular ring that fills as the section plays and completes exactly when the music part ends. Its bounds come from the lyrics payload itself: the `instrumental` flag (LrcLib), word timings (the last word's end starts a gap, the next line's start ends it) and provider marker lines ("[Instrumental]"); a gap with no word timings shows no ring rather than a guessed one. With no known end the ring spins as an indeterminate wavy sweep.
+
 ## [0.4.0] — Soluna: new name and look, stronger downloads, safer app commands
 
 **Meld Desktop is now Soluna.** Update recommended for everyone on 0.3.0: you get this update inside the app (Settings → About, or the daily check), and you can also run the Soluna setup EXE over 0.3.0. Your library, downloads, settings and sign-ins are kept (details under "Moving from Meld Desktop"). This is the big release that gathers the playback, navigation and security work since 0.3.0.

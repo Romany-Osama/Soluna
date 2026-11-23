@@ -60,6 +60,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
         matchedTitle: item.title,
         matchedArtist: artist,
         lines: [],
+        instrumental: false,
       },
     });
     try {
@@ -88,6 +89,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
           matchedTitle: item.title,
           matchedArtist: artist,
           lines: [],
+          instrumental: false,
         },
         error: errorMessage(error),
       });
