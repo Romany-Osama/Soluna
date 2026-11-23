@@ -28,6 +28,7 @@ Everything is carried over the first time Soluna starts; there is nothing to exp
 ### Changed
 - The installer, the update package and the portable ZIP are now named `Soluna-<version>-x64-setup.exe` and `Soluna-<version>-x64-portable.zip`. The app's data lives in `%APPDATA%\Soluna` (see "Moving from Meld Desktop" above).
 - Security: `url` is updated to 2.5.9, which fixes a stack overflow when a malformed nested `blob:` address is read (RUSTSEC-2026-0592).
+- Playback: YouTube Music web streams now carry a proof-of-origin token made on your computer (like Meld on Android), so they play more reliably. If no token can be made, Soluna plays as before and says why when a song fails.
 - Leaving a search, album, artist or playlist page, or switching to another song's lyrics, stops the request that was still loading instead of letting it finish in the background.
 - Security: Soluna checks every id, token and text value the window sends to the app (length and allowed characters) before using it for a request or the database.
 - Security: the Soluna window may call only the app commands granted to it, grouped by area (Tauri app-command permissions). The Google and Spotify sign-in windows still get no access to Soluna's commands.
