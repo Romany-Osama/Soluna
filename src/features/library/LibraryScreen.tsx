@@ -205,7 +205,7 @@ export function LibraryScreen({
                 : libraryMode === "cache"
                   ? "Songs cached during Soluna playback, separate from explicit offline downloads."
                   : ["songs", "liked", "uploaded", "downloads"].includes(libraryMode)
-                    ? "Songs are filtered by Liked, Library, Uploaded, or Downloaded by category."
+                    ? "Songs from the playlist picked in your Library — go back to pick another one."
                     : libraryMode === "playlists"
                       ? "Local playlists and YouTube Music playlists saved by the connected account."
                       : libraryMode === "albums"
@@ -321,40 +321,6 @@ export function LibraryScreen({
             )}
             {["songs", "liked", "uploaded", "downloads"].includes(libraryMode) && (
               <div className="library-song-toolbar">
-                <button
-                  className="library-tab active library-root-chip"
-                  onClick={() => setLibraryMode("mix")}
-                  title="Return to Library"
-                  aria-label="Return to Library"
-                >
-                  Songs ×
-                </button>
-                <div className="library-filter-chips" role="tablist" aria-label="Song filter">
-                  <button
-                    className={librarySongFilter === "liked" ? "library-tab active" : "library-tab"}
-                    onClick={() => chooseLibrarySongFilter("liked")}
-                  >
-                    Liked
-                  </button>
-                  <button
-                    className={librarySongFilter === "library" ? "library-tab active" : "library-tab"}
-                    onClick={() => chooseLibrarySongFilter("library")}
-                  >
-                    Library
-                  </button>
-                  <button
-                    className={librarySongFilter === "uploaded" ? "library-tab active" : "library-tab"}
-                    onClick={() => chooseLibrarySongFilter("uploaded")}
-                  >
-                    Uploaded
-                  </button>
-                  <button
-                    className={librarySongFilter === "downloaded" ? "library-tab active" : "library-tab"}
-                    onClick={() => chooseLibrarySongFilter("downloaded")}
-                  >
-                    Downloaded
-                  </button>
-                </div>
                 <label className="library-search">
                   <span>Search</span>
                   <input

@@ -62,6 +62,7 @@ import { EMPTY_HISTORY, HistoryEntry, NavHistory, pushEntry, stepBack, stepForwa
 import {
   HistorySource,
   LibraryMode,
+  libraryModeForSongFilter,
   librarySongFilterFor,
   Route,
   isValidRoute,
@@ -508,11 +509,14 @@ function App() {
 
   const navigateTo = (next: NavKey) => {
     if (next === active) {
-      closeTransientLayers();
+      // The sidebar always lands on the tab root: a Songs list opened from a Library card returns to the overview.
+      if (next === "library" && libraryMode !== "mix") void openRoute({ name: "library", mode: "mix" });
+      else closeTransientLayers();
       return;
     }
     pushHistory();
     closeTransientLayers();
+    if (next === "library") setLibraryMode("mix"); // Land on the overview, not a leftover Songs list.
     setActive(next);
   };
 
@@ -827,10 +831,9 @@ function App() {
     }
   };
 
-  const chooseLibrarySongFilter = (filter: LibrarySongFilter) => {
-    setLibrarySongFilter(filter);
-    setLibraryMode(filter === "library" ? "songs" : filter === "downloaded" ? "downloads" : filter);
-  };
+  // A playlist card opens its Songs list as a history entry, so Back returns to the Library overview (U4-004).
+  const chooseLibrarySongFilter = (filter: LibrarySongFilter) =>
+    void openRoute({ name: "library", mode: libraryModeForSongFilter(filter) });
 
   const shuffleLibrary = async () => {
     if (filteredLibraryData.length === 0) return;

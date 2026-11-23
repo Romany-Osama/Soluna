@@ -36,6 +36,13 @@ const responses: Record<string, unknown> = {
   history_items: [],
   library_playlists: [],
   library_mix_songs: [],
+  library_liked_songs: [],
+  library_songs: [],
+  library_uploaded_songs: [],
+  library_downloads: [],
+  library_top_songs: [],
+  library_player_cache: [],
+  library_local_files: [],
   library_albums: [],
   library_artists: [],
   library_item_state: { liked: false, youtubeLiked: false, inLibrary: false, uploaded: false, pinned: false },
@@ -105,6 +112,30 @@ it("navigates with route-based back and forward history (U4-004)", async () => {
   await click(forward);
   expect(route()).toBe("/history/local");
   expect(forward).toHaveProperty("disabled", true);
+});
+
+it("returns from a Library playlist card to the Library overview with Back", async () => {
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const route = () => container.querySelector("main")?.getAttribute("data-route");
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  await click(screen.getByRole("button", { name: /Library/ }));
+  expect(route()).toBe("/library/mix");
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  expect(route()).toBe("/library/liked");
+  // The filter chips are gone: the overview cards are the playlist picker, so
+  // there is no "Songs ×" chip or "Return to Library" button in the list view.
+  expect(screen.queryByRole("button", { name: "Return to Library" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Liked" })).toBeNull();
+  // Back goes to the Library overview, not to Home.
+  await click(screen.getByRole("button", { name: "Back" }));
+  expect(route()).toBe("/library/mix");
+  // Tapping Library in the sidebar while a Songs list is open returns to the
+  // overview instead of leaving the list on screen.
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  expect(route()).toBe("/library/liked");
+  await click(screen.getByRole("button", { name: /Library/ }));
+  expect(route()).toBe("/library/mix");
 });
 
 it("returns to a detail page that was open when the user navigated away (U4-004)", async () => {
