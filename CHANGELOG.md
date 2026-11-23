@@ -1,22 +1,37 @@
-# Meld Desktop Changelog
+# Soluna Changelog
 
-All notable changes are listed here. Versions follow SemVer; `package.json` is the single version source (see `docs/plan/MASTER-PLAN.md` §7.1). Older releases used tag suffixes and asset names that did not match their version; each entry below states the real tag.
+All notable changes are listed here. Soluna was called Meld Desktop up to 0.3.0. Versions follow SemVer; `package.json` is the single version source (see `docs/plan/MASTER-PLAN.md` §7.1). Older releases used tag suffixes and asset names that did not match their version; each entry below states the real tag.
 
 ## [Unreleased]
 
+## [0.4.0] — Soluna: new name and look, stronger downloads, safer app commands
+
+**Meld Desktop is now Soluna.** Update recommended for everyone on 0.3.0: you get this update inside the app (Settings → About, or the daily check), and you can also run the Soluna setup EXE over 0.3.0. Your library, downloads, settings and sign-ins are kept (details under "Moving from Meld Desktop"). This is the big release that gathers the playback, navigation and security work since 0.3.0.
+
+### Moving from Meld Desktop
+
+Everything is carried over the first time Soluna starts; there is nothing to export or re-enter.
+- Your library, playlists, history, settings and downloads move from `%APPDATA%\Meld Desktop` to `%APPDATA%\Soluna`, and the database is renamed to `soluna.sqlite3`. Downloaded songs, their cover art and the playback cache keep working.
+- You stay signed in to YouTube Music and Spotify. The key that protects those saved sign-ins is copied to a new "Soluna" entry in the Windows credential store; the old "Meld Desktop" entry is left where it was.
+- Small things the window itself remembers, such as the page you were on and the queue to restore, may start fresh on the first launch after the rename.
+
 ### Added
+- **Meld Desktop is now Soluna**, with a new logo and a Spotify-style top bar. The window has its own minimise, maximise and close buttons in that bar.
+- `soluna://` links (for example `soluna://album/…` or `soluna://song/…`) open that page when you paste them into search. Older `meld:` links keep working.
 - The library sync message has a Cancel button.
 - Settings → Storage → Playback cache: current size, a size limit and a Clear playback cache button.
-- Meld opens on the page you were on when you closed it (an album, artist, playlist, library tab, search or history). Settings, dialogs and searches for a pasted link are not reopened.
+- Soluna opens on the page you were on when you closed it (an album, artist, playlist, library tab, search or history). Settings, dialogs and searches for a pasted link are not reopened.
 - Undo after unliking a song, unpinning from Speed Dial, removing something from your library or a local playlist, unsubscribing from a podcast or artist and unsaving an episode.
 - Messages now stack in the corner with their kind (info, success, warning, error). Errors stay until you close them and offer Retry where it helps; library sync and Spotify playlist downloads show their progress.
-- Pasting a Spotify playlist link or a `meld:` link into search opens that page. Pasting a Spotify song, album or artist link explains that it cannot be opened directly and to search by name.
+- Pasting a Spotify playlist link or a `soluna:` link into search opens that page (the older `meld:` links still work). Pasting a Spotify song, album or artist link explains that it cannot be opened directly and to search by name.
 
 ### Changed
+- The installer, the update package and the portable ZIP are now named `Soluna-<version>-x64-setup.exe` and `Soluna-<version>-x64-portable.zip`. The app's data lives in `%APPDATA%\Soluna` (see "Moving from Meld Desktop" above).
+- Security: `url` is updated to 2.5.9, which fixes a stack overflow when a malformed nested `blob:` address is read (RUSTSEC-2026-0592).
 - Leaving a search, album, artist or playlist page, or switching to another song's lyrics, stops the request that was still loading instead of letting it finish in the background.
-- Security: Meld checks every id, token and text value the window sends to the app (length and allowed characters) before using it for a request or the database.
-- Security: the Meld window may call only the app commands granted to it, grouped by area (Tauri app-command permissions). The Google and Spotify sign-in windows still get no access to Meld's commands.
-- Meld asks before anything that cannot be undone: deleting an uploaded song, removing a song from YouTube Music history or a YouTube Music playlist, removing a download, clearing playback or search history, removing a Spotify playlist track. If the change fails, the screen goes back to how it was.
+- Security: Soluna checks every id, token and text value the window sends to the app (length and allowed characters) before using it for a request or the database.
+- Security: the Soluna window may call only the app commands granted to it, grouped by area (Tauri app-command permissions). The Google and Spotify sign-in windows still get no access to Soluna's commands.
+- Soluna asks before anything that cannot be undone: deleting an uploaded song, removing a song from YouTube Music history or a YouTube Music playlist, removing a download, clearing playback or search history, removing a Spotify playlist track. If the change fails, the screen goes back to how it was.
 - Back and Forward return to the page you left, including an album, artist or playlist page, the tab it was opened from and the scroll position.
 - Back and Forward show a search, album, artist or playlist page you visited in the last 10 minutes straight away, as you left it, instead of loading it again.
 - Back and Forward also bring back the Library search text, sort order, grid/list layout, podcast filter and top-songs period, the History search, the filter and sort of a Spotify playlist, and the scroll position inside an album, artist or playlist page.
@@ -25,16 +40,20 @@ All notable changes are listed here. Versions follow SemVer; `package.json` is t
 ### Fixed
 - Error messages no longer show database text, file paths or web addresses from YouTube Music, Spotify or the lyrics providers; they say what failed.
 - A song that is in a playlist, the queue or the history more than once can be selected one copy at a time; ticking one copy no longer ticks the other. Playing the second copy from your library or an album page starts at that copy.
-- If one page or panel fails to display (for example after an unexpected answer from YouTube Music), only that part shows an error with Try again and Close. The rest of Meld keeps working and the song keeps playing.
+- If one page or panel fails to display (for example after an unexpected answer from YouTube Music), only that part shows an error with Try again and Close. The rest of Soluna keeps working and the song keeps playing.
 - Opening a page while another one was still loading (or searching again before the first results arrived) could replace the new page with the old one when its answer came in late. Only the page you opened last is shown now.
 - Pasting a YouTube Music playlist link (`music.youtube.com/playlist?list=…`) opened an empty album instead of the playlist, and an album's `/browse/` link was opened as an artist. Both now open the right page, and Back returns to the page you pasted the link on.
-- **Offline downloads failed with "audio cache response failed: HTTP status client error (403 Forbidden)".** YouTube's media servers now serve only the first ~1 MB of stream links from the ANDROID_VR 1.65 client (the first one Meld tries) and refuse the rest. Playing could start and recover; downloading the whole file could not. Meld now checks every new stream link by reading a small piece past the first megabyte. A refused link is skipped straight away for another YouTube source, and that source is tried last for the next 30 minutes.
-- Downloads send range requests the way the player does. If a link is refused during a download, Meld picks another source and continues from the bytes it already has (up to two retries). A partial file that no longer matches is restarted cleanly.
+- **Offline downloads failed with "audio cache response failed: HTTP status client error (403 Forbidden)".** YouTube's media servers now serve only the first ~1 MB of stream links from the ANDROID_VR 1.65 client (the first one Soluna tries) and refuse the rest. Playing could start and recover; downloading the whole file could not. Soluna now checks every new stream link by reading a small piece past the first megabyte. A refused link is skipped straight away for another YouTube source, and that source is tried last for the next 30 minutes.
+- Downloads send range requests the way the player does. If a link is refused during a download, Soluna picks another source and continues from the bytes it already has (up to two retries). A partial file that no longer matches is restarted cleanly.
 - A download or cache file that was cut short is no longer saved as complete. The partial file is kept, and the next try resumes from it.
 - Download and cache errors no longer include the signed stream URL.
 - A download that is resumed after a cancel, an error or an app restart is appended to only when YouTube sends the rest of the very same file. If the file changed (for example after switching Audio quality), the download starts again cleanly instead of joining two different streams into a broken file.
 - The playback cache no longer grows without limit. Settings → Storage shows how much space it uses and lets you pick a limit (Off, 512 MB to 20 GB; default 2 GB). The songs played longest ago are removed first, and offline downloads are never touched. Half-written files left by a crash are cleaned up at start-up, except downloads that can still resume.
 - Skipping quickly through songs no longer starts a full background download for every song. At most two background cache jobs exist at once. Skipping stops the previous song's job within a quarter of a second, and closing the app stops them all and removes their half-written files.
+
+### Under the hood
+- Every app command now returns a structured error and takes validated arguments; the TypeScript bindings are generated from the Rust commands and checked in CI. Long commands can be cancelled, and events follow a documented, versioned contract.
+- `App.tsx` is split into feature screens and hooks, with ESLint and Prettier in CI. CI is split into required lint, audit and Windows checks, plus an always-reported release dry run.
 
 ## [0.3.0] — Playback and search fixes, stronger YouTube fallbacks
 
