@@ -155,7 +155,7 @@ payload!(
     trim = true
 );
 payload!(
-    /// Ids of rows in the local Meld library (songs, playlists, artists, downloads).
+    /// Ids of rows in the local Soluna library (songs, playlists, artists, downloads).
     LibraryId,
     "library id",
     Rule::Charset {

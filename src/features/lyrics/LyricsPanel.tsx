@@ -1,9 +1,12 @@
 import type { HistoryEntry } from "../../app/history";
 import { RefObject, Dispatch, SetStateAction } from "react";
 import { LoadState, LyricsPayload } from "../../types";
+import { LyricLines } from "./LyricLines";
+import { InstrumentalInterlude } from "./InstrumentalInterlude";
+import type { LyricsFollow } from "./useLyrics";
 
 export type LyricsPanelProps = {
-  activeLyricIndex: number;
+  lyricsFollow: LyricsFollow;
   activeLyricRef: RefObject<HTMLButtonElement | null>;
   audioRef: RefObject<HTMLAudioElement | null>;
   backStack: HistoryEntry[];
@@ -23,7 +26,7 @@ export type LyricsPanelProps = {
 };
 
 export function LyricsPanel({
-  activeLyricIndex,
+  lyricsFollow,
   activeLyricRef,
   audioRef,
   backStack,
@@ -67,7 +70,13 @@ export function LyricsPanel({
                   <div>
                     <p className="eyebrow">
                       {lyrics.data.provider}
-                      {lyrics.data.synced ? " · Synced" : " · Plain"}
+                      {lyrics.data.instrumental
+                        ? " · Instrumental"
+                        : lyrics.data.lines.some((line) => (line.words?.length ?? 0) > 0)
+                          ? " · Word-synced"
+                          : lyrics.data.synced
+                            ? " · Synced"
+                            : " · Plain"}
                     </p>
                     <h2>{lyrics.data.matchedTitle}</h2>
                     <p>{lyrics.data.matchedArtist}</p>
@@ -110,28 +119,18 @@ export function LyricsPanel({
                   </div>
                 </div>
                 {lyrics.data.synced && lyrics.data.lines.length > 0 ? (
-                  <div
-                    ref={lyricsContainerRef}
-                    className="lyrics-lines"
-                    onWheel={() => setLyricsAutoScrollEnabled(false)}
-                    onTouchMove={() => setLyricsAutoScrollEnabled(false)}
-                    onPointerDown={() => setLyricsAutoScrollEnabled(false)}
-                    onKeyDown={() => setLyricsAutoScrollEnabled(false)}
-                  >
-                    {lyrics.data.lines.map((line, index) => (
-                      <button
-                        ref={index === activeLyricIndex ? activeLyricRef : undefined}
-                        key={`${line.timeMs}-${index}`}
-                        className={index === activeLyricIndex ? "lyric-line active" : "lyric-line"}
-                        onClick={() => {
-                          setLyricsAutoScrollEnabled(true);
-                          if (audioRef.current) audioRef.current.currentTime = line.timeMs / 1000;
-                        }}
-                      >
-                        {line.text}
-                      </button>
-                    ))}
-                  </div>
+                  <LyricLines
+                    lines={lyrics.data.lines}
+                    activeLyricIndex={lyricsFollow.activeLyricIndex}
+                    activeWordIndex={lyricsFollow.activeWordIndex}
+                    activeLyricRef={activeLyricRef}
+                    audioRef={audioRef}
+                    lyricsContainerRef={lyricsContainerRef}
+                    playbackSeconds={lyricsFollow.playbackSeconds}
+                    setLyricsAutoScrollEnabled={setLyricsAutoScrollEnabled}
+                  />
+                ) : lyrics.data.instrumental ? (
+                  <InstrumentalInterlude label="Instrumental — no lyrics, just the music" />
                 ) : (
                   <pre className="lyrics-text">{lyrics.data.text}</pre>
                 )}

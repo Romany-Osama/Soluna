@@ -159,7 +159,7 @@ async fn fetch_lyrics_from_provider_body(
             return Ok(cached);
         }
     }
-    let payload = timeout(
+    let outcome = timeout(
         Duration::from_secs(30),
         fetch_lyrics_provider(
             provider,
@@ -172,12 +172,29 @@ async fn fetch_lyrics_from_provider_body(
         ),
     )
     .await
-    .map_err(|_| "Lyrics provider timed out after 30 seconds".to_owned())??
-    .ok_or_else(|| format!("{provider} did not return lyrics for this song"))?;
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| "database state poisoned".to_owned())?;
-    cache_lyrics_payload(&db, &cache_id, &payload)?;
-    Ok(payload)
+    .map_err(|_| "Lyrics provider timed out after 30 seconds".to_owned())??;
+    if let Some(payload) = outcome.payload {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "database state poisoned".to_owned())?;
+        cache_lyrics_payload(&db, &cache_id, &payload)?;
+        return Ok(payload);
+    }
+    if outcome.instrumental {
+        // LrcLib flagged the track instrumental; not cached (see
+        // fetch_lyrics_inner — the cache has no instrumental column).
+        return Ok(LyricsPayload {
+            provider: provider.to_owned(),
+            text: String::new(),
+            synced: false,
+            matched_title: cleaned_title,
+            matched_artist: cleaned_artist,
+            lines: Vec::new(),
+            instrumental: true,
+        });
+    }
+    Err(IpcError::from(format!(
+        "{provider} did not return lyrics for this song"
+    )))
 }

@@ -60,6 +60,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
         matchedTitle: item.title,
         matchedArtist: artist,
         lines: [],
+        instrumental: false,
       },
     });
     try {
@@ -88,6 +89,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
           matchedTitle: item.title,
           matchedArtist: artist,
           lines: [],
+          instrumental: false,
         },
         error: errorMessage(error),
       });
@@ -136,6 +138,19 @@ export type LyricsFollowDeps = {
   playerExpanded: boolean;
 };
 
+/** The follow state the lyrics views need: active line, active word, playhead. */
+export type LyricsFollow = {
+  activeLyricIndex: number;
+  activeWordIndex: number;
+  playbackSeconds: number;
+};
+
+/** useLyricsFollow plus the playhead, as one object for the lyrics views. */
+export function useLyricsFollowView(deps: LyricsFollowDeps): LyricsFollow {
+  const { activeLyricIndex, activeWordIndex } = useLyricsFollow(deps);
+  return { activeLyricIndex, activeWordIndex, playbackSeconds: deps.playbackSeconds };
+}
+
 export function useLyricsFollow({
   activeLyricRef,
   lyrics,
@@ -150,6 +165,22 @@ export function useLyricsFollow({
     const nextIndex = lyrics.data.lines.findIndex((line) => line.timeMs > position);
     return nextIndex < 0 ? lyrics.data.lines.length - 1 : Math.max(0, nextIndex - 1);
   }, [lyrics, playbackSeconds]);
+
+  // Word-by-word (syllable-synced) highlight, Liner-style: within the
+  // active line, the last word whose start is behind the playhead. Lines
+  // without word timings stay line-highlighted (activeWordIndex -1).
+  const activeWordIndex = useMemo(() => {
+    if (activeLyricIndex < 0 || !lyrics || lyrics.status !== "ready") return -1;
+    const words = lyrics.data.lines[activeLyricIndex]?.words;
+    if (!words || words.length === 0) return -1;
+    const position = playbackSeconds * 1000;
+    let index = -1;
+    for (let i = 0; i < words.length; i++) {
+      if (position >= words[i].timeMs) index = i;
+      else break;
+    }
+    return index;
+  }, [activeLyricIndex, lyrics, playbackSeconds]);
 
   useEffect(() => {
     if (activeLyricIndex < 0 || !lyricsAutoScrollEnabled) return;
@@ -168,5 +199,5 @@ export function useLyricsFollow({
     return () => cancelAnimationFrame(frame);
   }, [activeLyricIndex, playerExpanded, lyricsAutoScrollEnabled, lyrics?.status, activeLyricRef, lyricsContainerRef]);
 
-  return { activeLyricIndex };
+  return { activeLyricIndex, activeWordIndex };
 }
