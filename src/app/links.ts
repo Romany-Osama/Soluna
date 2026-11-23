@@ -1,15 +1,15 @@
-// U4-007: one parser for every link Meld understands. Hosts are matched exactly and IDs against their alphabet, so a
+// U4-007: one parser for every link Soluna understands. Hosts are matched exactly and IDs against their alphabet, so a
 // look-alike host or a crafted ID never reaches a command.
 import { isValidRoute, parseRoutePath, Route } from "./routes";
 
 export type SpotifyLinkType = "track" | "album" | "artist" | "playlist";
 
 export type LinkTarget =
-  /** A page Meld can show. */
+  /** A page Soluna can show. */
   | { kind: "route"; route: Route }
   /** A YouTube video or YouTube Music song, played directly. */
   | { kind: "video"; videoId: string }
-  /** A Spotify item that has no Meld page (tracks, albums, artists). */
+  /** A Spotify item that has no Soluna page (tracks, albums, artists). */
   | { kind: "spotify"; type: Exclude<SpotifyLinkType, "playlist">; id: string };
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;

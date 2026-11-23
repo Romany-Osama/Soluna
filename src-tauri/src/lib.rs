@@ -4014,7 +4014,7 @@ fn parse_playlist_continuation(response: &Value) -> PlaylistContinuationPage {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct LrcLibTrack {
     track_name: String,
@@ -4022,6 +4022,16 @@ struct LrcLibTrack {
     duration: f64,
     plain_lyrics: Option<String>,
     synced_lyrics: Option<String>,
+    #[serde(default)]
+    instrumental: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LyricWord {
+    time_ms: i64,
+    end_ms: i64,
+    text: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -4029,6 +4039,8 @@ struct LrcLibTrack {
 struct LyricLine {
     time_ms: i64,
     text: String,
+    /// Word timings (enhanced LRC). Empty when the provider only syncs lines.
+    words: Vec<LyricWord>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4040,6 +4052,42 @@ struct LyricsPayload {
     matched_title: String,
     matched_artist: String,
     lines: Vec<LyricLine>,
+    /// Liner-style instrumental marker: LrcLib flagged the track instrumental
+    /// and no provider returned lyrics. The frontend shows an "Instrumental"
+    /// animation instead of a lookup error.
+    instrumental: bool,
+}
+
+/// What one lyrics provider returned: a payload, and (LrcLib only) whether a
+/// matching track is flagged instrumental with no lyrics at all.
+struct LyricsProviderOutcome {
+    payload: Option<LyricsPayload>,
+    instrumental: bool,
+}
+
+/// True when one of the LrcLib candidates is the same song (name match, or
+/// duration within 5s when known) and is flagged instrumental. The duration
+/// guard keeps an instrumental cover/karaoke version of another song from
+/// marking this one.
+fn lrclib_instrumental_match(
+    tracks: &[LrcLibTrack],
+    title: &str,
+    artist: &str,
+    duration: i32,
+) -> bool {
+    tracks.iter().any(|track| {
+        if !track.instrumental {
+            return false;
+        }
+        if duration >= 0 {
+            duration_delta(track, duration) <= 5
+        } else {
+            (lyrics_similarity(title, &track.track_name)
+                + lyrics_similarity(artist, &track.artist_name))
+                / 2.0
+                > 0.6
+        }
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -4100,6 +4148,74 @@ fn filter_lyrics_credit_lines(value: &str) -> String {
         .join("\n")
 }
 
+/// A `<mm:ss.xx>` tag inside a lyric line starts the next word (enhanced LRC,
+/// as emitted for Apple TTML word timings). Returns the plain line text and
+/// the word timings; a word's end is the next word's start and is fixed up
+/// by `parse_lyric_lines` once the next line is known.
+fn parse_lyric_words(line_time_ms: i64, text: &str) -> (String, Vec<LyricWord>) {
+    let mut plain = String::new();
+    let mut words: Vec<LyricWord> = Vec::new();
+    let mut rest = text;
+    let mut current_start = line_time_ms;
+    let mut current_text = String::new();
+    let mut saw_word_tag = false;
+    while let Some(open) = rest.find('<') {
+        let after_open = &rest[open + 1..];
+        let is_word_tag = after_open.find('>').map_or(false, |close| {
+            parse_word_tag(&after_open[..close]).is_some()
+        });
+        if !is_word_tag {
+            // Not a word tag (e.g. "<3"): keep the '<' as lyric text.
+            current_text.push_str(&rest[..=open]);
+            plain.push_str(&rest[..=open]);
+            rest = &rest[open + 1..];
+            continue;
+        }
+        saw_word_tag = true;
+        let close = after_open.find('>').expect("checked above");
+        let time_ms = parse_word_tag(&after_open[..close]).expect("checked above");
+        current_text.push_str(&rest[..open]);
+        plain.push_str(&rest[..open]);
+        let word_text = current_text.trim().to_owned();
+        if !word_text.is_empty() {
+            words.push(LyricWord {
+                time_ms: current_start,
+                end_ms: time_ms,
+                text: word_text,
+            });
+        }
+        current_start = time_ms;
+        current_text = String::new();
+        rest = &after_open[close + 1..];
+    }
+    current_text.push_str(rest);
+    plain.push_str(rest);
+    // A line with no word tags is a plain line: no word timings to report.
+    // (Without this, every plain LRC line would carry one whole-line "word"
+    // and the frontend would wrongly report it as word-synced.)
+    let word_text = current_text.trim().to_owned();
+    if saw_word_tag && !word_text.is_empty() {
+        words.push(LyricWord {
+            time_ms: current_start,
+            end_ms: current_start,
+            text: word_text,
+        });
+    }
+    (plain.trim().to_owned(), words)
+}
+
+/// The inside of an inline word tag: `mm:ss.xx` (or `m:ss`, `mm:ss`).
+fn parse_word_tag(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let mut parts = value.split(':');
+    let minutes: i64 = parts.next()?.parse().ok()?;
+    let seconds: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || minutes < 0 || seconds < 0.0 || seconds >= 60.0 {
+        return None;
+    }
+    Some(((minutes as f64 * 60.0 + seconds) * 1000.0).round() as i64)
+}
+
 fn parse_lyric_lines(value: &str) -> Vec<LyricLine> {
     let mut lines = Vec::new();
     for raw in value.lines() {
@@ -4120,18 +4236,47 @@ fn parse_lyric_lines(value: &str) -> Vec<LyricLine> {
             }
             rest = &rest[end + 1..];
         }
-        let text = rest.trim().to_owned();
+        let (text, words) =
+            parse_lyric_words(timestamps.first().copied().unwrap_or(0), rest.trim());
         if text.is_empty() {
             continue;
         }
         for time_ms in timestamps {
+            // Word tags are absolute times, so every repeated timestamp
+            // shares the same word timings.
+            let mut line_words = words.clone();
+            if time_ms != words.first().map(|word| word.time_ms).unwrap_or(time_ms) {
+                // Repeated timestamp for the same text: shift the word
+                // starts so the first word still starts at this line.
+                let shift = time_ms
+                    - line_words
+                        .first()
+                        .map(|word| word.time_ms)
+                        .unwrap_or(time_ms);
+                for word in &mut line_words {
+                    word.time_ms += shift;
+                    word.end_ms += shift;
+                }
+            }
             lines.push(LyricLine {
                 time_ms,
                 text: text.clone(),
+                words: line_words,
             });
         }
     }
     lines.sort_by_key(|line| line.time_ms);
+    // Last word of a line ends where the next line starts (or 3s after its
+    // own start when it is the last line); earlier words already end at the
+    // next word's start.
+    for index in 0..lines.len() {
+        let next_start = lines.get(index + 1).map(|line| line.time_ms);
+        for word in &mut lines[index].words {
+            if word.end_ms <= word.time_ms {
+                word.end_ms = next_start.unwrap_or(word.time_ms + 3000);
+            }
+        }
+    }
     lines
 }
 
@@ -4145,6 +4290,12 @@ fn parse_provider_time(value: &str) -> Option<i64> {
             .parse::<f64>()
             .ok()
             .map(|v| (v * 1000.0).round() as i64);
+    }
+    // Bare TTML clock values are seconds ("9.731" = 9.731s). Apple TTML
+    // uses this form for both <p> and <span> begins, and the old code
+    // rejected it, so BetterLyrics returned nothing for real Apple TTML.
+    if let Ok(seconds) = value.parse::<f64>() {
+        return Some((seconds * 1000.0).round() as i64);
     }
     let mut parts = value.split(':').collect::<Vec<_>>();
     if parts.len() == 3 {
@@ -4173,13 +4324,54 @@ fn decode_basic_entities(value: &str) -> String {
 fn betterlyrics_to_lrc(ttml: &str) -> Option<String> {
     let paragraph =
         Regex::new(r#"(?is)<p\b[^>]*\bbegin=['\"]([^'\"]+)['\"][^>]*>(.*?)</p>"#).ok()?;
+    let span =
+        Regex::new(r#"(?is)<span\b[^>]*\bbegin=['\"]([^'\"]+)['\"][^>]*>(.*?)</span>"#).ok()?;
     let tags = Regex::new(r"(?is)<[^>]+>").ok()?;
     let mut lines = Vec::new();
     for capture in paragraph.captures_iter(ttml) {
-        let time = parse_provider_time(capture.get(1)?.as_str())?;
-        let text = decode_basic_entities(tags.replace_all(capture.get(2)?.as_str(), "").trim())
-            .trim()
-            .to_owned();
+        // One unparsable paragraph used to abort the whole conversion, so a
+        // single odd timestamp lost every line. Skip it instead.
+        let Some(time) = parse_provider_time(capture.get(1)?.as_str()) else {
+            continue;
+        };
+        let body = capture.get(2)?.as_str();
+        // Word timings: Apple TTML marks every word with a <span begin end>.
+        // They are emitted as inline <mm:ss.xx> tags (enhanced LRC) so the
+        // frontend can highlight word by word; lines without spans keep the
+        // old line-only shape.
+        let mut words: Vec<(i64, String)> = Vec::new();
+        for span_capture in span.captures_iter(body) {
+            let Some(begin) = parse_provider_time(span_capture.get(1)?.as_str()) else {
+                continue;
+            };
+            let text =
+                decode_basic_entities(tags.replace_all(span_capture.get(2)?.as_str(), "").trim())
+                    .trim()
+                    .to_owned();
+            if !text.is_empty() {
+                words.push((begin, text));
+            }
+        }
+        let text = if words.is_empty() {
+            decode_basic_entities(tags.replace_all(body, "").trim())
+                .trim()
+                .to_owned()
+        } else {
+            let mut out = String::new();
+            for (index, (begin, word)) in words.iter().enumerate() {
+                if index == 0 {
+                    out.push_str(word);
+                } else {
+                    out.push_str(&format!(
+                        " <{:02}:{:05.2}>{}",
+                        begin / 60_000,
+                        (begin % 60_000) as f64 / 1000.0,
+                        word
+                    ));
+                }
+            }
+            out
+        };
         if !text.is_empty() {
             lines.push((time, text));
         }
@@ -4553,6 +4745,56 @@ fn kugou_normalize_lrc(value: &str) -> String {
     filtered[..filtered.len().saturating_sub(tail)].join("\n")
 }
 
+/// True when a KuGou lyrics candidate names the song we asked for: the
+/// candidate's song/singer match, or its duration is within 8s (the same
+/// tolerance the song search uses). The lyrics service answers for the hash,
+/// not for our song — seen live, a "Shape of You" hash returned "The Seasons
+/// Op. 37b: June" by arkady sevidov, and the old code downloaded it blindly.
+fn kugou_candidate_matches(candidate: &Value, title: &str, artist: &str, duration: i32) -> bool {
+    let song = candidate.get("song").and_then(Value::as_str).unwrap_or("");
+    let singer = candidate
+        .get("singer")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let name_score = (lyrics_similarity(title, song) + lyrics_similarity(artist, singer)) / 2.0;
+    if name_score > 0.6 {
+        return true;
+    }
+    if duration >= 0 {
+        if let Some(candidate_ms) = candidate.get("duration").and_then(Value::as_i64) {
+            return (candidate_ms - i64::from(duration) * 1000).abs() <= 8_000;
+        }
+    }
+    false
+}
+
+/// The downloaded LRC names its song in [ti:] / [ar:] tags when the service
+/// includes them. A mismatch means the download is for another track, even
+/// when the candidate looked right. No tags means no verdict.
+fn kugou_lrc_matches(text: &str, title: &str, artist: &str) -> bool {
+    let tag = |name: &str| {
+        text.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_prefix(name))
+                .and_then(|rest| rest.strip_prefix(':'))
+                .and_then(|rest| rest.strip_suffix(']'))
+                .map(str::trim)
+        })
+    };
+    if let Some(song) = tag("ti") {
+        if lyrics_similarity(title, song) <= 0.6 {
+            return false;
+        }
+    }
+    if let Some(singer) = tag("ar") {
+        if lyrics_similarity(artist, singer) <= 0.6 {
+            return false;
+        }
+    }
+    true
+}
+
 async fn kugou_fetch(
     title: &str,
     artist: &str,
@@ -4601,7 +4843,10 @@ async fn kugou_fetch(
             .get("accesskey")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if id == 0 || access_key.is_empty() {
+        if id == 0
+            || access_key.is_empty()
+            || !kugou_candidate_matches(candidate, title, artist, duration)
+        {
             continue;
         }
         let id_value = id.to_string();
@@ -4617,7 +4862,11 @@ async fn kugou_fetch(
             .await?;
         let content = download.get("content").and_then(Value::as_str)?;
         let decoded = BASE64.decode(content).ok()?;
-        let normalized = kugou_normalize_lrc(&String::from_utf8_lossy(&decoded));
+        let raw = String::from_utf8_lossy(&decoded);
+        if !kugou_lrc_matches(&raw, title, artist) {
+            continue;
+        }
+        let normalized = kugou_normalize_lrc(&raw);
         if !normalized.is_empty() {
             return Some(normalized);
         }
@@ -4637,6 +4886,9 @@ async fn kugou_fetch(
         .get("candidates")
         .and_then(Value::as_array)
         .and_then(|values| values.first())?;
+    if !kugou_candidate_matches(candidate, title, artist, duration) {
+        return None;
+    }
     let id = candidate.get("id").and_then(Value::as_i64)?;
     let access_key = candidate.get("accesskey").and_then(Value::as_str)?;
     let id_value = id.to_string();
@@ -4651,8 +4903,21 @@ async fn kugou_fetch(
     .await?;
     let content = download.get("content").and_then(Value::as_str)?;
     let decoded = BASE64.decode(content).ok()?;
-    let normalized = kugou_normalize_lrc(&String::from_utf8_lossy(&decoded));
+    let raw = String::from_utf8_lossy(&decoded);
+    if !kugou_lrc_matches(&raw, title, artist) {
+        return None;
+    }
+    let normalized = kugou_normalize_lrc(&raw);
     (!normalized.is_empty()).then_some(normalized)
+}
+
+/// A token.get answer worth using: non-empty, not the "UpgradeOnly" denial,
+/// and not the all-zero anonymous token the endpoint currently returns (its
+/// matcher then matches the wrong track and the lyrics come back scrambled).
+fn musixmatch_token_usable(token: &str) -> bool {
+    !token.is_empty()
+        && token != "UpgradeOnlyUpgradeOnlyUpgradeOnlyUpgradeOnly"
+        && !token.chars().all(|c| c == '0')
 }
 
 async fn musixmatch_token() -> Option<String> {
@@ -4684,9 +4949,7 @@ async fn musixmatch_token() -> Option<String> {
     let token = message
         .pointer("/body/user_token")
         .and_then(Value::as_str)
-        .filter(|value| {
-            !value.is_empty() && *value != "UpgradeOnlyUpgradeOnlyUpgradeOnlyUpgradeOnly"
-        })?
+        .filter(|value| musixmatch_token_usable(value))?
         .to_owned();
     if let Ok(mut value) = cache.lock() {
         *value = Some(token.clone());
@@ -4730,6 +4993,23 @@ async fn musixmatch_fetch(
     }
     let response: Value = provider_json(request).await?;
     let body = response.pointer("/message/body")?;
+    // The matcher can return a different track (seen live: "Shape of You"
+    // by Ed Sheeran matching "NOKIA" by Drake). Never serve another song's
+    // lyrics, scrambled or not.
+    if let Some(track) = body.pointer("/macro_calls/matcher.track.get/message/body/track") {
+        let name = track
+            .get("track_name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let singer = track
+            .get("artist_name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let score = (lyrics_similarity(title, name) + lyrics_similarity(artist, singer)) / 2.0;
+        if score <= 0.6 {
+            return None;
+        }
+    }
     if let Some(text) = body
         .pointer(
             "/macro_calls/track.subtitles.get/message/body/subtitle_list/0/subtitle/subtitle_body",
@@ -4751,11 +5031,10 @@ async fn lyricsplus_fetch(
     duration: i32,
     album: Option<&str>,
 ) -> Option<String> {
-    for base in [
-        "https://lyricsplus.binimum.org",
-        "https://lyricsplus.atomix.one",
-        "https://lyricsplus-seven.vercel.app",
-    ] {
+    // Two of the three mirrors are dead (verified 2026-11-23: atomix.one
+    // closes the connection, the vercel deployment is disabled), and a dead
+    // mirror burns the 15s provider timeout before the chain can move on.
+    for base in ["https://lyricsplus.binimum.org"] {
         let seconds = if duration > 0 { duration } else { -1 };
         let seconds_value = seconds.to_string();
         let mut request = http().get(format!("{base}/v2/lyrics/get")).query(&[
@@ -4970,7 +5249,7 @@ async fn fetch_lyrics_provider(
     album: Option<&str>,
     video_id: Option<&str>,
     state: &tauri::State<'_, RuntimeState>,
-) -> Result<Option<LyricsPayload>, String> {
+) -> Result<LyricsProviderOutcome, String> {
     let make_payload =
         |text: String, synced: bool, matched_title: String, matched_artist: String| {
             let filtered = filter_lyrics_credit_lines(&text);
@@ -4985,21 +5264,24 @@ async fn fetch_lyrics_provider(
                 synced,
                 matched_title,
                 matched_artist,
+                instrumental: false,
             }
         };
 
-    match provider {
-        "BetterLyrics" => Ok(betterlyrics_fetch(title, artist, duration, album)
+    // LrcLib only: set when a matching track is flagged instrumental.
+    let mut instrumental = false;
+    let payload = match provider {
+        "BetterLyrics" => betterlyrics_fetch(title, artist, duration, album)
             .await
             .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
-            .filter(|payload| !payload.text.is_empty())),
-        "Paxsenix" => Ok(paxsenix_fetch(title, artist, duration, album)
+            .filter(|payload| !payload.text.is_empty()),
+        "Paxsenix" => paxsenix_fetch(title, artist, duration, album)
             .await
             .map(|text| {
                 let synced = !parse_lyric_lines(&text).is_empty();
                 make_payload(text, synced, title.to_owned(), artist.to_owned())
             })
-            .filter(|payload| !payload.text.is_empty())),
+            .filter(|payload| !payload.text.is_empty()),
         "LrcLib" => {
             let valid = |tracks: Vec<LrcLibTrack>| {
                 tracks
@@ -5007,18 +5289,30 @@ async fn fetch_lyrics_provider(
                     .filter(|track| track.synced_lyrics.is_some() || track.plain_lyrics.is_some())
                     .collect::<Vec<_>>()
             };
-            let mut tracks = valid(lrclib_search(Some(title), Some(artist), album, None).await);
-            if tracks.is_empty() {
-                tracks = valid(lrclib_search(Some(title), None, None, None).await);
+            // Same four attempts as before, in order, stopping at the first
+            // that yields a track with lyrics. Instrumental candidates are
+            // collected from every attempt tried, so a lyrics-less
+            // instrumental match is still reported even when the lyrics
+            // attempts come up empty.
+            let combined_query = format!("{artist} {title}");
+            let attempts = [
+                (Some(title), Some(artist), album, None),
+                (Some(title), None, None, None),
+                (None, None, None, Some(combined_query.as_str())),
+                (None, None, None, Some(title)),
+            ];
+            let mut instrumental_tracks: Vec<LrcLibTrack> = Vec::new();
+            let mut tracks = Vec::new();
+            for (track_name, artist_name, album_name, query) in attempts {
+                let found = lrclib_search(track_name, artist_name, album_name, query).await;
+                instrumental_tracks
+                    .extend(found.iter().filter(|track| track.instrumental).cloned());
+                tracks = valid(found);
+                if !tracks.is_empty() {
+                    break;
+                }
             }
-            if tracks.is_empty() {
-                tracks = valid(
-                    lrclib_search(None, None, None, Some(&format!("{artist} {title}"))).await,
-                );
-            }
-            if tracks.is_empty() {
-                tracks = valid(lrclib_search(None, None, None, Some(title)).await);
-            }
+            instrumental = lrclib_instrumental_match(&instrumental_tracks, title, artist, duration);
             let best = if duration < 0 {
                 tracks
                     .iter()
@@ -5057,49 +5351,52 @@ async fn fetch_lyrics_provider(
                         .filter(|track| duration_delta(track, duration) <= 5)
                 })
             };
-            Ok(best
-                .and_then(|track| {
-                    let text = track
-                        .synced_lyrics
-                        .clone()
-                        .or_else(|| track.plain_lyrics.clone())?;
-                    Some(make_payload(
-                        text,
-                        track.synced_lyrics.is_some(),
-                        track.track_name.clone(),
-                        track.artist_name.clone(),
-                    ))
-                })
-                .filter(|payload| !payload.text.is_empty()))
+            best.and_then(|track| {
+                let text = track
+                    .synced_lyrics
+                    .clone()
+                    .or_else(|| track.plain_lyrics.clone())?;
+                Some(make_payload(
+                    text,
+                    track.synced_lyrics.is_some(),
+                    track.track_name.clone(),
+                    track.artist_name.clone(),
+                ))
+            })
+            .filter(|payload| !payload.text.is_empty())
         }
-        "KuGou" => Ok(kugou_fetch(title, artist, duration, album)
+        "KuGou" => kugou_fetch(title, artist, duration, album)
             .await
             .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
-            .filter(|payload| !payload.text.is_empty())),
-        "LyricsPlus" => Ok(lyricsplus_fetch(title, artist, duration, album)
+            .filter(|payload| !payload.text.is_empty()),
+        "LyricsPlus" => lyricsplus_fetch(title, artist, duration, album)
             .await
             .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
-            .filter(|payload| !payload.text.is_empty())),
-        "Musixmatch" => Ok(musixmatch_fetch(title, artist, duration, album)
+            .filter(|payload| !payload.text.is_empty()),
+        "Musixmatch" => musixmatch_fetch(title, artist, duration, album)
             .await
             .map(|(text, synced)| make_payload(text, synced, title.to_owned(), artist.to_owned()))
-            .filter(|payload| !payload.text.is_empty())),
-        "YouTubeSubtitle" => Ok(match video_id.filter(|value| !value.trim().is_empty()) {
+            .filter(|payload| !payload.text.is_empty()),
+        "YouTubeSubtitle" => match video_id.filter(|value| !value.trim().is_empty()) {
             Some(id) => youtube_subtitle_fetch(id)
                 .await
                 .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
                 .filter(|payload| !payload.text.is_empty()),
             None => None,
-        }),
-        "YouTube" => Ok(match video_id.filter(|value| !value.trim().is_empty()) {
+        },
+        "YouTube" => match video_id.filter(|value| !value.trim().is_empty()) {
             Some(id) => youtube_plain_lyrics_fetch(id, state)
                 .await
                 .map(|text| make_payload(text, false, title.to_owned(), artist.to_owned()))
                 .filter(|payload| !payload.text.is_empty()),
             None => None,
-        }),
-        _ => Ok(None),
-    }
+        },
+        _ => None,
+    };
+    Ok(LyricsProviderOutcome {
+        payload,
+        instrumental,
+    })
 }
 
 fn cache_lyrics_variant(
@@ -5128,7 +5425,7 @@ fn cached_lyrics_provider(
     db.query_row("SELECT text, synced, matched_title, matched_artist FROM lyrics_variants WHERE song_id = ?1 AND provider = ?2", params![cache_id, provider], |row| {
         let text: String = row.get(0)?;
         let synced: i64 = row.get(1)?;
-        Ok(LyricsPayload { lines: if synced != 0 { parse_lyric_lines(&text) } else { Vec::new() }, provider: provider.to_owned(), text, synced: synced != 0, matched_title: row.get(2)?, matched_artist: row.get(3)? })
+        Ok(LyricsPayload { lines: if synced != 0 { parse_lyric_lines(&text) } else { Vec::new() }, provider: provider.to_owned(), text, synced: synced != 0, matched_title: row.get(2)?, matched_artist: row.get(3)?, instrumental: false })
     }).optional().map_err(|error| format!("lyrics provider cache read failed: {error}"))
 }
 
@@ -5173,8 +5470,10 @@ async fn fetch_all_enabled_lyrics(
             fetch_lyrics_provider(&provider, title, artist, duration, album, video_id, state),
         )
         .await;
-        if let Ok(Ok(Some(payload))) = result {
-            results.push(payload);
+        if let Ok(Ok(outcome)) = result {
+            if let Some(payload) = outcome.payload {
+                results.push(payload);
+            }
         }
     }
     Ok(results)
@@ -5225,6 +5524,7 @@ async fn fetch_lyrics_inner(
                 synced: cached.2 != 0,
                 matched_title: cleaned_title,
                 matched_artist: cleaned_artist,
+                instrumental: false,
             });
         }
     }
@@ -5236,6 +5536,13 @@ async fn fetch_lyrics_inner(
         let db = state.db.lock().map_err(|_| "database state poisoned")?;
         ordered_lyrics_providers(&db)?
     };
+    // Liner ranks lyrics candidates and prefers a synced match over a plain
+    // one. Soluna used to stop at the first provider that returned anything,
+    // so a plain-text hit hid a synced one further down the order. A plain
+    // result is now only a fallback: the chain keeps going for a synced
+    // match, and only falls back to the plain text when none is found.
+    let mut plain_fallback: Option<LyricsPayload> = None;
+    let mut saw_instrumental = false;
     for provider in order {
         let enabled = {
             let db = state.db.lock().map_err(|_| "database state poisoned")?;
@@ -5253,7 +5560,7 @@ async fn fetch_lyrics_inner(
         if !enabled {
             continue;
         }
-        if let Some(payload) = fetch_lyrics_provider(
+        let outcome = fetch_lyrics_provider(
             &provider,
             &cleaned_title,
             &cleaned_artist,
@@ -5262,12 +5569,38 @@ async fn fetch_lyrics_inner(
             id.as_deref(),
             &state,
         )
-        .await?
-        {
-            let db = state.db.lock().map_err(|_| "database state poisoned")?;
-            cache_lyrics_payload(&db, &cache_id, &payload)?;
-            return Ok(payload);
+        .await?;
+        if outcome.instrumental {
+            saw_instrumental = true;
         }
+        if let Some(payload) = outcome.payload {
+            if payload.synced {
+                let db = state.db.lock().map_err(|_| "database state poisoned")?;
+                cache_lyrics_payload(&db, &cache_id, &payload)?;
+                return Ok(payload);
+            }
+            if plain_fallback.is_none() {
+                plain_fallback = Some(payload);
+            }
+        }
+    }
+    if let Some(payload) = plain_fallback {
+        let db = state.db.lock().map_err(|_| "database state poisoned")?;
+        cache_lyrics_payload(&db, &cache_id, &payload)?;
+        return Ok(payload);
+    }
+    if saw_instrumental {
+        // Not cached: the cache has no instrumental column, and a cached
+        // empty plain payload would lose the marker.
+        return Ok(LyricsPayload {
+            provider: "LrcLib".to_owned(),
+            text: String::new(),
+            synced: false,
+            matched_title: cleaned_title,
+            matched_artist: cleaned_artist,
+            lines: Vec::new(),
+            instrumental: true,
+        });
     }
     Err("Lyrics unavailable from enabled Soluna providers".to_owned())
 }
@@ -7012,10 +7345,42 @@ mod tests {
             duration: 201.6,
             plain_lyrics: None,
             synced_lyrics: Some("[00:01.00]line".to_owned()),
+            instrumental: false,
         };
         assert_eq!(duration_delta(&track, 202), 0);
         assert!(duration_delta(&track, 207) <= 5);
         assert!(duration_delta(&track, 208) > 5);
+    }
+
+    fn instrumental_track(name: &str, artist: &str, duration: f64) -> LrcLibTrack {
+        LrcLibTrack {
+            track_name: name.to_owned(),
+            artist_name: artist.to_owned(),
+            duration,
+            plain_lyrics: None,
+            synced_lyrics: None,
+            instrumental: true,
+        }
+    }
+
+    #[test]
+    fn lrclib_instrumental_match_needs_the_same_song() {
+        let tracks = vec![instrumental_track("Song", "Artist", 202.0)];
+        assert!(lrclib_instrumental_match(&tracks, "Song", "Artist", 202));
+        assert!(lrclib_instrumental_match(&tracks, "Song", "Artist", -1));
+        // A different song, or one far from the known duration, is not a match.
+        assert!(!lrclib_instrumental_match(
+            &tracks,
+            "Yesterday",
+            "Artist",
+            -1
+        ));
+        assert!(!lrclib_instrumental_match(&tracks, "Song", "Artist", 240));
+        // A non-instrumental track never marks the song instrumental.
+        let mut vocal = instrumental_track("Song", "Artist", 202.0);
+        vocal.instrumental = false;
+        assert!(!lrclib_instrumental_match(&[vocal], "Song", "Artist", 202));
+        assert!(!lrclib_instrumental_match(&[], "Song", "Artist", 202));
     }
 
     #[test]
@@ -7069,10 +7434,109 @@ mod tests {
     }
 
     #[test]
+    fn betterlyrics_ttml_keeps_word_timings_as_inline_tags() {
+        // Real Apple TTML (itunes:timing="Word"): bare-second begins on both
+        // the paragraph and the spans. The old parser rejected bare seconds
+        // and threw the whole document away.
+        let ttml = r#"<tt><body><div><p begin="9.731" end="12.105"><span begin="9.731" end="9.927">The</span> <span begin="9.927" end="10.284">club</span> <span begin="10.284" end="10.570">isn't</span></p><p begin="bad">Skipped</p></div></body></tt>"#;
+        let lrc = betterlyrics_to_lrc(ttml).expect("word-timed TTML must produce LRC");
+        assert_eq!(lrc, "[00:09.73]The <00:09.93>club <00:10.28>isn't");
+        let lines = parse_lyric_lines(&lrc);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "The club isn't");
+        assert_eq!(lines[0].words.len(), 3);
+        // LRC is centisecond-precise, so 9.731s rounds to 9.73s here.
+        assert_eq!(lines[0].words[0].time_ms, 9730);
+        assert_eq!(lines[0].words[0].end_ms, 9930);
+        assert_eq!(lines[0].words[1].time_ms, 9930);
+        assert_eq!(lines[0].words[2].text, "isn't");
+        // Last word of the last line ends 3s after its own start.
+        assert_eq!(lines[0].words[2].end_ms, 10280 + 3000);
+    }
+
+    #[test]
+    fn lyric_lines_parse_inline_word_tags_and_keep_plain_text() {
+        let lines = parse_lyric_lines(
+            "[00:09.73]The <00:09.93>club <00:10.28>isn't\n[00:12.10]So the bar is where I go\n[00:14.83]I <3 this",
+        );
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "The club isn't");
+        assert_eq!(lines[0].words.len(), 3);
+        // The last word of a line ends where the next line starts.
+        assert_eq!(lines[0].words[2].end_ms, 12100);
+        assert!(lines[1].words.is_empty());
+        assert_eq!(lines[2].text, "I <3 this");
+        assert!(lines[2].words.is_empty());
+    }
+
+    #[test]
+    fn kugou_candidate_matches_rejects_wrong_song() {
+        // Live case: a "Shape of You" hash returning "The Seasons Op. 37b:
+        // June" by arkady sevidov, 320317ms.
+        let wrong = json!({
+            "song": "The Seasons Op. 37b: June - Barcarole",
+            "singer": "arkady sevidov",
+            "duration": 320317
+        });
+        assert!(!kugou_candidate_matches(
+            &wrong,
+            "Shape of You",
+            "Ed Sheeran",
+            234
+        ));
+        let right = json!({
+            "song": "Shape Of You",
+            "singer": "Ed Sheeran",
+            "duration": 234000
+        });
+        assert!(kugou_candidate_matches(
+            &right,
+            "Shape of You",
+            "Ed Sheeran",
+            234
+        ));
+        // Name unknown but the duration matches: still the song.
+        let duration_only = json!({ "song": "???", "singer": "???", "duration": 234500 });
+        assert!(kugou_candidate_matches(
+            &duration_only,
+            "Shape of You",
+            "Ed Sheeran",
+            234
+        ));
+    }
+
+    #[test]
+    fn kugou_lrc_matches_rejects_wrong_tags() {
+        let wrong = "[ti:June]\n[ar:arkady sevidov]\n[00:01.58]pure music";
+        assert!(!kugou_lrc_matches(wrong, "Shape of You", "Ed Sheeran"));
+        let right = "[ti:Shape of You]\n[ar:Ed Sheeran]\n[00:09.69]The club isn't";
+        assert!(kugou_lrc_matches(right, "Shape of You", "Ed Sheeran"));
+        assert!(kugou_lrc_matches(
+            "[00:09.69]The club isn't",
+            "Shape of You",
+            "Ed Sheeran"
+        ));
+    }
+
+    #[test]
+    fn musixmatch_zero_token_is_rejected() {
+        assert!(!musixmatch_token_usable(""));
+        assert!(!musixmatch_token_usable(
+            "00000000000000000000000000000000000000000000000000000000"
+        ));
+        assert!(!musixmatch_token_usable(
+            "UpgradeOnlyUpgradeOnlyUpgradeOnlyUpgradeOnly"
+        ));
+        assert!(musixmatch_token_usable("a1b2c3d4e5f6"));
+    }
+
+    #[test]
     fn provider_time_accepts_ttml_units() {
         assert_eq!(parse_provider_time("1500ms"), Some(1_500));
         assert_eq!(parse_provider_time("1.5s"), Some(1_500));
         assert_eq!(parse_provider_time("00:01.50"), Some(1_500));
+        // Bare Apple TTML clock values are seconds.
+        assert_eq!(parse_provider_time("9.731"), Some(9_731));
     }
 
     #[test]

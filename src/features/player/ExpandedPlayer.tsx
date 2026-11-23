@@ -2,9 +2,21 @@ import type { HistoryEntry } from "../../app/history";
 import { RefObject, Dispatch, SetStateAction } from "react";
 import { mediaSrc } from "../../lib/media";
 import { LoadState, LyricsPayload, YtItem, PlayerPayload, LibraryItemState } from "../../types";
+import { LyricLines } from "../lyrics/LyricLines";
+import { InstrumentalInterlude } from "../lyrics/InstrumentalInterlude";
+import type { LyricsFollow } from "../lyrics/useLyrics";
+import { AmbientLights } from "./AmbientLights";
+import { useAmbientColors } from "./ambientColors";
+import type { FullscreenPlayerState } from "./useFullscreenPlayer";
+
+/** The player view state App hands down: fullscreen mode + lyrics follow. */
+export type PlayerViewProps = {
+  fullscreen: FullscreenPlayerState;
+  lyricsFollow: LyricsFollow;
+};
 
 export type ExpandedPlayerProps = {
-  activeLyricIndex: number;
+  playerView: PlayerViewProps;
   activeLyricRef: RefObject<HTMLButtonElement | null>;
   adjustVolumeByWheel: (event: { deltaY: number; preventDefault: () => void }) => void;
   audioRef: RefObject<HTMLAudioElement | null>;
@@ -50,7 +62,7 @@ export type ExpandedPlayerProps = {
 };
 
 export function ExpandedPlayer({
-  activeLyricIndex,
+  playerView,
   activeLyricRef,
   adjustVolumeByWheel,
   audioRef,
@@ -94,11 +106,29 @@ export function ExpandedPlayer({
   updateVolume,
   volume,
 }: ExpandedPlayerProps) {
+  // Ambient lights follow the current track: the hook re-extracts whenever
+  // the thumbnail changes, and the previous colours stay up until it lands.
+  const thumbnailSrc = mediaSrc(player?.item.thumbnail);
+  const ambientColors = useAmbientColors(thumbnailSrc);
+  const lyricsStatus =
+    lyrics?.status === "ready"
+      ? lyrics.data.instrumental
+        ? "Instrumental"
+        : lyrics.data.lines.some((line) => (line.words?.length ?? 0) > 0)
+          ? `${lyrics.data.provider} · Word-synced`
+          : lyrics.data.synced
+            ? `${lyrics.data.provider} · Synced`
+            : `${lyrics.data.provider} · Plain`
+      : null;
   return (
     <>
       {playerExpanded && player && (
         <div
-          className="detail-overlay player-overlay"
+          className={
+            playerView.fullscreen.view
+              ? "detail-overlay player-overlay player-fullscreen-view"
+              : "detail-overlay player-overlay"
+          }
           role="dialog"
           aria-modal="true"
           onClick={() => {
@@ -106,6 +136,20 @@ export function ExpandedPlayer({
             setLyrics(null);
           }}
         >
+          {/* Fullscreen player: the cover art fills the backdrop, blurred
+              and dimmed, and in fullscreen view the track's dominant
+              colours drift across it as soft moving lights. The expanded
+              (floating) player keeps the static blurred cover only. The
+              lights sit above the ambient layer's dark overlay (which
+              would mute them) and below the translucent panel. */}
+          {mediaSrc(player.item.thumbnail) ? (
+            <div className="full-player-ambient" aria-hidden="true">
+              <img src={mediaSrc(player.item.thumbnail) as string} alt="" />
+            </div>
+          ) : null}
+          {playerView.fullscreen.view && mediaSrc(player.item.thumbnail) ? (
+            <AmbientLights colors={ambientColors} trackKey={mediaSrc(player.item.thumbnail) as string} />
+          ) : null}
           <div className="full-player-panel" onClick={(event) => event.stopPropagation()}>
             <button
               className="close-button"
@@ -155,6 +199,15 @@ export function ExpandedPlayer({
                     aria-label={playerItemState?.liked ? "Remove from Soluna Liked Songs" : "Add to Soluna Liked Songs"}
                   >
                     {playerItemState?.liked ? "♥" : "♡"}
+                  </button>
+                  <button
+                    className="player-action player-fullscreen-button"
+                    onClick={playerView.fullscreen.toggle}
+                    title={playerView.fullscreen.view ? "Exit full screen" : "Full screen"}
+                    aria-label={playerView.fullscreen.view ? "Exit full screen" : "Full screen"}
+                    aria-pressed={playerView.fullscreen.view}
+                  >
+                    {playerView.fullscreen.view ? "⤡" : "⤢"}
                   </button>
                   <button
                     className="player-action"
@@ -247,7 +300,7 @@ export function ExpandedPlayer({
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">Lyrics</p>
-                  <h3>{lyrics?.status === "ready" ? lyrics.data.provider : "Soluna lyric providers"}</h3>
+                  <h3>{lyricsStatus ?? "Soluna lyric providers"}</h3>
                   <label className="lyrics-provider-picker">
                     <span>Provider</span>
                     <select
@@ -292,28 +345,18 @@ export function ExpandedPlayer({
                 )}
               </div>
               {lyrics?.status === "ready" && lyrics.data.synced && lyrics.data.lines.length > 0 ? (
-                <div
-                  ref={lyricsContainerRef}
-                  className="lyrics-lines"
-                  onWheel={() => setLyricsAutoScrollEnabled(false)}
-                  onTouchMove={() => setLyricsAutoScrollEnabled(false)}
-                  onPointerDown={() => setLyricsAutoScrollEnabled(false)}
-                  onKeyDown={() => setLyricsAutoScrollEnabled(false)}
-                >
-                  {lyrics.data.lines.map((line, index) => (
-                    <button
-                      ref={index === activeLyricIndex ? activeLyricRef : undefined}
-                      key={`${line.timeMs}-${index}`}
-                      className={index === activeLyricIndex ? "lyric-line active" : "lyric-line"}
-                      onClick={() => {
-                        setLyricsAutoScrollEnabled(true);
-                        if (audioRef.current) audioRef.current.currentTime = line.timeMs / 1000;
-                      }}
-                    >
-                      {line.text}
-                    </button>
-                  ))}
-                </div>
+                <LyricLines
+                  lines={lyrics.data.lines}
+                  activeLyricIndex={playerView.lyricsFollow.activeLyricIndex}
+                  activeWordIndex={playerView.lyricsFollow.activeWordIndex}
+                  activeLyricRef={activeLyricRef}
+                  audioRef={audioRef}
+                  lyricsContainerRef={lyricsContainerRef}
+                  playbackSeconds={playerView.lyricsFollow.playbackSeconds}
+                  setLyricsAutoScrollEnabled={setLyricsAutoScrollEnabled}
+                />
+              ) : lyrics?.status === "ready" && lyrics.data.instrumental ? (
+                <InstrumentalInterlude label="Instrumental — no lyrics, just the music" />
               ) : lyrics?.status === "ready" ? (
                 <pre className="lyrics-text">{lyrics.data.text}</pre>
               ) : (

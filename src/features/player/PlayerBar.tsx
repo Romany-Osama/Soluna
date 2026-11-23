@@ -4,6 +4,7 @@ import { PlayerAudio } from "./PlayerAudio";
 import { mediaSrc } from "../../lib/media";
 import { YtItem, LoadState, LyricsPayload, PlayerPayload, LibraryItemState, PlaytimeSession } from "../../types";
 import type { SetNotice } from "../../app/notifications";
+import type { FullscreenPlayerState } from "./useFullscreenPlayer";
 
 export type PlayerBarProps = {
   adjustVolumeByWheel: (event: { deltaY: number; preventDefault: () => void }) => void;
@@ -14,6 +15,7 @@ export type PlayerBarProps = {
   durationSeconds: number;
   flushPlaytime: () => Promise<void>;
   formatTime: (seconds: number) => string;
+  fullscreenPlayer: FullscreenPlayerState;
   isPlaying: boolean;
   loadAutomixItems: (current: YtItem, existing: YtItem[]) => Promise<YtItem[]>;
   lyrics: LoadState<LyricsPayload> | null;
@@ -66,6 +68,7 @@ function PlayerControls({
   cycleRepeat,
   durationSeconds,
   formatTime,
+  fullscreenPlayer,
   isPlaying,
   lyrics,
   openLyrics,
@@ -213,6 +216,19 @@ function PlayerControls({
               aria-label="Open queue"
             >
               ☰
+            </button>
+            <button
+              className="player-action player-fullscreen-button"
+              onClick={() => {
+                setPlayerExpanded(true);
+                setLyricsAutoScrollEnabled(true);
+                if (!lyrics) void openLyrics(player.item);
+                void fullscreenPlayer.enter();
+              }}
+              title="Full screen player"
+              aria-label="Full screen player"
+            >
+              ⤢
             </button>
             <button
               className="player-expand"
