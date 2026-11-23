@@ -13,6 +13,8 @@ use std::sync::Mutex;
 
 const PREFIX: &str = "enc1:";
 const SERVICE: &str = "Soluna";
+/// The credential-store name Meld Desktop used before the rename. A key saved there is adopted, never deleted.
+const LEGACY_SERVICE: &str = "Meld Desktop";
 const KEY_USER: &str = "session-encryption-key";
 const NONCE_LEN: usize = 12;
 
@@ -35,14 +37,54 @@ pub trait KeyStore {
 
 static KEY_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
-pub struct KeyringStore;
+/// The encryption key as stored in the OS credential store under one service name.
+struct ServiceKey(&'static str);
 
-impl KeyringStore {
-    fn entry() -> Result<keyring::Entry, String> {
-        keyring::Entry::new(SERVICE, KEY_USER)
+impl ServiceKey {
+    fn entry(&self) -> Result<keyring::Entry, String> {
+        keyring::Entry::new(self.0, KEY_USER)
             .map_err(|error| format!("secure storage unavailable: {error}"))
     }
 }
+
+impl KeyStore for ServiceKey {
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        match self.entry()?.get_password() {
+            Ok(encoded) => BASE64
+                .decode(encoded.trim())
+                .map(Some)
+                .map_err(|error| format!("stored encryption key is corrupt: {error}")),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(format!("secure storage read failed: {error}")),
+        }
+    }
+
+    fn store(&self, key: &[u8]) -> Result<(), String> {
+        self.entry()?
+            .set_password(&BASE64.encode(key))
+            .map_err(|error| format!("secure storage write failed: {error}"))
+    }
+}
+
+/// Returns the key in `current`. If there is none yet, adopts the one `legacy` holds by copying it into `current`, so
+/// sessions sealed before the rename to Soluna still open. The legacy key is only read, never removed, and an
+/// unreadable legacy entry counts as absent: this can only add a way to find the key, never make a lookup fail.
+fn adopt_legacy_key(
+    current: &dyn KeyStore,
+    legacy: &dyn KeyStore,
+) -> Result<Option<Vec<u8>>, String> {
+    if let Some(key) = current.load()? {
+        return Ok(Some(key));
+    }
+    let Some(key) = legacy.load().ok().flatten() else {
+        return Ok(None);
+    };
+    // Best effort: if the copy fails the key is still used for this run and the next start tries again.
+    let _ = current.store(&key);
+    Ok(Some(key))
+}
+
+pub struct KeyringStore;
 
 impl KeyStore for KeyringStore {
     fn load(&self) -> Result<Option<Vec<u8>>, String> {
@@ -53,25 +95,17 @@ impl KeyStore for KeyringStore {
         {
             return Ok(Some(key));
         }
-        match Self::entry()?.get_password() {
-            Ok(encoded) => {
-                let key = BASE64
-                    .decode(encoded.trim())
-                    .map_err(|error| format!("stored encryption key is corrupt: {error}"))?;
-                *KEY_CACHE
-                    .lock()
-                    .map_err(|_| "key cache poisoned".to_owned())? = Some(key.clone());
-                Ok(Some(key))
-            }
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(format!("secure storage read failed: {error}")),
+        let key = adopt_legacy_key(&ServiceKey(SERVICE), &ServiceKey(LEGACY_SERVICE))?;
+        if let Some(key) = &key {
+            *KEY_CACHE
+                .lock()
+                .map_err(|_| "key cache poisoned".to_owned())? = Some(key.clone());
         }
+        Ok(key)
     }
 
     fn store(&self, key: &[u8]) -> Result<(), String> {
-        Self::entry()?
-            .set_password(&BASE64.encode(key))
-            .map_err(|error| format!("secure storage write failed: {error}"))?;
+        ServiceKey(SERVICE).store(key)?;
         *KEY_CACHE
             .lock()
             .map_err(|_| "key cache poisoned".to_owned())? = Some(key.to_vec());
@@ -434,5 +468,80 @@ mod tests {
         // Non-Windows builds use keyring's in-memory mock backend; the process cache makes store -> load work either way.
         KeyringStore.store(&[7u8; 32]).unwrap();
         assert_eq!(KeyringStore.load().unwrap(), Some(vec![7u8; 32]));
+    }
+
+    /// A store whose key can be read but not written, like a locked credential store.
+    struct ReadOnlyStore(Option<Vec<u8>>);
+    impl KeyStore for ReadOnlyStore {
+        fn load(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.0.clone())
+        }
+        fn store(&self, _key: &[u8]) -> Result<(), String> {
+            Err("secure storage write failed".to_owned())
+        }
+    }
+
+    /// The Soluna entry, falling back to the Meld Desktop one, as `KeyringStore` does.
+    struct Adopting<'a>(&'a dyn KeyStore, &'a dyn KeyStore);
+    impl KeyStore for Adopting<'_> {
+        fn load(&self) -> Result<Option<Vec<u8>>, String> {
+            adopt_legacy_key(self.0, self.1)
+        }
+        fn store(&self, key: &[u8]) -> Result<(), String> {
+            self.0.store(key)
+        }
+    }
+
+    #[test]
+    fn a_session_sealed_under_the_old_name_opens_after_the_rename() {
+        let legacy = MemStore::new();
+        let sealed = seal(&legacy, "cookie", "SID=abc").unwrap();
+        let current = MemStore::new();
+        let store = Adopting(&current, &legacy);
+        assert_eq!(open(&store, "cookie", &sealed).unwrap(), "SID=abc");
+        assert_eq!(
+            current.load().unwrap(),
+            legacy.load().unwrap(),
+            "the key is copied to the new name"
+        );
+        assert!(
+            legacy.load().unwrap().is_some(),
+            "the old entry is left in place"
+        );
+    }
+
+    #[test]
+    fn the_current_key_wins_and_the_old_entry_is_not_consulted() {
+        let current = MemStore::new();
+        current.store(&[1u8; 32]).unwrap();
+        assert_eq!(
+            adopt_legacy_key(&current, &BrokenStore).unwrap(),
+            Some(vec![1u8; 32])
+        );
+    }
+
+    #[test]
+    fn no_key_anywhere_stays_no_key() {
+        let current = MemStore::new();
+        assert_eq!(adopt_legacy_key(&current, &MemStore::new()).unwrap(), None);
+        assert_eq!(current.load().unwrap(), None, "nothing is invented");
+    }
+
+    #[test]
+    fn an_unreadable_old_entry_counts_as_absent() {
+        assert_eq!(
+            adopt_legacy_key(&MemStore::new(), &BrokenStore).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_old_key_is_still_used_when_it_cannot_be_copied() {
+        let legacy = MemStore::new();
+        legacy.store(&[9u8; 32]).unwrap();
+        assert_eq!(
+            adopt_legacy_key(&ReadOnlyStore(None), &legacy).unwrap(),
+            Some(vec![9u8; 32])
+        );
     }
 }
