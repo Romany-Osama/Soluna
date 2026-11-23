@@ -49,7 +49,7 @@ import { useSelection } from "./features/selection/useSelection";
 import { useNotice } from "./features/notifications/useNotice";
 import { useSleepTimer } from "./features/player/useSleepTimer";
 import { useLyrics } from "./features/lyrics/useLyrics";
-import { useLyricsFollow } from "./features/lyrics/useLyrics";
+import { useLyricsFollowView } from "./features/lyrics/useLyrics";
 import { useItemMenu } from "./features/menu/useItemMenu";
 import { useAccounts } from "./features/accounts/useAccounts";
 import { useSpotifyLibrary } from "./features/spotify/useSpotifyLibrary";
@@ -57,6 +57,7 @@ import { useSettingsState } from "./features/settings/useSettingsState";
 import { usePlaylists } from "./features/playlist/usePlaylists";
 import { useQueue } from "./features/queue/useQueue";
 import { usePlayer } from "./features/player/usePlayer";
+import { useFullscreenPlayer } from "./features/player/useFullscreenPlayer";
 import { useDownloads } from "./features/downloads/useDownloads";
 import { EMPTY_HISTORY, HistoryEntry, NavHistory, pushEntry, stepBack, stepForward } from "./app/history";
 import {
@@ -561,6 +562,8 @@ function App() {
     spotifyPlaylist: spotifyOpenPlaylist !== null,
     spotifyLiked: spotifyLikedOpen,
   };
+
+  const fullscreenPlayer = useFullscreenPlayer(playerExpanded, layerState);
 
   const closeLayer = (layer: Layer) => {
     switch (layer) {
@@ -2392,7 +2395,7 @@ function App() {
     await openItem(item, queue.length > 0 ? queue : [item], index >= 0 ? index : 0);
   };
 
-  const { activeLyricIndex } = useLyricsFollow({
+  const lyricsFollow = useLyricsFollowView({
     activeLyricRef,
     lyrics,
     lyricsAutoScrollEnabled,
@@ -3122,7 +3125,7 @@ function App() {
         onClose={() => setPlayerExpanded(false)}
       >
         <ExpandedPlayer
-          activeLyricIndex={activeLyricIndex}
+          playerView={{ fullscreen: fullscreenPlayer, lyricsFollow }}
           activeLyricRef={activeLyricRef}
           adjustVolumeByWheel={adjustVolumeByWheel}
           audioRef={audioRef}
@@ -3169,7 +3172,7 @@ function App() {
       </ErrorBoundary>
       <ErrorBoundary name="Lyrics" variant="panel" resetKey={lyrics === null} onClose={() => setLyrics(null)}>
         <LyricsPanel
-          activeLyricIndex={activeLyricIndex}
+          lyricsFollow={lyricsFollow}
           activeLyricRef={activeLyricRef}
           audioRef={audioRef}
           backStack={navHistory.back}

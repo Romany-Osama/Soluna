@@ -18,7 +18,7 @@ places in the same PR and is listed in the history below. Adding an optional fie
 
 ## Plugin events
 
-Emitted by `tauri-plugin-taskbar` (its default event names), not by Meld code. They carry no payload.
+Emitted by `tauri-plugin-taskbar` (its default event names), not by Soluna code. They carry no payload.
 
 | Event | Version | Payload | Emitted by | Listened to by |
 |---|---|---|---|---|
