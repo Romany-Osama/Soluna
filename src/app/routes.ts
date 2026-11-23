@@ -233,3 +233,10 @@ export function librarySongFilterFor(
   if (mode === "liked" || mode === "uploaded" || mode === "top") return mode;
   return null;
 }
+
+/** The library mode a song-filter card opens (`library` filter → the `songs` mode). */
+export function libraryModeForSongFilter(filter: "liked" | "library" | "uploaded" | "downloaded" | "top"): LibraryMode {
+  if (filter === "library") return "songs";
+  if (filter === "downloaded") return "downloads";
+  return filter;
+}
