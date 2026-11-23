@@ -40,6 +40,7 @@ const VISITOR_PREFIX: &str = "Cg";
 mod download_resume;
 mod events;
 mod ipc;
+mod legacy_paths;
 pub(crate) use ipc::cancel::cancellable;
 pub(crate) use ipc::error::{IpcError, IpcResult};
 pub(crate) use ipc::limits::{
@@ -401,6 +402,14 @@ impl RuntimeState {
         };
         if let Err(error) = initialize_database(&db, &secrets::KeyringStore) {
             Self::fail_to_start("Could not initialize the database schema", error);
+        }
+        // The data folder was renamed from "Meld Desktop" (see `database_path`); stored file paths still name the old one.
+        if let Some(data_dir) = path.parent() {
+            let _ = legacy_paths::rewrite_data_dir_paths(
+                &db,
+                &data_dir.with_file_name("Meld Desktop"),
+                data_dir,
+            );
         }
         Self {
             visitor_data: Mutex::new(None),
