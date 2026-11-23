@@ -1,5 +1,5 @@
 /* global window */
-// Meld Desktop PoToken driver (PLAY-010, D-048). Runs inside the hidden, IPC-less `potoken` webview
+// Soluna PoToken driver (PLAY-010, D-048). Runs inside the hidden, IPC-less `potoken` webview
 // (about:blank, incognito). Rust evaluates Google's BotGuard interpreter first, then calls these
 // functions with JSON-encoded arguments and polls `poll(id)` until a job finishes. Nothing here
 // touches the network: Rust fetches the challenge and the integrity token itself.

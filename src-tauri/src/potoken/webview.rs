@@ -69,7 +69,7 @@ impl JsHost for WebviewHost {
                 .parse()
                 .map_err(|_| "blank URL failed".to_owned())?;
             WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(blank))
-                .title("Meld PoToken")
+                .title("Soluna PoToken")
                 .visible(false)
                 .focused(false)
                 .skip_taskbar(true)
