@@ -115,28 +115,39 @@ input:focus-visible {
   gap: 0;
 }
 .brand-mark {
-  width: 34px;
-  height: 34px;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
   display: grid;
   place-items: center;
-  border-radius: 10px;
+  border-radius: 14px;
   background: #121526;
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: #bac2ff;
   font-size: 20px;
   font-weight: 800;
-  box-shadow: 0 4px 18px rgba(0, 210, 255, 0.18);
+  /* Same glow as before (0 4px 18px rgba(0,210,255,0.18)), plus a soft halo
+     so it stays visible at the bigger 56px size. */
+  box-shadow:
+    0 0 24px rgba(0, 210, 255, 0.22),
+    0 4px 18px rgba(0, 210, 255, 0.18);
+}
+.app-shell.sidebar-collapsed .brand-mark {
+  width: 48px;
+  height: 48px;
+  flex-basis: 48px;
+  border-radius: 12px;
 }
 .brand strong {
   display: block;
-  font-size: 18px;
+  font-size: 22px;
   letter-spacing: -0.02em;
 }
 .brand span {
   display: block;
   margin-top: 2px;
   color: #9ea1b2;
-  font-size: 12px;
+  font-size: 13px;
 }
 .primary-nav {
   display: grid;
@@ -213,16 +224,19 @@ input:focus-visible {
   position: relative;
   z-index: 100;
   min-width: 0;
-  min-height: 104px;
+  min-height: 72px;
   display: flex;
   align-items: center;
-  gap: 28px;
-  padding: 24px 36px 18px;
+  gap: 20px;
+  padding: 14px 28px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.055);
   overflow: visible;
   background: #0e1018;
   user-select: none;
   -webkit-app-region: drag;
+}
+.topbar h1 {
+  font-size: 24px;
 }
 .topbar [data-tauri-drag-region="false"],
 .topbar button,
@@ -339,9 +353,13 @@ h2 {
 }
 .search-form {
   height: 42px;
-  min-width: 360px;
-  max-width: 660px;
-  flex: 1;
+  /* Dynamic, not fixed: the search takes whatever space is left between the
+     back/forward buttons and the right-hand actions, and shrinks first when
+     the window gets narrower. It never pushes the window controls off screen. */
+  min-width: 0;
+  width: clamp(200px, 42vw, 620px);
+  max-width: 620px;
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -350,6 +368,9 @@ h2 {
   border-radius: 22px;
   background: #151723;
   color: #8f93ac;
+}
+.search-form button {
+  flex: 0 0 auto;
 }
 .search-form input {
   min-width: 0;
@@ -374,6 +395,25 @@ h2 {
 .search-form button:hover,
 .primary-button:hover {
   background: #c1c8ff;
+}
+.account-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 5px 0 5px 8px;
+  color: #d6d8e7;
+  font-size: 13px;
+}
+.account-name {
+  max-width: 140px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-avatar {
+  flex: 0 0 auto;
 }
 .account-button {
   display: flex;
@@ -1297,8 +1337,13 @@ h2 {
     margin-left: 0;
     margin-right: 0;
   }
-  .search-form {
-    min-width: 280px;
+  .topbar {
+    gap: 12px;
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+  .account-name {
+    max-width: 110px;
   }
   .player-dock {
     gap: 12px;
@@ -1307,6 +1352,15 @@ h2 {
   }
   .dock-copy {
     min-width: 150px;
+  }
+}
+@media (max-width: 1020px) {
+  .account-name {
+    max-width: 90px;
+  }
+  .topbar-button {
+    padding-left: 10px;
+    padding-right: 10px;
   }
 }
 @media (max-width: 860px) {
@@ -2181,8 +2235,10 @@ h2 {
 
 .search-box {
   position: relative;
-  min-width: 0;
-  flex: 1;
+  min-width: 180px;
+  flex: 1 1 auto;
+  max-width: 640px;
+  margin: 0 auto;
   display: flex;
 }
 .search-box .search-form {

@@ -2402,6 +2402,12 @@ function App() {
   });
 
   const visibleTitle = useMemo(() => navigation.find((item) => item.key === active)?.label ?? "Home", [active]);
+  // Account name shown in the top bar: the signed-in Google / YouTube Music
+  // account, the account e-mail as a fallback, or "Guest" when signed out.
+  // It is never a fixed string, so the top bar truncates it (see .account-name).
+  const accountName = sessionStatus.authenticated
+    ? sessionStatus.accountName || sessionStatus.accountEmail || "Connected"
+    : "Guest";
   const libraryQuery = librarySearch.trim().toLowerCase();
   const matchesLibraryQuery = (title: string) =>
     libraryMode === "playlists"
@@ -2518,7 +2524,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark" title="Soluna">
-            <SolunaLogo size={22} />
+            <SolunaLogo size={settings.sidebarCollapsed ? 38 : 44} />
           </div>
           {!settings.sidebarCollapsed && (
             <div>
@@ -2577,7 +2583,10 @@ function App() {
         <header className="topbar" data-tauri-drag-region>
           <div className="topbar-title">
             <div>
-              <p className="eyebrow">Soluna Desktop</p>
+              {/* The sidebar already says "Soluna / Desktop" when expanded, so
+                  the eyebrow would read twice side by side. Show it only when
+                  the sidebar is collapsed and the name is not visible there. */}
+              {settings.sidebarCollapsed && <p className="eyebrow">Soluna Desktop</p>}
               <h1>{visibleTitle}</h1>
             </div>
             <div
@@ -2670,10 +2679,8 @@ function App() {
                   {sessionStatus.authenticated ? sessionStatus.accountName?.slice(0, 1).toUpperCase() || "G" : "G"}
                 </span>
               )}
-              <span>
-                {sessionStatus.authenticated
-                  ? sessionStatus.accountName || sessionStatus.accountEmail || "Connected"
-                  : "Guest"}
+              <span className="account-name" title={accountName}>
+                {accountName}
               </span>
             </div>
             <WindowControls />
