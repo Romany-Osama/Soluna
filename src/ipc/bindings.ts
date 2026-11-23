@@ -61,41 +61,55 @@ type RustModels = {
 };
 type ResolveModel<T> = T extends keyof RustModels ? RustModels[T] : T;
 
+// Validated Rust payload newtypes (src-tauri/src/ipc/payload.rs). They are plain
+// `string` at runtime, but keeping the name in the generated map makes call sites
+// read like the Rust signature instead of collapsing every id to `string`.
+export type Keyword = string;
+export type LibraryId = string;
+export type LongText = string;
+export type Name = string;
+export type SpotifyId = string;
+export type SpotifyUri = string;
+export type Text = string;
+export type Token = string;
+export type VideoId = string;
+export type YtId = string;
+
 export type IpcCommandMap = {
   app_update_check: { args: Record<string, never>; result: ResolveModel<UpdateSummary | null> };
   app_update_install: { args: Record<string, never>; result: ResolveModel<void> };
   app_open_releases_page: { args: Record<string, never>; result: ResolveModel<void> };
-  request_cancel: { args: { requestId: string }; result: ResolveModel<boolean> };
+  request_cancel: { args: { requestId: Token }; result: ResolveModel<boolean> };
   ytm_history: { args: Record<string, never>; result: ResolveModel<RemoteHistoryPage> };
-  ytm_remove_from_history: { args: { token: string }; result: ResolveModel<void> };
+  ytm_remove_from_history: { args: { token: Token }; result: ResolveModel<void> };
   spotify_profile: { args: Record<string, never>; result: ResolveModel<SpotifyProfile> };
-  spotify_library_node: { args: { folderUri?: string | null }; result: ResolveModel<SpotifyLibraryNode> };
+  spotify_library_node: { args: { folderUri?: SpotifyUri | null }; result: ResolveModel<SpotifyLibraryNode> };
   spotify_playlists: { args: Record<string, never>; result: ResolveModel<SpotifyPlaylistItem[]> };
   spotify_playlist_tracks: {
-    args: { playlistId: string; offset?: number | null };
+    args: { playlistId: SpotifyId; offset?: number | null };
     result: ResolveModel<SpotifyTrackPage>;
   };
-  spotify_remove_from_playlist: { args: { playlistId: string; uid: string }; result: ResolveModel<void> };
+  spotify_remove_from_playlist: { args: { playlistId: SpotifyId; uid: SpotifyId }; result: ResolveModel<void> };
   spotify_move_in_playlist: {
-    args: { playlistId: string; uids: string[]; beforeUid?: string | null };
+    args: { playlistId: SpotifyId; uids: SpotifyId[]; beforeUid?: SpotifyId | null };
     result: ResolveModel<void>;
   };
-  spotify_rename_playlist: { args: { playlistId: string; newName: string }; result: ResolveModel<void> };
+  spotify_rename_playlist: { args: { playlistId: SpotifyId; newName: Name }; result: ResolveModel<void> };
   spotify_liked_tracks: { args: Record<string, never>; result: ResolveModel<SpotifyLikedTracks> };
-  spotify_match_for_youtube: { args: { youtubeId: string }; result: ResolveModel<SpotifyTrackMatch | null> };
+  spotify_match_for_youtube: { args: { youtubeId: VideoId }; result: ResolveModel<SpotifyTrackMatch | null> };
   spotify_override_youtube: {
-    args: { spotifyId: string; youtubeId: string; title: string; artist: string };
+    args: { spotifyId: LibraryId; youtubeId: VideoId; title: Text; artist: Text };
     result: ResolveModel<void>;
   };
   spotify_resolve_youtube: {
-    args: { youtubeId?: string | null; title: string; artist: string; durationSec: number };
+    args: { youtubeId?: VideoId | null; title: Text; artist: Text; durationSec: number };
     result: ResolveModel<SpotifyTrackMatch | null>;
   };
-  spotify_add_to_playlist: { args: { playlistId: string; trackUri: string }; result: ResolveModel<void> };
-  ytm_delete_uploaded_song: { args: { entityId: string }; result: ResolveModel<boolean> };
-  ytm_refetch: { args: { videoId: string }; result: ResolveModel<YtItem | null> };
+  spotify_add_to_playlist: { args: { playlistId: SpotifyId; trackUri: SpotifyUri }; result: ResolveModel<void> };
+  ytm_delete_uploaded_song: { args: { entityId: Token }; result: ResolveModel<boolean> };
+  ytm_refetch: { args: { videoId: VideoId }; result: ResolveModel<YtItem | null> };
   ytm_toggle_episode_saved: {
-    args: { videoId: string; saved: boolean; setVideoId?: string | null; item?: YtItem | null };
+    args: { videoId: VideoId; saved: boolean; setVideoId?: YtId | null; item?: YtItem | null };
     result: ResolveModel<void>;
   };
   local_files_pick: { args: Record<string, never>; result: ResolveModel<LocalItem[]> };
@@ -103,14 +117,14 @@ export type IpcCommandMap = {
   library_downloads: { args: Record<string, never>; result: ResolveModel<LocalItem[]> };
   library_player_cache: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   ytm_toggle_podcast_saved: {
-    args: { podcastId: string; saved: boolean; title: string; author?: string | null; thumbnail?: string | null };
+    args: { podcastId: YtId; saved: boolean; title: Text; author?: Text | null; thumbnail?: LongText | null };
     result: ResolveModel<void>;
   };
-  download_start: { args: { item: YtItem; audioQuality?: string | null }; result: ResolveModel<void> };
-  download_info: { args: { songId: string }; result: ResolveModel<DownloadInfo | null> };
-  download_cancel: { args: { songId: string }; result: ResolveModel<void> };
-  download_remove: { args: { songId: string }; result: ResolveModel<void> };
-  player_cache_remove: { args: { songId: string }; result: ResolveModel<void> };
+  download_start: { args: { item: YtItem; audioQuality?: Keyword | null }; result: ResolveModel<void> };
+  download_info: { args: { songId: LibraryId }; result: ResolveModel<DownloadInfo | null> };
+  download_cancel: { args: { songId: LibraryId }; result: ResolveModel<void> };
+  download_remove: { args: { songId: LibraryId }; result: ResolveModel<void> };
+  player_cache_remove: { args: { songId: LibraryId }; result: ResolveModel<void> };
   player_cache_usage: { args: Record<string, never>; result: ResolveModel<PlayerCacheUsage> };
   player_cache_clear: { args: Record<string, never>; result: ResolveModel<number> };
   ytm_podcast_channels: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
@@ -120,115 +134,121 @@ export type IpcCommandMap = {
   library_albums: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   library_artists: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   ytm_home: { args: Record<string, never>; result: ResolveModel<HomePage> };
-  ytm_home_continuation: { args: { continuation: string }; result: ResolveModel<HomePage> };
-  ytm_search: { args: { query: string; requestId?: string | null }; result: ResolveModel<SearchPage> };
+  ytm_home_continuation: { args: { continuation: Token }; result: ResolveModel<HomePage> };
+  ytm_search: { args: { query: Text; requestId?: Token | null }; result: ResolveModel<SearchPage> };
   ytm_search_continuation: {
-    args: { continuation: string; requestId?: string | null };
+    args: { continuation: Token; requestId?: Token | null };
     result: ResolveModel<SearchPage>;
   };
-  sync_youtube_library: { args: { mode: string; requestId?: string | null }; result: ResolveModel<YouTubeSyncResult> };
-  ytm_add_to_playlist: { args: { playlistId: string; videoId: string }; result: ResolveModel<void> };
+  sync_youtube_library: { args: { mode: Keyword; requestId?: Token | null }; result: ResolveModel<YouTubeSyncResult> };
+  ytm_add_to_playlist: { args: { playlistId: YtId; videoId: VideoId }; result: ResolveModel<void> };
   ytm_remove_from_playlist: {
-    args: { playlistId: string; videoId: string; setVideoId: string };
+    args: { playlistId: YtId; videoId: VideoId; setVideoId: YtId };
     result: ResolveModel<void>;
   };
-  ytm_create_playlist: { args: { title: string }; result: ResolveModel<YtItem> };
-  ytm_playlist: { args: { playlistId: string; requestId?: string | null }; result: ResolveModel<PlaylistPage> };
-  ytm_playlist_continuation: { args: { continuation: string }; result: ResolveModel<PlaylistContinuationPage> };
+  ytm_create_playlist: { args: { title: Name }; result: ResolveModel<YtItem> };
+  ytm_playlist: { args: { playlistId: YtId; requestId?: Token | null }; result: ResolveModel<PlaylistPage> };
+  ytm_playlist_continuation: { args: { continuation: Token }; result: ResolveModel<PlaylistContinuationPage> };
   ytm_browse: {
-    args: { browseId: string; params?: string | null; requestId?: string | null };
+    args: { browseId: YtId; params?: Token | null; requestId?: Token | null };
     result: ResolveModel<DetailPage>;
   };
-  ytm_browse_continuation: { args: { browseId: string; continuation: string }; result: ResolveModel<DetailPage> };
-  ytm_detail: { args: { kind: string; browseId: string; requestId?: string | null }; result: ResolveModel<DetailPage> };
-  ytm_detail_continuation: { args: { kind: string; continuation: string }; result: ResolveModel<DetailPage> };
-  ytm_podcast_cache_detail_page: { args: { browseId: string; page: DetailPage }; result: ResolveModel<void> };
+  ytm_browse_continuation: { args: { browseId: YtId; continuation: Token }; result: ResolveModel<DetailPage> };
+  ytm_detail: { args: { kind: Keyword; browseId: YtId; requestId?: Token | null }; result: ResolveModel<DetailPage> };
+  ytm_detail_continuation: { args: { kind: Keyword; continuation: Token }; result: ResolveModel<DetailPage> };
+  ytm_podcast_cache_detail_page: { args: { browseId: YtId; page: DetailPage }; result: ResolveModel<void> };
   ytm_next: {
     args: {
-      videoId: string;
-      playlistId?: string | null;
-      setVideoId?: string | null;
+      videoId: VideoId;
+      playlistId?: YtId | null;
+      setVideoId?: YtId | null;
       index?: number | null;
-      params?: string | null;
-      continuation?: string | null;
+      params?: Token | null;
+      continuation?: Token | null;
     };
     result: ResolveModel<QueuePage>;
   };
-  ytm_related: { args: { browseId: string }; result: ResolveModel<YtItem[]> };
-  ytm_queue_continuation: { args: { continuation: string }; result: ResolveModel<QueuePage> };
+  ytm_related: { args: { browseId: YtId }; result: ResolveModel<YtItem[]> };
+  ytm_queue_continuation: { args: { continuation: Token }; result: ResolveModel<QueuePage> };
   ytm_player: {
-    args: { videoId: string; playlistId?: string | null; audioQuality?: string | null };
+    args: { videoId: VideoId; playlistId?: YtId | null; audioQuality?: Keyword | null };
     result: ResolveModel<PlayerPayload>;
   };
-  ytm_report_stream_failure: { args: { videoId: string; streamUrl: string }; result: ResolveModel<void> };
-  ytm_playback_report: { args: { videoId: string }; result: ResolveModel<string> };
+  ytm_report_stream_failure: { args: { videoId: VideoId; streamUrl: LongText }; result: ResolveModel<void> };
+  ytm_playback_report: { args: { videoId: VideoId }; result: ResolveModel<string> };
   history_add: { args: { item: YtItem }; result: ResolveModel<number> };
   history_record_playtime: { args: { historyId: number; playTimeMs: number }; result: ResolveModel<void> };
   history_items: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   history_clear: { args: Record<string, never>; result: ResolveModel<void> };
-  library_top_songs: { args: { period: string; limit: number }; result: ResolveModel<YtItem[]> };
-  library_stats: { args: { period: string }; result: ResolveModel<StatsPayload> };
-  search_history_add: { args: { query: string }; result: ResolveModel<void> };
+  library_top_songs: { args: { period: Keyword; limit: number }; result: ResolveModel<YtItem[]> };
+  library_stats: { args: { period: Keyword }; result: ResolveModel<StatsPayload> };
+  search_history_add: { args: { query: Text }; result: ResolveModel<void> };
   search_history_items: { args: Record<string, never>; result: ResolveModel<string[]> };
   search_history_clear: { args: Record<string, never>; result: ResolveModel<void> };
-  ytm_toggle_like: { args: { videoId: string; liked: boolean; item?: YtItem | null }; result: ResolveModel<void> };
+  ytm_toggle_like: { args: { videoId: VideoId; liked: boolean; item?: YtItem | null }; result: ResolveModel<void> };
   fetch_lyrics: {
     args: {
-      title: string;
-      artist: string;
+      title: Text;
+      artist: Text;
       duration: number;
-      album?: string | null;
-      id?: string | null;
-      requestId?: string | null;
+      album?: Text | null;
+      id?: LibraryId | null;
+      requestId?: Token | null;
     };
     result: ResolveModel<LyricsPayload>;
   };
   fetch_lyrics_fresh: {
     args: {
-      title: string;
-      artist: string;
+      title: Text;
+      artist: Text;
       duration: number;
-      album?: string | null;
-      id?: string | null;
-      requestId?: string | null;
+      album?: Text | null;
+      id?: LibraryId | null;
+      requestId?: Token | null;
     };
     result: ResolveModel<LyricsPayload>;
   };
   fetch_lyrics_from_provider: {
     args: {
-      title: string;
-      artist: string;
+      title: Text;
+      artist: Text;
       duration: number;
-      album?: string | null;
-      id?: string | null;
-      provider: string;
-      requestId?: string | null;
+      album?: Text | null;
+      id?: LibraryId | null;
+      provider: Keyword;
+      requestId?: Token | null;
     };
     result: ResolveModel<LyricsPayload>;
   };
   library_toggle_liked: { args: { item: YtItem; liked: boolean }; result: ResolveModel<void> };
-  library_edit_item: { args: { itemId: string; title: string; artist: string }; result: ResolveModel<void> };
-  library_refetch_item: { args: { id: string }; result: ResolveModel<YtItem | null> };
-  ytm_toggle_library: { args: { videoId: string; addToLibrary: boolean }; result: ResolveModel<void> };
+  library_edit_item: { args: { itemId: LibraryId; title: Name; artist: Text }; result: ResolveModel<void> };
+  library_refetch_item: { args: { id: LibraryId }; result: ResolveModel<YtItem | null> };
+  ytm_toggle_library: { args: { videoId: VideoId; addToLibrary: boolean }; result: ResolveModel<void> };
   settings_get: { args: Record<string, never>; result: ResolveModel<SettingEntry[]> };
-  settings_set: { args: { key: string; value: string }; result: ResolveModel<void> };
+  settings_set: { args: { key: Keyword; value: LongText }; result: ResolveModel<void> };
   backup_create: { args: Record<string, never>; result: ResolveModel<string> };
   backup_restore: { args: Record<string, never>; result: ResolveModel<string> };
   library_save_item: { args: { item: YtItem }; result: ResolveModel<void> };
-  library_remove_item: { args: { id: string }; result: ResolveModel<void> };
+  library_remove_item: { args: { id: LibraryId }; result: ResolveModel<void> };
   library_songs: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   library_mix_songs: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   library_liked_songs: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   library_uploaded_songs: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   library_playlists: { args: Record<string, never>; result: ResolveModel<LibraryPlaylistItem[]> };
-  library_create_playlist: { args: { title: string }; result: ResolveModel<YtItem> };
-  library_add_to_playlist: { args: { playlistId: string; item: YtItem }; result: ResolveModel<boolean> };
-  library_remove_from_playlist: { args: { playlistId: string; songId: string }; result: ResolveModel<void> };
-  library_playlist_songs: { args: { playlistId: string }; result: ResolveModel<YtItem[]> };
-  library_item_state: { args: { id: string }; result: ResolveModel<LibraryItemState> };
-  library_artist_state: { args: { artistId: string }; result: ResolveModel<boolean> };
+  library_create_playlist: { args: { title: Name }; result: ResolveModel<YtItem> };
+  library_add_to_playlist: { args: { playlistId: LibraryId; item: YtItem }; result: ResolveModel<boolean> };
+  library_remove_from_playlist: { args: { playlistId: LibraryId; songId: LibraryId }; result: ResolveModel<void> };
+  library_playlist_songs: { args: { playlistId: LibraryId }; result: ResolveModel<YtItem[]> };
+  library_item_state: { args: { id: LibraryId }; result: ResolveModel<LibraryItemState> };
+  library_artist_state: { args: { artistId: LibraryId }; result: ResolveModel<boolean> };
   library_toggle_artist_bookmarked: {
-    args: { artistId: string; name: string; thumbnail?: string | null; channelId?: string | null; bookmarked: boolean };
+    args: {
+      artistId: LibraryId;
+      name: Text;
+      thumbnail?: LongText | null;
+      channelId?: YtId | null;
+      bookmarked: boolean;
+    };
     result: ResolveModel<void>;
   };
   speed_dial_toggle: { args: { item: YtItem; pinned: boolean }; result: ResolveModel<void> };

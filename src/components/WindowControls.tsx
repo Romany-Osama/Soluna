@@ -7,12 +7,7 @@ export function WindowControls() {
   // on some ancestors, which is why the buttons highlighted on hover but
   // did nothing on click. Every button opts out explicitly here.
   return (
-    <div
-      className="window-controls"
-      role="group"
-      aria-label="Window management"
-      data-tauri-drag-region="false"
-    >
+    <div className="window-controls" role="group" aria-label="Window management" data-tauri-drag-region="false">
       <button
         type="button"
         className="window-control-button minimize"
