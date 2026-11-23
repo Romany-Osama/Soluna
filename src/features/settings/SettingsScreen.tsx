@@ -233,11 +233,14 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Enable Paxsenix</strong>
-                        <small>Use the source Apple Music lyrics fallback after Better Lyrics when enabled.</small>
+                        <small>
+                          Off by default: Cloudflare blocks its API for non-browser clients, so it rarely returns
+                          lyrics.
+                        </small>
                       </span>
                       <input
                         type="checkbox"
-                        checked={settings.enablePaxsenix !== false}
+                        checked={settings.enablePaxsenix === true}
                         onChange={(event) => void setSetting("enablePaxsenix", event.target.checked)}
                       />
                     </label>
@@ -265,13 +268,35 @@ export function SettingsScreen({
                     </label>
                     <label className="setting-row">
                       <span>
-                        <strong>Enable LyricsPlus</strong>
-                        <small>Use the source LyricsPlus mirror fallback after KuGou when enabled.</small>
+                        <strong>Enable NetEase</strong>
+                        <small>Use the source NetEase Cloud Music synced-LRC fallback when enabled.</small>
                       </span>
                       <input
                         type="checkbox"
-                        checked={settings.enableLyricsPlus === true}
-                        onChange={(event) => void setSetting("enableLyricsPlus", event.target.checked)}
+                        checked={settings.enableNetEase !== false}
+                        onChange={(event) => void setSetting("enableNetEase", event.target.checked)}
+                      />
+                    </label>
+                    <label className="setting-row">
+                      <span>
+                        <strong>Enable QQ Music</strong>
+                        <small>Use the source QQ Music synced-LRC fallback when enabled.</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={settings.enableQQMusic !== false}
+                        onChange={(event) => void setSetting("enableQQMusic", event.target.checked)}
+                      />
+                    </label>
+                    <label className="setting-row">
+                      <span>
+                        <strong>Enable LyricsOvh</strong>
+                        <small>Use the source plain-text lyrics fallback when no synced provider matched.</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={settings.enableLyricsOvh !== false}
+                        onChange={(event) => void setSetting("enableLyricsOvh", event.target.checked)}
                       />
                     </label>
                     <label className="setting-row">
@@ -373,16 +398,14 @@ export function SettingsScreen({
                     <div className="lyrics-provider-order">
                       {lyricsProviderOrder.map((provider, index) => {
                         const enabled =
-                          provider === "YouTube" ||
-                          provider === "YouTubeSubtitle" ||
-                          settings[lyricProviderSettingKeys[provider] ?? ""] === true;
+                          provider === "YouTube" || settings[lyricProviderSettingKeys[provider] ?? ""] === true;
                         return (
                           <div
                             className={enabled ? "provider-order-row" : "provider-order-row disabled"}
                             key={provider}
                           >
                             <span>
-                              <strong>{provider === "YouTubeSubtitle" ? "YouTube Subtitle" : provider}</strong>
+                              <strong>{provider}</strong>
                               <small>{enabled ? `Priority ${index + 1}` : "Disabled"}</small>
                             </span>
                             {enabled && (

@@ -3,16 +3,19 @@ export const lyricsProviderNames = [
   "Paxsenix",
   "LrcLib",
   "KuGou",
-  "LyricsPlus",
   "Musixmatch",
-  "YouTubeSubtitle",
+  "NetEase",
+  "QQMusic",
   "YouTube",
+  "LyricsOvh",
 ] as const;
 export const lyricProviderSettingKeys: Record<string, string> = {
   BetterLyrics: "enableBetterLyrics",
   Paxsenix: "enablePaxsenix",
   LrcLib: "enableLrclib",
   KuGou: "enableKugou",
-  LyricsPlus: "enableLyricsPlus",
   Musixmatch: "enableMusixmatch",
+  NetEase: "enableNetEase",
+  QQMusic: "enableQQMusic",
+  LyricsOvh: "enableLyricsOvh",
 };

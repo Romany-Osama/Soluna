@@ -25,8 +25,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
   useEffect(() => () => lyricsRequestRef.current?.abort(), []);
 
   const moveLyricsProvider = async (provider: string, direction: -1 | 1) => {
-    const enabled = (value: string) =>
-      value === "YouTube" || value === "YouTubeSubtitle" || settings[lyricProviderSettingKeys[value] ?? ""] === true;
+    const enabled = (value: string) => value === "YouTube" || settings[lyricProviderSettingKeys[value] ?? ""] === true;
     if (!enabled(provider)) return;
     const enabledOrder = lyricsProviderOrder.filter(enabled);
     const index = enabledOrder.indexOf(provider);
@@ -60,6 +59,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
         matchedTitle: item.title,
         matchedArtist: artist,
         lines: [],
+        instrumental: false,
       },
     });
     try {
@@ -88,6 +88,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
           matchedTitle: item.title,
           matchedArtist: artist,
           lines: [],
+          instrumental: false,
         },
         error: errorMessage(error),
       });

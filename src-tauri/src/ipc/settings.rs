@@ -6,7 +6,7 @@ use crate::*;
 #[tauri::command]
 pub fn settings_get(state: tauri::State<'_, RuntimeState>) -> IpcResult<Vec<SettingEntry>> {
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
-    let mut statement = db.prepare("SELECT key, value FROM settings WHERE key IN ('ytmSync', 'useLoginForBrowse', 'hideExplicit', 'hideVideoSongs', 'enableBetterLyrics', 'enablePaxsenix', 'enableLrclib', 'enableKugou', 'enableLyricsPlus', 'enableMusixmatch', 'shuffleMode', 'repeatMode', 'similarContent', 'autoLoadMore', 'disableLoadMoreWhenRepeatAll', 'autoDownloadOnLike', 'autoSkipNextOnError', 'persistentShuffleAcrossQueues', 'rememberShuffleAndRepeat', 'shufflePlaylistFirst', 'preventDuplicateTracksInQueue', 'varispeed', 'seekExtraSeconds', 'audioQuality', 'playerVolume', 'equalizerEnabled', 'equalizerLow', 'equalizerMid', 'equalizerHigh', 'pauseOnMute', 'persistentQueue', 'pauseListenHistory', 'pauseSearchHistory', 'sleepTimerDefault', 'sidebarCollapsed', 'lyricsProviderOrder', 'show_liked_playlist', 'show_downloaded_playlist', 'show_uploaded_playlist', 'show_top_playlist', 'show_cached_playlist', 'playerCacheLimitMb') ORDER BY key").map_err(|e| format!("settings read failed: {e}"))?;
+    let mut statement = db.prepare("SELECT key, value FROM settings WHERE key IN ('ytmSync', 'useLoginForBrowse', 'hideExplicit', 'hideVideoSongs', 'enableBetterLyrics', 'enablePaxsenix', 'enableLrclib', 'enableKugou', 'enableMusixmatch', 'enableNetEase', 'enableQQMusic', 'enableLyricsOvh', 'shuffleMode', 'repeatMode', 'similarContent', 'autoLoadMore', 'disableLoadMoreWhenRepeatAll', 'autoDownloadOnLike', 'autoSkipNextOnError', 'persistentShuffleAcrossQueues', 'rememberShuffleAndRepeat', 'shufflePlaylistFirst', 'preventDuplicateTracksInQueue', 'varispeed', 'seekExtraSeconds', 'audioQuality', 'playerVolume', 'equalizerEnabled', 'equalizerLow', 'equalizerMid', 'equalizerHigh', 'pauseOnMute', 'persistentQueue', 'pauseListenHistory', 'pauseSearchHistory', 'sleepTimerDefault', 'sidebarCollapsed', 'lyricsProviderOrder', 'show_liked_playlist', 'show_downloaded_playlist', 'show_uploaded_playlist', 'show_top_playlist', 'show_cached_playlist', 'playerCacheLimitMb') ORDER BY key").map_err(|e| format!("settings read failed: {e}"))?;
     let rows = statement
         .query_map([], |row| {
             Ok(SettingEntry {
@@ -78,10 +78,11 @@ pub fn settings_set(
             "Paxsenix",
             "LrcLib",
             "KuGou",
-            "LyricsPlus",
             "Musixmatch",
-            "YouTubeSubtitle",
+            "NetEase",
+            "QQMusic",
             "YouTube",
+            "LyricsOvh",
         ];
         if value
             .split(',')
