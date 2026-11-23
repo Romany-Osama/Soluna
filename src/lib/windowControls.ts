@@ -1,27 +1,37 @@
-/** Safe window controls for frameless Tauri window. Safe in test environments. */
+/** Window controls for the frameless Tauri window.
+ *
+ * Previously every failure was swallowed by an empty `catch {}`, so the
+ * buttons highlighted on hover but did nothing on click and there was no
+ * way to tell why. Failures are now logged, so a denied permission or a
+ * missing Tauri window shows up in the devtools console instead of
+ * silently doing nothing. In headless/test environments there is no Tauri
+ * window, so the import failure is expected and is logged at debug level.
+ */
+async function currentWindow() {
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  return getCurrentWindow();
+}
+
 export async function minimizeWindow() {
   try {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().minimize();
-  } catch {
-    /* ignore in headless/test environments */
+    await (await currentWindow()).minimize();
+  } catch (error) {
+    console.error("Minimize window failed:", error);
   }
 }
 
 export async function toggleMaximizeWindow() {
   try {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().toggleMaximize();
-  } catch {
-    /* ignore in headless/test environments */
+    await (await currentWindow()).toggleMaximize();
+  } catch (error) {
+    console.error("Maximize window failed:", error);
   }
 }
 
 export async function closeWindow() {
   try {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().close();
-  } catch {
-    /* ignore in headless/test environments */
+    await (await currentWindow()).close();
+  } catch (error) {
+    console.error("Close window failed:", error);
   }
 }
