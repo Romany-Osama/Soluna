@@ -10,16 +10,16 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 
 | Class | Meaning | Commands |
 | --- | --- | --- |
-| `read-local` | Reads Soluna's own database, settings or files. | 26 |
-| `write-local` | Changes Soluna's own data; the change can be reversed. | 18 |
-| `remote-read` | Calls YouTube Music, Spotify or a lyrics/update server; reads only (may cache the answer). | 32 |
+| `read-local` | Reads Soluna's own database, settings or files. | 28 |
+| `write-local` | Changes Soluna's own data; the change can be reversed. | 19 |
+| `remote-read` | Calls YouTube Music, Spotify or a lyrics/update server; reads only (may cache the answer). | 33 |
 | `remote-write` | Changes the signed-in YouTube Music or Spotify account; the change can be reversed. | 9 |
-| `destructive-local` | Deletes or replaces Soluna data (history, cache, downloads, a backup restore). | 7 |
+| `destructive-local` | Deletes or replaces Soluna data (history, cache, downloads, a backup restore). | 8 |
 | `remote-destructive` | Deletes something from the signed-in YouTube Music or Spotify account. | 4 |
 | `system` | Reaches outside the app: file dialogs, opening a browser, installing an update, writing a backup file. | 4 |
 | `credentials` | Opens a login window or creates, refreshes or deletes a stored session. | 5 |
 
-## Commands (105)
+## Commands (110)
 
 ### account (8)
 
@@ -120,7 +120,7 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | `ytm_toggle_like` | remote-write | `App.tsx`, `components/InlineLikeButton.tsx` |
 | `ytm_toggle_podcast_saved` | remote-write | `App.tsx` |
 
-### downloads (5)
+### downloads (10)
 
 | Command | Risk | Callers |
 | --- | --- | --- |
@@ -129,6 +129,11 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | `download_remove` | destructive-local | `App.tsx`, `app/capabilities.ts`, `features/downloads/useDownloads.ts` |
 | `download_start` | remote-read | `components/InlineLikeButton.tsx`, `features/downloads/useDownloads.ts`, `features/spotify/useSpotifyLibrary.ts` |
 | `library_downloads` | read-local | `features/library/useLibraryData.ts` |
+| `playlist_download_cancel` | write-local | `features/downloads/usePlaylistDownloads.ts` |
+| `playlist_download_remove` | destructive-local | `features/downloads/usePlaylistDownloads.ts` |
+| `playlist_download_start` | remote-read | `features/downloads/usePlaylistDownloads.ts` |
+| `playlist_download_status` | read-local | `features/downloads/usePlaylistDownloads.ts` |
+| `playlist_downloads` | read-local | `features/downloads/usePlaylistDownloads.ts` |
 
 ### player (10)
 

@@ -11,6 +11,7 @@ import type {
   PlayerCacheUsage,
   PlayerPayload,
   PlaylistContinuationPage,
+  PlaylistDownloadStatus,
   PlaylistPage,
   QueuePage,
   RemoteHistoryPage,
@@ -41,6 +42,7 @@ type RustModels = {
   PlayerCacheUsage: PlayerCacheUsage;
   PlayerPayload: PlayerPayload;
   PlaylistContinuationPage: PlaylistContinuationPage;
+  PlaylistDownloadStatus: PlaylistDownloadStatus;
   PlaylistPage: PlaylistPage;
   QueuePage: QueuePage;
   RemoteHistoryPage: RemoteHistoryPage;
@@ -124,6 +126,14 @@ export type IpcCommandMap = {
   download_info: { args: { songId: LibraryId }; result: ResolveModel<DownloadInfo | null> };
   download_cancel: { args: { songId: LibraryId }; result: ResolveModel<void> };
   download_remove: { args: { songId: LibraryId }; result: ResolveModel<void> };
+  playlist_download_start: {
+    args: { playlist: YtItem; songs: YtItem[]; audioQuality?: Keyword | null };
+    result: ResolveModel<PlaylistDownloadStatus>;
+  };
+  playlist_download_status: { args: { playlistId: LibraryId }; result: ResolveModel<PlaylistDownloadStatus | null> };
+  playlist_downloads: { args: Record<string, never>; result: ResolveModel<PlaylistDownloadStatus[]> };
+  playlist_download_cancel: { args: { playlistId: LibraryId }; result: ResolveModel<void> };
+  playlist_download_remove: { args: { playlistId: LibraryId }; result: ResolveModel<void> };
   player_cache_remove: { args: { songId: LibraryId }; result: ResolveModel<void> };
   player_cache_usage: { args: Record<string, never>; result: ResolveModel<PlayerCacheUsage> };
   player_cache_clear: { args: Record<string, never>; result: ResolveModel<number> };

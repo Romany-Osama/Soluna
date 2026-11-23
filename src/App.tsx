@@ -137,6 +137,7 @@ function App() {
     downloadItems,
     removeDownloads,
     maybeAutoDownloadOnLike,
+    playlistDownloads,
   } = useDownloads({ audioQuality, setNotice, settings, destructive });
   const {
     logoutDialogOpen,
@@ -3053,6 +3054,7 @@ function App() {
           closePlaylist={() => setOpenPlaylist(null)}
           settings={settings}
           toggleSelectedItem={toggleSelectedItem}
+          playlistDownloads={playlistDownloads}
         />
       </ErrorBoundary>
       <PlayerBar

@@ -111,4 +111,81 @@ describe("PlaylistScreen (U4-015)", () => {
     expect(boxes).toHaveLength(2);
     expect(boxes.map((box) => box.includes("checked"))).toEqual([false, true]);
   });
+
+  it("offers a whole-playlist download and shows its progress and failures", async () => {
+    const { PlaylistScreen } = await import("./playlist/PlaylistScreen");
+    const downloadsFor = (download: object | null) =>
+      ({
+        playlistDownloads: [],
+        statusForPlaylist: () => download,
+        refreshPlaylistDownload: asyncNoop,
+        refreshPlaylistDownloads: asyncNoop,
+        startPlaylistDownload: noop,
+        cancelPlaylistDownload: asyncNoop,
+        removePlaylistDownload: noop,
+      }) as never;
+    const props = {
+      audioQuality: null as never,
+      closePlaylist: noop,
+      isSelected: () => false,
+      loadPlaylistMore: asyncNoop,
+      openMenu: asyncNoop,
+      playItem: asyncNoop,
+      playlist: {
+        status: "ready" as const,
+        data: {
+          playlist: { id: "PL1", kind: "playlist", title: "Mix", subtitle: "", artists: [] },
+          songs: [song("a", "First"), song("b", "Second")],
+        },
+      },
+      selectionMode: false,
+      settings: {},
+      toggleSelectedItem: noop,
+      playlistDownloads: downloadsFor(null),
+    };
+    expect(renderToStaticMarkup(<PlaylistScreen {...props} />)).toContain("Download playlist");
+    const downloading = renderToStaticMarkup(
+      <PlaylistScreen
+        {...props}
+        playlistDownloads={downloadsFor({
+          playlistId: "PL1",
+          title: "Mix",
+          thumbnail: null,
+          artworkPath: null,
+          state: "downloading",
+          totalSongs: 2,
+          completedSongs: 1,
+          failedSongs: 0,
+          failures: [],
+          error: null,
+          startedAt: 7,
+          updatedAt: 7,
+        })}
+      />,
+    );
+    expect(downloading).toContain("Downloading… 1 of 2");
+    expect(downloading).toContain("Cancel download");
+    const partial = renderToStaticMarkup(
+      <PlaylistScreen
+        {...props}
+        playlistDownloads={downloadsFor({
+          playlistId: "PL1",
+          title: "Mix",
+          thumbnail: null,
+          artworkPath: null,
+          state: "partial",
+          totalSongs: 2,
+          completedSongs: 1,
+          failedSongs: 1,
+          failures: [{ songId: "b", title: "Second", error: "audio cache response failed" }],
+          error: "1 of 2 songs failed to download",
+          startedAt: 7,
+          updatedAt: 7,
+        })}
+      />,
+    );
+    expect(partial).toContain("Downloaded with 1 failed song");
+    expect(partial).toContain("Retry failed songs");
+    expect(partial).toContain("Second");
+  });
 });

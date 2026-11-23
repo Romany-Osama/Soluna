@@ -3,6 +3,8 @@ import { AudioQuality } from "../../lib/audioQuality";
 import { mediaSrc } from "../../lib/media";
 import { YtItem, LoadState, PlaylistPage } from "../../types";
 import { withOccurrences } from "../../lib/identity";
+import type { PlaylistDownloadActions } from "../downloads/usePlaylistDownloads";
+import { useEffect, useRef } from "react";
 
 export type PlaylistScreenProps = {
   audioQuality: AudioQuality;
@@ -23,6 +25,8 @@ export type PlaylistScreenProps = {
   closePlaylist: () => void;
   settings: Record<string, boolean>;
   toggleSelectedItem: (item: YtItem, key?: string) => void;
+  /** Whole-playlist download state and actions for the open playlist. */
+  playlistDownloads?: PlaylistDownloadActions | null;
 };
 
 export function PlaylistScreen({
@@ -36,7 +40,31 @@ export function PlaylistScreen({
   closePlaylist,
   settings,
   toggleSelectedItem,
+  playlistDownloads,
 }: PlaylistScreenProps) {
+  // Latest playlist page for the download handler: `loadPlaylistMore` updates the cache (and this
+  // component) after it resolves, so the closure's `playlist` would still hold the first page.
+  const playlistRef = useRef(playlist);
+  useEffect(() => {
+    playlistRef.current = playlist;
+  });
+  const playlistDownload = playlistDownloads?.statusForPlaylist(
+    playlist?.status === "ready" ? playlist.data.playlist.id : null,
+  );
+  /** Loads every remaining page first, so the download covers the whole playlist, not just the songs loaded so far (the backend also tops up from YouTube when signed in). */
+  const downloadPlaylist = async () => {
+    if (!playlistDownloads) return;
+    let guard = 0;
+    while (playlistRef.current?.status === "ready" && playlistRef.current.data.continuation && guard < 25) {
+      guard += 1;
+      await loadPlaylistMore();
+    }
+    const current = playlistRef.current;
+    if (current?.status === "ready") playlistDownloads.startPlaylistDownload(current.data.playlist, current.data.songs);
+  };
+  const downloadDone = (playlistDownload?.completedSongs ?? 0) + (playlistDownload?.failedSongs ?? 0);
+  const downloadTotal = playlistDownload?.totalSongs ?? 0;
+  const downloadPercent = downloadTotal > 0 ? Math.round((downloadDone / downloadTotal) * 100) : 0;
   return (
     <>
       {playlist && (
@@ -60,14 +88,108 @@ export function PlaylistScreen({
             {playlist.status === "ready" && (
               <>
                 <div className="playlist-header">
-                  {mediaSrc(playlist.data.playlist.thumbnail) && (
-                    <img src={mediaSrc(playlist.data.playlist.thumbnail) as string} alt="" />
+                  {mediaSrc(playlistDownload?.artworkPath ?? playlist.data.playlist.thumbnail) && (
+                    <img
+                      src={mediaSrc(playlistDownload?.artworkPath ?? playlist.data.playlist.thumbnail) as string}
+                      alt=""
+                    />
                   )}
                   <div>
                     <p className="eyebrow">Playlist</p>
                     <h2>{playlist.data.playlist.title}</h2>
                     <p>{playlist.data.playlist.subtitle}</p>
                   </div>
+                  {playlistDownloads && (
+                    <div className="playlist-download">
+                      {playlistDownload?.state === "downloading" ? (
+                        <>
+                          <p>
+                            Downloading… {downloadDone} of {downloadTotal}
+                          </p>
+                          <div
+                            className="download-progress"
+                            role="progressbar"
+                            aria-valuenow={downloadDone}
+                            aria-valuemin={0}
+                            aria-valuemax={downloadTotal}
+                            aria-label={`Playlist download progress ${downloadPercent}%`}
+                          >
+                            <span style={{ width: `${downloadPercent}%` }} />
+                          </div>
+                          <button
+                            className="secondary-button"
+                            onClick={() =>
+                              void playlistDownloads.cancelPlaylistDownload(
+                                playlist.data.playlist.id,
+                                playlist.data.playlist.title,
+                              )
+                            }
+                          >
+                            Cancel download
+                          </button>
+                        </>
+                      ) : playlistDownload?.state === "completed" ? (
+                        <>
+                          <p>Downloaded for offline playback</p>
+                          <button
+                            className="secondary-button"
+                            onClick={() =>
+                              void playlistDownloads.removePlaylistDownload(
+                                playlist.data.playlist.id,
+                                playlist.data.playlist.title,
+                              )
+                            }
+                          >
+                            Remove download
+                          </button>
+                        </>
+                      ) : playlistDownload?.state === "partial" ? (
+                        <>
+                          <p>
+                            Downloaded with {playlistDownload.failedSongs} failed song
+                            {playlistDownload.failedSongs === 1 ? "" : "s"}
+                          </p>
+                          <button className="primary-button" onClick={() => void downloadPlaylist()}>
+                            Retry failed songs
+                          </button>
+                          <button
+                            className="secondary-button"
+                            onClick={() =>
+                              void playlistDownloads.removePlaylistDownload(
+                                playlist.data.playlist.id,
+                                playlist.data.playlist.title,
+                              )
+                            }
+                          >
+                            Remove download
+                          </button>
+                          {playlistDownload.failures.length > 0 && (
+                            <details className="playlist-download-failures">
+                              <summary>See failed songs ({playlistDownload.failures.length})</summary>
+                              <ul>
+                                {playlistDownload.failures.map((failure) => (
+                                  <li key={failure.songId}>
+                                    <strong>{failure.title}</strong> — {failure.error}
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                        </>
+                      ) : playlistDownload?.state === "failed" ? (
+                        <>
+                          <p>Download failed{playlistDownload.error ? `: ${playlistDownload.error}` : ""}</p>
+                          <button className="primary-button" onClick={() => void downloadPlaylist()}>
+                            Retry download
+                          </button>
+                        </>
+                      ) : (
+                        <button className="primary-button" onClick={() => void downloadPlaylist()}>
+                          Download playlist
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div className="playlist-songs">
                   {playlist.data.songs.length === 0 ? (

@@ -6,6 +6,7 @@ import { errorMessage } from "../../lib/util";
 import { DownloadInfo, YtItem } from "../../types";
 import type { SetNotice } from "../../app/notifications";
 import type { Destructive } from "../../app/destructive";
+import { usePlaylistDownloads } from "./usePlaylistDownloads";
 
 export type DownloadsDeps = {
   audioQuality: AudioQuality;
@@ -17,6 +18,9 @@ export type DownloadsDeps = {
 /** Offline downloads (U4-002): the commands, their notices and the progress of the item whose menu is open. */
 export function useDownloads({ audioQuality, setNotice, settings, destructive }: DownloadsDeps) {
   const [menuDownload, setMenuDownload] = useState<DownloadInfo | null>(null);
+  // Whole-playlist downloads live here too (same deps, same domain): App.tsx stays under its line
+  // cap (TR-M1) by composing one downloads hook instead of two.
+  const playlistDownloads = usePlaylistDownloads({ audioQuality, setNotice, destructive });
 
   useEffect(() => {
     let stop: (() => void) | undefined;
@@ -129,5 +133,6 @@ export function useDownloads({ audioQuality, setNotice, settings, destructive }:
     downloadItems,
     removeDownloads,
     maybeAutoDownloadOnLike,
+    playlistDownloads,
   };
 }
