@@ -92,23 +92,6 @@ pub fn is_expired(used_at: i64, now: i64) -> bool {
     now.saturating_sub(used_at) > CACHE_MAX_AGE_SECS
 }
 
-/// Song ids whose entries have gone [`CACHE_MAX_AGE_DAYS`] without a listen, oldest first.
-pub fn expired_entries(entries: &[CacheEntry], now: i64) -> Vec<String> {
-    let mut expired: Vec<&CacheEntry> = entries
-        .iter()
-        .filter(|entry| is_expired(entry.used_at, now))
-        .collect();
-    expired.sort_by(|a, b| {
-        a.used_at
-            .cmp(&b.used_at)
-            .then_with(|| a.song_id.cmp(&b.song_id))
-    });
-    expired
-        .into_iter()
-        .map(|entry| entry.song_id.clone())
-        .collect()
-}
-
 pub fn limit_bytes(limit_mb: i64) -> i64 {
     limit_mb.max(0).saturating_mul(1024 * 1024)
 }
@@ -521,22 +504,6 @@ mod tests {
             !is_expired(now + 60, now),
             "a future timestamp is not expired"
         );
-    }
-
-    #[test]
-    fn expired_entries_lists_only_stale_songs_oldest_first() {
-        let now = 1_800_000_000;
-        let entries = vec![
-            entry("fresh", 40, now - 10),
-            entry("stale-new", 50, now - CACHE_MAX_AGE_SECS - 100),
-            entry("stale-old", 30, now - CACHE_MAX_AGE_SECS - 200),
-            entry("boundary", 30, now - CACHE_MAX_AGE_SECS),
-        ];
-        assert_eq!(
-            expired_entries(&entries, now),
-            vec!["stale-old".to_owned(), "stale-new".to_owned()]
-        );
-        assert!(expired_entries(&[], now).is_empty());
     }
 
     #[test]
