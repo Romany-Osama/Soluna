@@ -58,6 +58,12 @@ function typeToTs(type) {
   if (option) return `${typeToTs(option[1])} | null`;
   const vector = normalized.match(/^Vec<(.+)>$/);
   if (vector) return `${typeToTs(vector[1])}[]`;
+  // Size-bounded structured arguments (S5-012) are wire-identical to the type
+  // they wrap, so the generated bindings keep the unwrapped type.
+  if (normalized === "ItemArg") return "YtItem";
+  if (normalized === "PageArg") return "DetailPage";
+  const idList = normalized.match(/^IdListArg<(.+)>$/);
+  if (idList) return `${typeToTs(idList[1])}[]`;
   if (rustTypeToTs.has(normalized)) return rustTypeToTs.get(normalized);
   if (/^[A-Z]\w*$/.test(normalized)) return normalized;
   throw new Error(`unsupported Rust IPC type: ${normalized}`);

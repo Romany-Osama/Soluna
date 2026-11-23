@@ -4,6 +4,9 @@ All notable changes are listed here. Soluna was called Meld Desktop up to 0.3.0.
 
 ## [Unreleased]
 
+### Changed
+- Security: Soluna refuses oversized songs, pages and lists sent by the window before using them.
+
 ## [0.4.0] — Soluna: new name and look, stronger downloads, safer app commands
 
 **Meld Desktop is now Soluna.** Update recommended for everyone on 0.3.0: you get this update inside the app (Settings → About, or the daily check), and you can also run the Soluna setup EXE over 0.3.0. Your library, downloads, settings and sign-ins are kept (details under "Moving from Meld Desktop"). This is the big release that gathers the playback, navigation and security work since 0.3.0.

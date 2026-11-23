@@ -220,7 +220,7 @@ pub async fn library_refetch_item(
 }
 
 #[tauri::command]
-pub fn library_save_item(item: YtItem, state: tauri::State<'_, RuntimeState>) -> IpcResult<()> {
+pub fn library_save_item(item: ItemArg, state: tauri::State<'_, RuntimeState>) -> IpcResult<()> {
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
     let is_video = item
         .music_video_type
@@ -319,7 +319,7 @@ pub fn library_edit_item(
 
 #[tauri::command]
 pub fn library_toggle_liked(
-    item: YtItem,
+    item: ItemArg,
     liked: bool,
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<()> {
@@ -359,7 +359,7 @@ pub async fn ytm_remove_from_history(
 pub async fn ytm_toggle_like(
     video_id: VideoId,
     liked: bool,
-    item: Option<YtItem>,
+    item: Option<ItemArg>,
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<()> {
     let video_id = video_id.into_inner();
@@ -463,7 +463,7 @@ pub fn library_item_state(
 
 #[tauri::command]
 pub fn speed_dial_toggle(
-    item: YtItem,
+    item: ItemArg,
     pinned: bool,
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<()> {
@@ -542,7 +542,7 @@ pub fn library_remove_item(id: LibraryId, state: tauri::State<'_, RuntimeState>)
 }
 
 #[tauri::command]
-pub fn history_add(item: YtItem, state: tauri::State<'_, RuntimeState>) -> IpcResult<i64> {
+pub fn history_add(item: ItemArg, state: tauri::State<'_, RuntimeState>) -> IpcResult<i64> {
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
     let is_video = item
         .music_video_type
@@ -1264,7 +1264,7 @@ pub async fn ytm_toggle_episode_saved(
     video_id: VideoId,
     saved: bool,
     set_video_id: Opt<YtId>,
-    item: Option<YtItem>,
+    item: Option<ItemArg>,
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<()> {
     let video_id = video_id.into_inner();
@@ -1483,7 +1483,7 @@ pub fn library_create_playlist(
 #[tauri::command]
 pub fn library_add_to_playlist(
     playlist_id: LibraryId,
-    item: YtItem,
+    item: ItemArg,
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<bool> {
     let playlist_id = playlist_id.into_inner();

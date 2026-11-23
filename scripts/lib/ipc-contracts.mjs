@@ -13,7 +13,15 @@ const VALIDATED_TYPES = new Set([
   "SpotifyId",
   "SpotifyUri",
 ]);
-const STRUCTURED_TYPES = new Set(["YtItem", "DetailPage", "Option<YtItem>", "Option<VideoId>"]);
+const STRUCTURED_TYPES = new Set([
+  "YtItem",
+  "DetailPage",
+  "ItemArg",
+  "PageArg",
+  "Option<YtItem>",
+  "Option<ItemArg>",
+  "Option<VideoId>",
+]);
 
 function splitTopLevel(value) {
   const parts = [];
@@ -75,6 +83,7 @@ function isValidatedType(type) {
   const inner = type.match(/^(?:Opt|Option)<(.+)>$/)?.[1] ?? type;
   if (VALIDATED_TYPES.has(inner) || STRUCTURED_TYPES.has(inner)) return true;
   if (/^Vec<(.+)>$/.test(inner)) return isValidatedType(inner.match(/^Vec<(.+)>$/)[1]);
+  if (/^IdListArg<(.+)>$/.test(inner)) return isValidatedType(inner.match(/^IdListArg<(.+)>$/)[1]);
   return ["bool", "i32", "i64", "usize"].includes(inner);
 }
 
