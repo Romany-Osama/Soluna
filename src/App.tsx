@@ -89,6 +89,7 @@ import type { DetailRef, PodcastFilter, TopPeriod } from "./data/keys";
 import { useHomeData } from "./features/home/useHomeData";
 import { useSearchData } from "./features/search/useSearchData";
 import { useLibraryData } from "./features/library/useLibraryData";
+import { useLikedSyncOnOpen } from "./features/library/useLikedSyncOnOpen";
 import { useHistoryData } from "./features/history/useHistoryData";
 import { useDetailData } from "./features/detail/useDetailData";
 import { playlistIdOf, usePlaylistData } from "./features/playlist/usePlaylistData";
@@ -411,6 +412,7 @@ function App() {
   const resumePendingRef = useRef(false);
   const accountAuthStateRef = useRef<boolean | null>(null);
   const lastLibrarySyncRef = useRef<Record<string, number>>({});
+  useLikedSyncOnOpen({ sessionStatus, settings, settingsLoading, loadLibrary, lastLibrarySyncRef });
   const {
     sleepTimerOpen,
     setSleepTimerOpen,

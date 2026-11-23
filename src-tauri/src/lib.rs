@@ -164,7 +164,8 @@ const SCHEMA_SQL: &str = "PRAGMA foreign_keys = ON;
                  path TEXT NOT NULL,
                  bytes INTEGER NOT NULL DEFAULT 0,
                  cached_at INTEGER NOT NULL,
-                 quality TEXT NOT NULL DEFAULT 'auto'
+                 quality TEXT NOT NULL DEFAULT 'auto',
+                 artwork_path TEXT
               );
               CREATE TABLE IF NOT EXISTS podcasts (
                  id TEXT PRIMARY KEY,
@@ -361,6 +362,7 @@ fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqli
         "ALTER TABLE player_cache ADD COLUMN quality TEXT NOT NULL DEFAULT 'auto'",
         [],
     );
+    let _ = db.execute("ALTER TABLE player_cache ADD COLUMN artwork_path TEXT", []);
     // A download cannot survive a restart; rows still marked "downloading" are leftovers of a crash or forced quit.
     // Mark them cancelled (not failed) so the retained `.part` file stays resumable (v0.1.8 resume, see DECISIONS D-002).
     let _ = db.execute("UPDATE downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
@@ -1974,7 +1976,9 @@ fn download_cache_path(song_id: &str) -> PathBuf {
 }
 
 /// A playback-cache file usable for this song at this quality (PLAY-021): a copy cached at another quality is
-/// never served, and an empty or vanished file is ignored.
+/// never served, and an empty or vanished file is ignored. An entry unplayed for
+/// [`player_cache::CACHE_MAX_AGE_DAYS`] days is expired: its files and row are deleted and it is not served,
+/// so the next play resolves a fresh stream and starts a new fill.
 fn cached_player_file(
     db: &Connection,
     song_id: &str,
@@ -1982,15 +1986,60 @@ fn cached_player_file(
 ) -> Result<Option<String>, String> {
     let cached = db
         .query_row(
-            "SELECT path, bytes FROM player_cache WHERE song_id = ?1 AND quality = ?2",
+            "SELECT path, bytes, cached_at FROM player_cache WHERE song_id = ?1 AND quality = ?2",
             params![song_id, quality],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(|error| format!("player cache state read failed: {error}"))?;
-    Ok(cached
-        .filter(|(path, bytes)| *bytes > 0 && Path::new(path).is_file())
-        .map(|(path, _)| path))
+    let Some((path, bytes, cached_at)) = cached else {
+        return Ok(None);
+    };
+    if bytes <= 0 || !Path::new(&path).is_file() {
+        return Ok(None);
+    }
+    if player_cache::is_expired(cached_at, now_seconds()) {
+        let _ = delete_player_cache_entry(db, song_id);
+        return Ok(None);
+    }
+    Ok(Some(path))
+}
+
+/// Deletes one playback-cache entry: its audio file, its cached thumbnail, and its row. Returns whether
+/// a row was deleted. A file the OS will not delete (for example the one playing right now) keeps its
+/// row and is retried next time, exactly like the old quota eviction behaved.
+fn delete_player_cache_entry(db: &Connection, song_id: &str) -> Result<bool, String> {
+    let row: Option<(String, Option<String>)> = db
+        .query_row(
+            "SELECT path, artwork_path FROM player_cache WHERE song_id = ?1",
+            params![song_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("player cache entry read failed: {error}"))?;
+    let Some((path, artwork_path)) = row else {
+        return Ok(false);
+    };
+    if let Err(error) = fs::remove_file(&path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Ok(false);
+        }
+    }
+    if let Some(artwork) = artwork_path {
+        let _ = fs::remove_file(artwork);
+    }
+    db.execute(
+        "DELETE FROM player_cache WHERE song_id = ?1",
+        params![song_id],
+    )
+    .map_err(|error| format!("player cache removal failed: {error}"))?;
+    Ok(true)
 }
 
 fn normalize_audio_quality(value: Option<&str>) -> &'static str {
@@ -2036,6 +2085,24 @@ fn download_artwork_path(song_id: &str, extension: &str) -> PathBuf {
         .join(format!("{digest:x}.{safe_extension}"))
 }
 
+/// Thumbnail cached for a playback-cache entry. It lives next to the cached audio in `player-cache/`,
+/// not in `downloads/`, so evicting or removing a cached song never deletes a download's artwork (and
+/// vice versa): the two rows point at different files even for the same song.
+fn player_cache_artwork_path(song_id: &str, extension: &str) -> PathBuf {
+    let digest = Sha1::digest(song_id.as_bytes());
+    let safe_extension = match extension {
+        "jpg" | "jpeg" => "jpg",
+        "png" => "png",
+        "webp" => "webp",
+        _ => "cover",
+    };
+    database_path()
+        .parent()
+        .map(|value| value.join("player-cache"))
+        .unwrap_or_else(|| PathBuf::from("player-cache"))
+        .join(format!("{digest:x}.{safe_extension}"))
+}
+
 fn artwork_extension(content_type: &str) -> &'static str {
     let mime = content_type
         .split(';')
@@ -2071,6 +2138,19 @@ fn download_retry(status: reqwest::StatusCode, resume: download_resume::Resume) 
 }
 
 async fn cache_download_artwork(song_id: &str, source_url: Option<&str>) -> Option<String> {
+    cache_artwork(song_id, source_url, download_artwork_path).await
+}
+
+/// Thumbnail cached for a playback-cache entry, so a song played before still shows its artwork offline.
+async fn cache_player_artwork(song_id: &str, source_url: Option<&str>) -> Option<String> {
+    cache_artwork(song_id, source_url, player_cache_artwork_path).await
+}
+
+async fn cache_artwork(
+    song_id: &str,
+    source_url: Option<&str>,
+    path_for: fn(&str, &str) -> PathBuf,
+) -> Option<String> {
     let url = source_url?.trim();
     // Always defense-in-depth, not a response to a known exploit: this only ever receives thumbnail URLs
     // parsed out of YouTube's own API responses (the one caller passes item.thumbnail), never user-entered
@@ -2106,7 +2186,7 @@ async fn cache_download_artwork(song_id: &str, source_url: Option<&str>) -> Opti
     if bytes.is_empty() || bytes.len() > 10 * 1024 * 1024 {
         return None;
     }
-    let path = download_artwork_path(song_id, artwork_extension(&content_type));
+    let path = path_for(song_id, artwork_extension(&content_type));
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.ok()?;
     }
@@ -2178,8 +2258,9 @@ fn player_cache_limit_mb(db: &Connection) -> i64 {
 }
 
 /// Deletes least-recently-used playback-cache files until the cache fits the user's limit (PLAY-041).
-/// A file Windows will not delete (for example the one playing right now) keeps its row and is retried
-/// next time. Returns the number of entries removed.
+/// The quota counts audio bytes only; a cached thumbnail is a few tens of kilobytes next to megabytes of
+/// audio and does not count towards it. A file Windows will not delete (for example the one playing right
+/// now) keeps its row and is retried next time. Returns the number of entries removed.
 fn enforce_player_cache_quota(db: &Connection) -> Result<usize, String> {
     let quota = player_cache::limit_bytes(player_cache_limit_mb(db));
     let mut statement = db
@@ -2204,19 +2285,7 @@ fn enforce_player_cache_quota(db: &Connection) -> Result<usize, String> {
         rows.iter().map(|(entry, _)| entry.clone()).collect();
     let mut removed = 0;
     for song_id in player_cache::plan_eviction(&entries, quota) {
-        let Some((_, path)) = rows.iter().find(|(entry, _)| entry.song_id == song_id) else {
-            continue;
-        };
-        let gone = match fs::remove_file(path) {
-            Ok(()) => true,
-            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-        };
-        if gone {
-            db.execute(
-                "DELETE FROM player_cache WHERE song_id = ?1",
-                params![song_id],
-            )
-            .map_err(|error| format!("player cache eviction failed: {error}"))?;
+        if delete_player_cache_entry(db, &song_id)? {
             removed += 1;
         }
     }
@@ -2235,8 +2304,9 @@ fn files_in(directory: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Start-up housekeeping (R6-026): drop rows whose cache file vanished, delete abandoned `.part` files and
-/// unreferenced playback-cache files, then apply the cache limit. Finished offline downloads are never
+/// Start-up housekeeping (R6-026): drop rows whose cache file vanished, delete entries unplayed for
+/// [`player_cache::CACHE_MAX_AGE_DAYS`] days, delete abandoned `.part` files and unreferenced
+/// playback-cache files, then apply the cache limit. Finished offline downloads are never
 /// deleted here; only `.part` files that no download can resume.
 fn clean_media_on_startup(db: &Connection) -> Result<(usize, usize), String> {
     let cache_dir = player_cache_path("probe").parent().map(Path::to_path_buf);
@@ -2249,16 +2319,40 @@ fn clean_media_dirs(
     cache_dir: Option<&Path>,
     download_dir: Option<&Path>,
 ) -> Result<(usize, usize), String> {
-    let cache_rows: Vec<(String, String)> = db
-        .prepare("SELECT song_id, path FROM player_cache")
+    let cache_rows: Vec<(String, String, Option<String>, i64)> = db
+        .prepare("SELECT song_id, path, artwork_path, cached_at FROM player_cache")
         .and_then(|mut statement| {
             statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
                 .collect()
         })
         .map_err(|error| format!("player cache cleanup query failed: {error}"))?;
-    for (song_id, path) in &cache_rows {
+    // Expired entries go first: their audio and thumbnail files are deleted with the row, and the
+    // count of deleted files includes them.
+    let mut deleted = 0;
+    let mut live_rows: Vec<(String, String, Option<String>, i64)> = Vec::new();
+    for (song_id, path, artwork_path, cached_at) in cache_rows {
+        if player_cache::is_expired(cached_at, now_seconds()) {
+            let files: usize = usize::from(Path::new(&path).is_file())
+                + usize::from(
+                    artwork_path
+                        .as_deref()
+                        .is_some_and(|artwork| Path::new(artwork).is_file()),
+                );
+            if delete_player_cache_entry(db, &song_id)? {
+                deleted += files;
+            }
+        } else {
+            live_rows.push((song_id, path, artwork_path, cached_at));
+        }
+    }
+    for (song_id, path, artwork_path, _) in &live_rows {
         if !Path::new(path).is_file() {
+            if let Some(artwork) = artwork_path {
+                let _ = fs::remove_file(artwork);
+            }
             db.execute(
                 "DELETE FROM player_cache WHERE song_id = ?1",
                 params![song_id],
@@ -2266,9 +2360,20 @@ fn clean_media_dirs(
             .map_err(|error| format!("player cache cleanup failed: {error}"))?;
         }
     }
-    let known: HashSet<PathBuf> = cache_rows
+    // Cached thumbnails live in the same folder as the cached audio, so they are known files too:
+    // without them the orphan sweep below would delete every cached thumbnail at start-up. Only rows
+    // whose audio file still exists count: a row dropped above leaves its thumbnail orphaned, and the
+    // sweep below is what removes it.
+    let known: HashSet<PathBuf> = live_rows
         .iter()
-        .map(|(_, path)| PathBuf::from(path))
+        .filter(|(_, path, _, _)| Path::new(path).is_file())
+        .flat_map(|(_, path, artwork_path, _)| {
+            let mut paths = vec![PathBuf::from(path)];
+            if let Some(artwork) = artwork_path {
+                paths.push(PathBuf::from(artwork));
+            }
+            paths
+        })
         .collect();
     let resumable: HashSet<PathBuf> = db
         .prepare("SELECT path FROM downloads WHERE state != 'completed'")
@@ -2289,7 +2394,6 @@ fn clean_media_dirs(
             .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "part")),
     );
-    let mut deleted = 0;
     for file in player_cache::orphaned_files(&candidates, &known, &resumable) {
         if fs::remove_file(&file).is_ok() {
             deleted += 1;
@@ -6348,6 +6452,7 @@ fn allowed_setting(key: &str) -> bool {
             | "show_uploaded_playlist"
             | "show_top_playlist"
             | "show_cached_playlist"
+            | "likedSongsSync"
     )
 }
 
@@ -6816,9 +6921,11 @@ mod tests {
         write_file(&kept, 8);
         write_file(&cache.join("orphan.audio"), 8);
         write_file(&cache.join("abandoned.audio.part"), 8);
+        // `cached_at` must be fresh: an entry unplayed for 90 days is expired and pruned here too.
+        let now = now_seconds();
         db.execute(
-            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('kept', ?1, 8, 1, 'auto'), ('vanished', ?2, 8, 1, 'auto')",
-            params![kept.to_string_lossy().to_string(), cache.join("vanished.audio").to_string_lossy().to_string()],
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('kept', ?1, 8, ?3, 'auto'), ('vanished', ?2, 8, ?3, 'auto')",
+            params![kept.to_string_lossy().to_string(), cache.join("vanished.audio").to_string_lossy().to_string(), now],
         )
         .unwrap();
         let finished = downloads.join("finished.audio");
@@ -6856,8 +6963,71 @@ mod tests {
     }
 
     #[test]
+    fn player_cache_expiry_prunes_stale_entries_and_keeps_fresh_ones() {
+        let root = std::env::temp_dir().join(format!("soluna-expiry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cache = root.join("player-cache");
+        let downloads = root.join("downloads");
+        let db = cache_test_db();
+        let now = now_seconds();
+        let stale_at = now - player_cache::CACHE_MAX_AGE_SECS - 60;
+        let fresh = cache.join("fresh.audio");
+        let fresh_artwork = cache.join("fresh.cover");
+        let stale = cache.join("stale.audio");
+        let stale_artwork = cache.join("stale.cover");
+        for path in [&fresh, &fresh_artwork, &stale, &stale_artwork] {
+            write_file(path, 8);
+        }
+        db.execute(
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality, artwork_path) VALUES ('fresh', ?1, 8, ?3, 'auto', ?4), ('stale', ?2, 8, ?5, 'auto', ?6)",
+            params![fresh.to_string_lossy().to_string(), stale.to_string_lossy().to_string(), now, fresh_artwork.to_string_lossy().to_string(), stale_at, stale_artwork.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        let (deleted, _) = clean_media_dirs(&db, Some(&cache), Some(&downloads)).unwrap();
+        assert_eq!(deleted, 2, "the stale audio and its thumbnail are deleted");
+        assert!(
+            fresh.exists() && fresh_artwork.exists(),
+            "a recently played song keeps its files"
+        );
+        assert!(!stale.exists() && !stale_artwork.exists());
+        let left: Vec<String> = db
+            .prepare("SELECT song_id FROM player_cache ORDER BY song_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, vec!["fresh".to_owned()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn player_cache_limit_setting_is_validated() {
         assert!(allowed_setting("playerCacheLimitMb"));
+    }
+
+    #[test]
+    fn liked_songs_sync_setting_is_allowed() {
+        assert!(allowed_setting("likedSongsSync"));
+    }
+
+    #[test]
+    fn player_cache_artwork_lives_beside_the_cached_audio() {
+        let path = player_cache_artwork_path("song-1", "jpg");
+        assert!(path.to_string_lossy().contains("player-cache"));
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("jpg"));
+        assert_eq!(
+            player_cache_artwork_path("song-1", "bmp")
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("cover"),
+            "unknown artwork types fall back to the cover extension"
+        );
+        assert_ne!(
+            player_cache_artwork_path("song-1", "jpg"),
+            download_artwork_path("song-1", "jpg"),
+            "cache artwork must not share a file with download artwork"
+        );
     }
 
     #[test]
@@ -6868,8 +7038,8 @@ mod tests {
         let low = dir.join("low.audio");
         write_file(&low, 16);
         db.execute(
-            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('song', ?1, 16, 1, 'low')",
-            params![low.to_string_lossy().to_string()],
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('song', ?1, 16, ?2, 'low')",
+            params![low.to_string_lossy().to_string(), now_seconds()],
         )
         .unwrap();
         assert_eq!(
@@ -6885,6 +7055,24 @@ mod tests {
             None,
             "a vanished file is not served"
         );
+        // An entry unplayed for 90 days is expired: it is deleted and never served again.
+        let stale = dir.join("stale.audio");
+        write_file(&stale, 16);
+        db.execute(
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('stale', ?1, 16, ?2, 'low')",
+            params![stale.to_string_lossy().to_string(), now_seconds() - player_cache::CACHE_MAX_AGE_SECS - 60],
+        )
+        .unwrap();
+        assert_eq!(cached_player_file(&db, "stale", "low").unwrap(), None);
+        assert!(!stale.exists(), "the expired file is deleted");
+        let remaining: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM player_cache WHERE song_id = 'stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
         assert_eq!(normalize_audio_quality(Some("low")), "low");
         assert_eq!(normalize_audio_quality(Some("high")), "high");
         assert_eq!(normalize_audio_quality(Some("best")), "auto");

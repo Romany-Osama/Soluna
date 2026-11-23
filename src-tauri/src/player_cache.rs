@@ -80,6 +80,35 @@ impl CacheJobs {
 pub const DEFAULT_LIMIT_MB: i64 = 2048;
 pub const LIMIT_CHOICES_MB: [i64; 7] = [0, 512, 1024, 2048, 5120, 10240, 20480];
 
+/// A cached song is deleted after this long with no listen; every play resets the timer (the entry's
+/// `used_at` is refreshed on a cache hit and on a fill commit). Kept as a named constant so the
+/// retention can change in one place.
+pub const CACHE_MAX_AGE_DAYS: i64 = 90;
+pub const CACHE_MAX_AGE_SECS: i64 = CACHE_MAX_AGE_DAYS * 24 * 60 * 60;
+
+/// True when `used_at` is more than [`CACHE_MAX_AGE_DAYS`] before `now` (seconds since the epoch).
+/// A song listened to exactly 90 days ago is still fresh until one more second passes.
+pub fn is_expired(used_at: i64, now: i64) -> bool {
+    now.saturating_sub(used_at) > CACHE_MAX_AGE_SECS
+}
+
+/// Song ids whose entries have gone [`CACHE_MAX_AGE_DAYS`] without a listen, oldest first.
+pub fn expired_entries(entries: &[CacheEntry], now: i64) -> Vec<String> {
+    let mut expired: Vec<&CacheEntry> = entries
+        .iter()
+        .filter(|entry| is_expired(entry.used_at, now))
+        .collect();
+    expired.sort_by(|a, b| {
+        a.used_at
+            .cmp(&b.used_at)
+            .then_with(|| a.song_id.cmp(&b.song_id))
+    });
+    expired
+        .into_iter()
+        .map(|entry| entry.song_id.clone())
+        .collect()
+}
+
 pub fn limit_bytes(limit_mb: i64) -> i64 {
     limit_mb.max(0).saturating_mul(1024 * 1024)
 }
@@ -470,6 +499,44 @@ mod tests {
         }
         // In-flight allowance: at most MAX_ACTIVE_JOBS uncommitted files exist on top of the quota.
         assert_eq!(MAX_ACTIVE_JOBS, 2);
+    }
+
+    #[test]
+    fn cache_expiry_boundary_is_ninety_days_without_a_listen() {
+        assert_eq!(CACHE_MAX_AGE_DAYS, 90);
+        assert_eq!(CACHE_MAX_AGE_SECS, 90 * 24 * 60 * 60);
+        let now = 1_800_000_000;
+        assert!(!is_expired(now, now), "just played");
+        assert!(
+            !is_expired(now - CACHE_MAX_AGE_SECS, now),
+            "exactly 90 days"
+        );
+        assert!(!is_expired(now - CACHE_MAX_AGE_SECS + 1, now));
+        assert!(
+            is_expired(now - CACHE_MAX_AGE_SECS - 1, now),
+            "90 days and a second"
+        );
+        assert!(is_expired(0, now), "never played since the epoch");
+        assert!(
+            !is_expired(now + 60, now),
+            "a future timestamp is not expired"
+        );
+    }
+
+    #[test]
+    fn expired_entries_lists_only_stale_songs_oldest_first() {
+        let now = 1_800_000_000;
+        let entries = vec![
+            entry("fresh", 40, now - 10),
+            entry("stale-new", 50, now - CACHE_MAX_AGE_SECS - 100),
+            entry("stale-old", 30, now - CACHE_MAX_AGE_SECS - 200),
+            entry("boundary", 30, now - CACHE_MAX_AGE_SECS),
+        ];
+        assert_eq!(
+            expired_entries(&entries, now),
+            vec!["stale-old".to_owned(), "stale-new".to_owned()]
+        );
+        assert!(expired_entries(&[], now).is_empty());
     }
 
     #[test]
