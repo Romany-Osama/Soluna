@@ -6,8 +6,8 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { invokeApp as invoke } from "./ipc/bindings";
 import { taskbarInvoke } from "./lib/taskbar";
 import "./App.css";
-import { SolunaLogo } from "./components/SolunaLogo";
 import { WindowControls } from "./components/WindowControls";
+import { AppSidebar } from "./components/AppSidebar";
 import { parseAudioQuality, streamRequest } from "./lib/audioQuality";
 import { appendNewPlayable, removeAt } from "./lib/queue";
 import { playbackEffectKey, resumeStartPosition, shouldAutoplay, startOccurrence } from "./lib/playbackSession";
@@ -29,7 +29,6 @@ import {
   YtItem,
 } from "./types";
 import { navigation } from "./app/navigation";
-import { secondaryNavigation } from "./app/navigation";
 import { lyricsProviderNames } from "./features/lyrics/providers";
 import { HomeScreen } from "./features/home/HomeScreen";
 import { LibraryScreen } from "./features/library/LibraryScreen";
@@ -62,6 +61,7 @@ import { EMPTY_HISTORY, HistoryEntry, NavHistory, pushEntry, stepBack, stepForwa
 import {
   HistorySource,
   LibraryMode,
+  libraryModeForSongFilter,
   librarySongFilterFor,
   Route,
   isValidRoute,
@@ -510,11 +510,14 @@ function App() {
 
   const navigateTo = (next: NavKey) => {
     if (next === active) {
-      closeTransientLayers();
+      // The sidebar always lands on the tab root: a Songs list opened from a Library card returns to the overview.
+      if (next === "library" && libraryMode !== "mix") void openRoute({ name: "library", mode: "mix" });
+      else closeTransientLayers();
       return;
     }
     pushHistory();
     closeTransientLayers();
+    if (next === "library") setLibraryMode("mix"); // Land on the overview, not a leftover Songs list.
     setActive(next);
   };
 
@@ -829,10 +832,9 @@ function App() {
     }
   };
 
-  const chooseLibrarySongFilter = (filter: LibrarySongFilter) => {
-    setLibrarySongFilter(filter);
-    setLibraryMode(filter === "library" ? "songs" : filter === "downloaded" ? "downloads" : filter);
-  };
+  // A playlist card opens its Songs list as a history entry, so Back returns to the Library overview (U4-004).
+  const chooseLibrarySongFilter = (filter: LibrarySongFilter) =>
+    void openRoute({ name: "library", mode: libraryModeForSongFilter(filter) });
 
   const shuffleLibrary = async () => {
     if (filteredLibraryData.length === 0) return;
@@ -2523,63 +2525,13 @@ function App() {
 
   return (
     <div className={settings.sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark" title="Soluna">
-            <SolunaLogo size={settings.sidebarCollapsed ? 38 : 44} />
-          </div>
-          {!settings.sidebarCollapsed && (
-            <div>
-              <strong>Soluna</strong>
-              <span>Desktop</span>
-            </div>
-          )}
-          <button
-            className="sidebar-toggle"
-            onClick={() => void setSetting("sidebarCollapsed", !settings.sidebarCollapsed)}
-            title={settings.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-label={settings.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-pressed={settings.sidebarCollapsed}
-          >
-            {settings.sidebarCollapsed ? "»" : "«"}
-          </button>
-        </div>
-        <nav className="primary-nav" aria-label="Main navigation">
-          {navigation.map((item) => (
-            <button
-              key={item.key}
-              className={active === item.key ? "nav-item active" : "nav-item"}
-              onClick={() => navigateTo(item.key)}
-              title={settings.sidebarCollapsed ? item.label : undefined}
-              aria-current={active === item.key ? "page" : undefined}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              {!settings.sidebarCollapsed && <span>{item.label}</span>}
-            </button>
-          ))}
-        </nav>
-        <nav className="secondary-nav" aria-label="Secondary navigation">
-          {secondaryNavigation.map((item) => (
-            <button
-              key={item.key}
-              className={active === item.key ? "nav-item active" : "nav-item"}
-              onClick={() => navigateTo(item.key)}
-              title={settings.sidebarCollapsed ? item.label : undefined}
-              aria-current={active === item.key ? "page" : undefined}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              {!settings.sidebarCollapsed && <span>{item.label}</span>}
-            </button>
-          ))}
-        </nav>
-        {!settings.sidebarCollapsed && (
-          <div className="sidebar-footer">
-            <span className="guest-label">
-              {sessionStatus.authenticated ? "YouTube Music account connected" : "Guest mode · account optional"}
-            </span>
-          </div>
-        )}
-      </aside>
+      <AppSidebar
+        collapsed={settings.sidebarCollapsed}
+        active={active}
+        authenticated={sessionStatus.authenticated}
+        onToggleCollapsed={() => void setSetting("sidebarCollapsed", !settings.sidebarCollapsed)}
+        onNavigate={navigateTo}
+      />
 
       <main className="main-area" data-route={routePath(currentRoute)}>
         <header className="topbar" data-tauri-drag-region>

@@ -4,6 +4,8 @@ import { EMPTY_HISTORY, MAX_HISTORY_ENTRIES, pushEntry, stepBack, stepForward } 
 import {
   isValidRoute,
   LIBRARY_MODES,
+  libraryModeForSongFilter,
+  librarySongFilterFor,
   parseRoutePath,
   Route,
   routeFromView,
@@ -60,6 +62,14 @@ describe("routes", () => {
       expect(parseRoutePath(path), path).toBeNull();
     expect(isValidRoute({ name: "artist", browseId: "javascript:alert(1)" })).toBe(false);
     expect(isValidRoute({ name: "search", query: "x".repeat(501) })).toBe(false);
+  });
+
+  it("maps song-filter cards to library modes and back", () => {
+    for (const filter of ["liked", "library", "uploaded", "downloaded", "top"] as const) {
+      const mode = libraryModeForSongFilter(filter);
+      expect(librarySongFilterFor(mode)).toBe(filter);
+      expect(isValidRoute({ name: "library", mode })).toBe(true);
+    }
   });
 
   it("derives the visible route, topmost surface first", () => {
