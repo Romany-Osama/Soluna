@@ -1139,9 +1139,16 @@ fn setting_value(db: &Connection, key: &str) -> Result<Option<String>, String> {
 
 fn auth_session(state: &tauri::State<'_, RuntimeState>) -> Result<Option<AuthSession>, String> {
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
-    let cookie = secrets::get(&db, "cookie").ok().flatten();
-    let data_sync_id = setting_value(&db, "dataSyncId")?;
-    let visitor_data = setting_value(&db, "visitorData")?;
+    auth_session_from_db(&db)
+}
+
+/// Resolve the YouTube auth session from a database connection, with the same rules as
+/// `auth_session` (which reads the same rows through the managed state). Used by the
+/// background player-cache fill, which opens its own connection and cannot hold a `State`.
+fn auth_session_from_db(db: &Connection) -> Result<Option<AuthSession>, String> {
+    let cookie = secrets::get(db, "cookie").ok().flatten();
+    let data_sync_id = setting_value(db, "dataSyncId")?;
+    let visitor_data = setting_value(db, "visitorData")?;
     Ok(match (cookie, data_sync_id, visitor_data) {
         (Some(cookie), Some(data_sync_id), Some(visitor_data))
             if !cookie.trim().is_empty()
@@ -1152,10 +1159,10 @@ fn auth_session(state: &tauri::State<'_, RuntimeState>) -> Result<Option<AuthSes
                 cookie,
                 data_sync_id,
                 visitor_data,
-                account_name: setting_value(&db, "accountName")?,
-                account_email: setting_value(&db, "accountEmail")?,
-                account_channel_handle: setting_value(&db, "accountChannelHandle")?,
-                account_avatar: setting_value(&db, "accountAvatar")?,
+                account_name: setting_value(db, "accountName")?,
+                account_email: setting_value(db, "accountEmail")?,
+                account_channel_handle: setting_value(db, "accountChannelHandle")?,
+                account_avatar: setting_value(db, "accountAvatar")?,
             })
         }
         _ => None,
@@ -4568,19 +4575,30 @@ async fn youtube_plain_lyrics_fetch(
 ) -> Option<String> {
     let visitor_data = visitor(state).await.ok()?;
     let session = auth_session(state).ok().flatten();
-    let data_sync_id = session.as_ref().map(|value| value.data_sync_id.as_str());
-    let response = post("next", json!({ "context": context(&visitor_data, session.is_some(), data_sync_id), "videoId": video_id }), session.as_ref()).await.ok()?;
+    youtube_plain_lyrics_fetch_with_session(video_id, &visitor_data, session.as_ref()).await
+}
+
+/// The YouTube watch-page lyrics fetch, driven by already-resolved visitor data and auth
+/// session instead of a live `State`. Used by the background player-cache fill, which
+/// resolves both from its own database connection and cannot hold a `State`.
+async fn youtube_plain_lyrics_fetch_with_session(
+    video_id: &str,
+    visitor_data: &str,
+    session: Option<&AuthSession>,
+) -> Option<String> {
+    let data_sync_id = session.map(|value| value.data_sync_id.as_str());
+    let response = post("next", json!({ "context": context(visitor_data, session.is_some(), data_sync_id), "videoId": video_id }), session).await.ok()?;
     let endpoint = response.pointer("/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/watchNextTabbedResultsRenderer/tabs/1/tabRenderer/endpoint/browseEndpoint")?;
     let browse_id = endpoint.get("browseId").and_then(Value::as_str)?.trim();
     if browse_id.is_empty() {
         return None;
     }
     let params = endpoint.get("params").and_then(Value::as_str);
-    let mut body = json!({ "context": context(&visitor_data, session.is_some(), data_sync_id), "browseId": browse_id });
+    let mut body = json!({ "context": context(visitor_data, session.is_some(), data_sync_id), "browseId": browse_id });
     if let Some(params) = params {
         body["params"] = Value::String(params.to_owned());
     }
-    let browse = post("browse", body, session.as_ref()).await.ok()?;
+    let browse = post("browse", body, session).await.ok()?;
     let sections = browse
         .pointer("/contents/sectionListRenderer/contents")?
         .as_array()?;
@@ -5075,33 +5093,72 @@ async fn fetch_lyrics_provider(
     video_id: Option<&str>,
     state: &tauri::State<'_, RuntimeState>,
 ) -> Result<Option<LyricsPayload>, String> {
-    let make_payload =
-        |text: String, synced: bool, matched_title: String, matched_artist: String| {
-            let filtered = filter_lyrics_credit_lines(&text);
-            LyricsPayload {
-                lines: if synced {
-                    parse_lyric_lines(&filtered)
-                } else {
-                    Vec::new()
-                },
-                provider: provider.to_owned(),
-                text: filtered,
-                synced,
-                matched_title,
-                matched_artist,
-            }
-        };
+    // The YouTube watch-page provider needs the live auth session; every other
+    // provider is session-free and lives in `fetch_lyrics_provider_for_cache`.
+    if provider == "YouTube" {
+        return Ok(match video_id.filter(|value| !value.trim().is_empty()) {
+            Some(id) => youtube_plain_lyrics_fetch(id, state)
+                .await
+                .map(|text| {
+                    make_lyrics_payload(provider, text, false, title.to_owned(), artist.to_owned())
+                })
+                .filter(|payload| !payload.text.is_empty()),
+            None => None,
+        });
+    }
+    fetch_lyrics_provider_for_cache(provider, title, artist, duration, album, video_id, None).await
+}
 
+/// Build a lyrics payload from fetched text, shared by the stateful and the
+/// state-free provider dispatchers.
+fn make_lyrics_payload(
+    provider: &str,
+    text: String,
+    synced: bool,
+    matched_title: String,
+    matched_artist: String,
+) -> LyricsPayload {
+    let filtered = filter_lyrics_credit_lines(&text);
+    LyricsPayload {
+        lines: if synced {
+            parse_lyric_lines(&filtered)
+        } else {
+            Vec::new()
+        },
+        provider: provider.to_owned(),
+        text: filtered,
+        synced,
+        matched_title,
+        matched_artist,
+    }
+}
+
+/// Fetch lyrics from one provider without a live `tauri::State`, for the background
+/// player-cache fill (a detached task cannot hold `State`). `youtube` carries the
+/// visitor data and auth session the YouTube watch-page provider needs, resolved from
+/// a database connection; `None` means that provider is unavailable — the on-demand
+/// lyrics path still covers it when the lyrics UI opens.
+async fn fetch_lyrics_provider_for_cache(
+    provider: &str,
+    title: &str,
+    artist: &str,
+    duration: i32,
+    album: Option<&str>,
+    video_id: Option<&str>,
+    youtube: Option<(&str, Option<&AuthSession>)>,
+) -> Result<Option<LyricsPayload>, String> {
     match provider {
         "BetterLyrics" => Ok(betterlyrics_fetch(title, artist, duration, album)
             .await
-            .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
+            .map(|text| {
+                make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+            })
             .filter(|payload| !payload.text.is_empty())),
         "Paxsenix" => Ok(paxsenix_fetch(title, artist, duration, album)
             .await
             .map(|text| {
                 let synced = !parse_lyric_lines(&text).is_empty();
-                make_payload(text, synced, title.to_owned(), artist.to_owned())
+                make_lyrics_payload(provider, text, synced, title.to_owned(), artist.to_owned())
             })
             .filter(|payload| !payload.text.is_empty())),
         "LrcLib" => {
@@ -5167,7 +5224,8 @@ async fn fetch_lyrics_provider(
                         .synced_lyrics
                         .clone()
                         .or_else(|| track.plain_lyrics.clone())?;
-                    Some(make_payload(
+                    Some(make_lyrics_payload(
+                        provider,
                         text,
                         track.synced_lyrics.is_some(),
                         track.track_name.clone(),
@@ -5178,30 +5236,50 @@ async fn fetch_lyrics_provider(
         }
         "KuGou" => Ok(kugou_fetch(title, artist, duration, album)
             .await
-            .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
+            .map(|text| {
+                make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+            })
             .filter(|payload| !payload.text.is_empty())),
         "LyricsPlus" => Ok(lyricsplus_fetch(title, artist, duration, album)
             .await
-            .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
+            .map(|text| {
+                make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+            })
             .filter(|payload| !payload.text.is_empty())),
         "Musixmatch" => Ok(musixmatch_fetch(title, artist, duration, album)
             .await
-            .map(|(text, synced)| make_payload(text, synced, title.to_owned(), artist.to_owned()))
+            .map(|(text, synced)| {
+                make_lyrics_payload(provider, text, synced, title.to_owned(), artist.to_owned())
+            })
             .filter(|payload| !payload.text.is_empty())),
         "YouTubeSubtitle" => Ok(match video_id.filter(|value| !value.trim().is_empty()) {
             Some(id) => youtube_subtitle_fetch(id)
                 .await
-                .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
+                .map(|text| {
+                    make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+                })
                 .filter(|payload| !payload.text.is_empty()),
             None => None,
         }),
-        "YouTube" => Ok(match video_id.filter(|value| !value.trim().is_empty()) {
-            Some(id) => youtube_plain_lyrics_fetch(id, state)
-                .await
-                .map(|text| make_payload(text, false, title.to_owned(), artist.to_owned()))
-                .filter(|payload| !payload.text.is_empty()),
-            None => None,
-        }),
+        "YouTube" => Ok(
+            match (youtube, video_id.filter(|value| !value.trim().is_empty())) {
+                (Some((visitor_data, session)), Some(id)) => {
+                    youtube_plain_lyrics_fetch_with_session(id, visitor_data, session)
+                        .await
+                        .map(|text| {
+                            make_lyrics_payload(
+                                provider,
+                                text,
+                                false,
+                                title.to_owned(),
+                                artist.to_owned(),
+                            )
+                        })
+                        .filter(|payload| !payload.text.is_empty())
+                }
+                _ => None,
+            },
+        ),
         _ => Ok(None),
     }
 }
@@ -5224,6 +5302,34 @@ fn cache_lyrics_payload(
     cache_lyrics_variant(db, cache_id, payload)
 }
 
+/// Store lyrics fetched for a song under the same cache key the on-demand lyrics path
+/// (`fetch_lyrics_inner`) and downloads use, so a cached song's lyrics work offline.
+/// The first payload becomes the primary entry; the rest are kept as provider variants.
+/// An empty result stores nothing.
+fn cache_fetched_lyrics(
+    db: &Connection,
+    title: &str,
+    artist: &str,
+    results: &[LyricsPayload],
+) -> Result<(), String> {
+    if results.is_empty() {
+        return Ok(());
+    }
+    let cache_id = format!(
+        "lyrics:{}:{}",
+        clean_lyrics_title(title).to_lowercase(),
+        clean_lyrics_artist(artist).to_lowercase()
+    );
+    for (index, lyrics) in results.iter().enumerate() {
+        if index == 0 {
+            cache_lyrics_payload(db, &cache_id, lyrics)?;
+        } else {
+            cache_lyrics_variant(db, &cache_id, lyrics)?;
+        }
+    }
+    Ok(())
+}
+
 fn cached_lyrics_provider(
     db: &Connection,
     cache_id: &str,
@@ -5234,6 +5340,21 @@ fn cached_lyrics_provider(
         let synced: i64 = row.get(1)?;
         Ok(LyricsPayload { lines: if synced != 0 { parse_lyric_lines(&text) } else { Vec::new() }, provider: provider.to_owned(), text, synced: synced != 0, matched_title: row.get(2)?, matched_artist: row.get(3)? })
     }).optional().map_err(|error| format!("lyrics provider cache read failed: {error}"))
+}
+
+/// Whether one lyrics provider is enabled, from the stored settings. One source of truth
+/// for the enabled flags, shared by the stateful and the state-free provider loops.
+fn lyric_provider_enabled(db: &Connection, provider: &str) -> Result<bool, String> {
+    Ok(match provider {
+        "BetterLyrics" => lyric_setting_enabled(db, "enableBetterLyrics", true)?,
+        "Paxsenix" => lyric_setting_enabled(db, "enablePaxsenix", true)?,
+        "LrcLib" => lyric_setting_enabled(db, "enableLrclib", true)?,
+        "KuGou" => lyric_setting_enabled(db, "enableKugou", true)?,
+        "LyricsPlus" => lyric_setting_enabled(db, "enableLyricsPlus", false)?,
+        "Musixmatch" => lyric_setting_enabled(db, "enableMusixmatch", false)?,
+        "YouTubeSubtitle" | "YouTube" => true,
+        _ => false,
+    })
 }
 
 async fn fetch_all_enabled_lyrics(
@@ -5258,16 +5379,7 @@ async fn fetch_all_enabled_lyrics(
                 .db
                 .lock()
                 .map_err(|_| "database state poisoned".to_owned())?;
-            match provider.as_str() {
-                "BetterLyrics" => lyric_setting_enabled(&db, "enableBetterLyrics", true)?,
-                "Paxsenix" => lyric_setting_enabled(&db, "enablePaxsenix", true)?,
-                "LrcLib" => lyric_setting_enabled(&db, "enableLrclib", true)?,
-                "KuGou" => lyric_setting_enabled(&db, "enableKugou", true)?,
-                "LyricsPlus" => lyric_setting_enabled(&db, "enableLyricsPlus", false)?,
-                "Musixmatch" => lyric_setting_enabled(&db, "enableMusixmatch", false)?,
-                "YouTubeSubtitle" | "YouTube" => true,
-                _ => false,
-            }
+            lyric_provider_enabled(&db, &provider)?
         };
         if !enabled {
             continue;
@@ -5282,6 +5394,52 @@ async fn fetch_all_enabled_lyrics(
         }
     }
     Ok(results)
+}
+
+/// Provider names, in order, that are enabled in the stored settings. Used by the
+/// player-cache fill, which resolves the list from its own connection before awaiting
+/// any fetch (`Connection` is `!Sync`, so a `&Connection` cannot be held across an
+/// await in the detached fill task).
+fn enabled_lyrics_providers(db: &Connection) -> Vec<String> {
+    match ordered_lyrics_providers(db) {
+        Ok(order) => order
+            .into_iter()
+            .filter(|provider| lyric_provider_enabled(db, provider).unwrap_or(false))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Same provider loop as `fetch_all_enabled_lyrics`, but driven by a pre-resolved
+/// provider list instead of a live `tauri::State`: the player-cache fill runs in a
+/// detached task and cannot hold `State` (or a `&Connection`) across an await.
+/// `youtube` carries the visitor data and auth session the YouTube watch-page provider
+/// needs, resolved from the same connection; `None` skips that provider (the on-demand
+/// lyrics path still covers it when the lyrics UI opens).
+/// Returns an empty list — never an error — so a lyrics failure can never break the fill.
+async fn fetch_all_enabled_lyrics_for_cache(
+    title: &str,
+    artist: &str,
+    duration: i32,
+    album: Option<&str>,
+    video_id: Option<&str>,
+    providers: Vec<String>,
+    youtube: Option<(&str, Option<&AuthSession>)>,
+) -> Vec<LyricsPayload> {
+    let mut results = Vec::new();
+    for provider in providers {
+        let result = timeout(
+            Duration::from_secs(12),
+            fetch_lyrics_provider_for_cache(
+                &provider, title, artist, duration, album, video_id, youtube,
+            ),
+        )
+        .await;
+        if let Ok(Ok(Some(payload))) = result {
+            results.push(payload);
+        }
+    }
+    results
 }
 
 async fn fetch_lyrics_inner(
@@ -7188,6 +7346,64 @@ mod tests {
             "Song Name"
         );
         assert_eq!(clean_lyrics_title("Song Name [Lyrics]"), "Song Name");
+    }
+
+    #[test]
+    fn played_song_lyrics_store_uses_the_on_demand_cache_key() {
+        let db = cache_test_db();
+        let payloads = vec![
+            LyricsPayload {
+                lines: Vec::new(),
+                provider: "LrcLib".to_owned(),
+                text: "[00:01.00]Line one".to_owned(),
+                synced: true,
+                matched_title: "Song Name".to_owned(),
+                matched_artist: "Artist".to_owned(),
+            },
+            LyricsPayload {
+                lines: Vec::new(),
+                provider: "BetterLyrics".to_owned(),
+                text: "[00:01.00]Line one".to_owned(),
+                synced: true,
+                matched_title: "Song Name".to_owned(),
+                matched_artist: "Artist".to_owned(),
+            },
+        ];
+        cache_fetched_lyrics(&db, "Song Name (Official Video)", "Artist", &payloads).unwrap();
+        // The on-demand path reads the lyrics table first (same SELECT as fetch_lyrics_inner),
+        // so a played song's stored lyrics are found offline with no network.
+        let cached: Option<(String, String, i64)> = db
+            .query_row(
+                "SELECT provider, text, synced FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            cached,
+            Some(("LrcLib".to_owned(), "[00:01.00]Line one".to_owned(), 1))
+        );
+        // The first payload is also a variant, so both providers are kept for switching.
+        let variants: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM lyrics_variants WHERE song_id = ?1",
+                params!["lyrics:song name:artist"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(variants, 2);
+        // No providers means nothing stored.
+        cache_fetched_lyrics(&db, "Other Song", "Artist", &[]).unwrap();
+        let missing: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:other song:artist"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(missing, None);
     }
 
     #[test]

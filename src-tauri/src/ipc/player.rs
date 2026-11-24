@@ -395,8 +395,25 @@ pub async fn ytm_player(
                 // The cached entry carries its thumbnail: a song played before keeps its artwork offline.
                 // The thumbnail URL comes from the library row; a failed or missing fetch leaves the
                 // artwork empty (non-fatal) and the remote URL stays the fallback in the cache list.
-                let thumbnail: Option<String> = db.query_row("SELECT thumbnail FROM songs WHERE id = ?1 OR video_id = ?1", params![cache_id], |row| row.get(0)).optional().map_err(|error| format!("player cache thumbnail read failed: {error}"))?.flatten();
+                // The song row carries everything the offline fill needs: the thumbnail URL
+                // plus the title/artist/duration the lyrics fetch matches on.
+                let (title, artist, thumbnail, duration) = db.query_row("SELECT title, subtitle, thumbnail, duration FROM songs WHERE id = ?1 OR video_id = ?1", params![cache_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?))).optional().map_err(|error| format!("player cache song read failed: {error}"))?.unwrap_or_default();
                 let artwork_path = cache_player_artwork(&cache_id, thumbnail.as_deref()).await;
+                // The cached entry carries its lyrics too: a song played before keeps its lyrics
+                // offline, fetched from all enabled providers exactly like downloads do. The
+                // YouTube watch-page provider needs the visitor data and auth session, resolved
+                // here from the same database connection; without them it is skipped and the
+                // on-demand lyrics path still covers it. Best-effort — a failure here must
+                // never break the audio cache commit below.
+                if !title.trim().is_empty() {
+                    let visitor_data = setting_value(&db, "visitorData").ok().flatten().filter(|value| value.starts_with(VISITOR_PREFIX)).unwrap_or_default();
+                    let session = auth_session_from_db(&db).ok().flatten();
+                    let youtube = if visitor_data.is_empty() { None } else { Some((visitor_data.as_str(), session.as_ref())) };
+                    let lyric_duration = duration.clamp(0, i32::MAX as i64) as i32;
+                    let providers = enabled_lyrics_providers(&db);
+                    let lyrics_results = fetch_all_enabled_lyrics_for_cache(&title, &artist, lyric_duration, None, Some(cache_id.as_str()), providers, youtube).await;
+                    let _ = cache_fetched_lyrics(&db, &title, &artist, &lyrics_results);
+                }
                 db.execute("INSERT INTO player_cache (song_id, path, bytes, cached_at, quality, artwork_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(song_id) DO UPDATE SET path=excluded.path, bytes=excluded.bytes, cached_at=excluded.cached_at, quality=excluded.quality, artwork_path=COALESCE(excluded.artwork_path, player_cache.artwork_path)", params![cache_id, cache_path.to_string_lossy().to_string(), bytes, now_seconds(), requested_quality, artwork_path]).map_err(|error| format!("player cache state write failed: {error}"))?;
                 enforce_player_cache_quota(&db)?;
                 Ok(())
