@@ -56,9 +56,17 @@ export function usePlaylistData({
     });
   };
 
+  /**
+   * Loads the next page of the open playlist. Reads the continuation from the cache on every call, not from
+   * this render's `playlist` state: the download loop in PlaylistScreen holds the `loadPlaylistMore` from the
+   * render in which the click happened and calls it repeatedly, so a closure over `playlist` would re-fetch
+   * the first continuation forever (B1) instead of advancing through the pages.
+   */
   const loadPlaylistMore = async () => {
-    if (!key || playlist?.status !== "ready" || !playlist.data.continuation) return;
-    const continuation = playlist.data.continuation;
+    if (!key) return;
+    const current = cache.get<PlaylistPage>(key);
+    if (!current || current.status !== "ready" || !current.data.continuation) return;
+    const continuation = current.data.continuation;
     const token = cache.begin(`${key}:more`, "playlist-more");
     try {
       const next = await invoke<{ songs: YtItem[]; continuation?: string | null }>("ytm_playlist_continuation", {
