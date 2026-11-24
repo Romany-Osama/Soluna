@@ -372,6 +372,7 @@ pub async fn ytm_player(
     let payload =
         resolve_player_payload(&id, playlist_id.as_deref(), requested_quality, &state).await?;
     let cache_url = payload.stream_url.clone();
+    let payload_duration = payload.duration;
     let cache_id = id.clone();
     let cache_path = player_cache_path(&cache_id);
     let started = if cache_limit_mb == 0 {
@@ -396,8 +397,9 @@ pub async fn ytm_player(
                 // The thumbnail URL comes from the library row; a failed or missing fetch leaves the
                 // artwork empty (non-fatal) and the remote URL stays the fallback in the cache list.
                 // The song row carries everything the offline fill needs: the thumbnail URL
-                // plus the title/artist/duration the lyrics fetch matches on.
-                let (title, artist, thumbnail, duration) = db.query_row("SELECT title, subtitle, thumbnail, duration FROM songs WHERE id = ?1 OR video_id = ?1", params![cache_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?))).optional().map_err(|error| format!("player cache song read failed: {error}"))?.unwrap_or_default();
+                // plus the title/duration the lyrics fetch matches on. The artist comes
+                // from the mapped artists (see below), not the subtitle.
+                let (song_id, title, subtitle, thumbnail, duration) = db.query_row("SELECT id, title, subtitle, thumbnail, duration FROM songs WHERE id = ?1 OR video_id = ?1", params![cache_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?))).optional().map_err(|error| format!("player cache song read failed: {error}"))?.unwrap_or_default();
                 let artwork_path = cache_player_artwork(&cache_id, thumbnail.as_deref()).await;
                 // The cached entry carries its lyrics too: a song played before keeps its lyrics
                 // offline, fetched from all enabled providers exactly like downloads do. The
@@ -409,7 +411,17 @@ pub async fn ytm_player(
                     let visitor_data = setting_value(&db, "visitorData").ok().flatten().filter(|value| value.starts_with(VISITOR_PREFIX)).unwrap_or_default();
                     let session = auth_session_from_db(&db).ok().flatten();
                     let youtube = if visitor_data.is_empty() { None } else { Some((visitor_data.as_str(), session.as_ref())) };
-                    let lyric_duration = duration.clamp(0, i32::MAX as i64) as i32;
+                    // The lyrics key must match what the lyrics screen reads: the song's
+                    // mapped artists, not the raw subtitle (YouTube subtitles interleave
+                    // artists with album and duration text). Fall back to the subtitle
+                    // when the song has no mapped artists.
+                    let artist_names = song_artist_names(&db, &song_id).unwrap_or_default();
+                    let artist = if artist_names.is_empty() {
+                        subtitle
+                    } else {
+                        artist_names.join(", ")
+                    };
+                    let lyric_duration = lyric_duration_for_cache(payload_duration, duration);
                     let providers = enabled_lyrics_providers(&db);
                     let lyrics_results = fetch_all_enabled_lyrics_for_cache(&title, &artist, lyric_duration, None, Some(cache_id.as_str()), providers, youtube).await;
                     let _ = cache_fetched_lyrics(&db, &title, &artist, &lyrics_results);

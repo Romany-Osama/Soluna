@@ -5302,6 +5302,41 @@ fn cache_lyrics_payload(
     cache_lyrics_variant(db, cache_id, payload)
 }
 
+/// Artists mapped to a song, in the order the frontend lists them. The lyrics screen
+/// builds its cache key from `artists.join(", ")`, so the playback-cache fill must
+/// resolve the same list instead of using the raw subtitle (YouTube subtitles
+/// interleave artists with album and duration text).
+fn song_artist_names(db: &Connection, song_id: &str) -> Result<Vec<String>, String> {
+    let mut statement = db
+        .prepare(
+            "SELECT a.name FROM song_artists sa JOIN artists a ON a.id = sa.artist_id WHERE sa.song_id = ?1 ORDER BY sa.position",
+        )
+        .map_err(|error| format!("song artists read failed: {error}"))?;
+    let rows = statement
+        .query_map(params![song_id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("song artists read failed: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("song artists read failed: {error}"))
+}
+
+/// Duration passed to the lyrics providers for a cached play. The synced library row
+/// carries 0 for every never-downloaded YouTube song, and 0 would make LrcLib (and
+/// KuGou's validated path) match against a zero-length track and return nothing, so
+/// prefer the just-resolved stream length and fall back to -1 (unknown) so providers
+/// take their similarity path instead.
+fn lyric_duration_for_cache(payload_duration: i64, db_duration: i64) -> i32 {
+    let duration = if payload_duration > 0 {
+        payload_duration
+    } else {
+        db_duration
+    };
+    if duration > 0 {
+        duration.clamp(0, i32::MAX as i64) as i32
+    } else {
+        -1
+    }
+}
+
 /// Store lyrics fetched for a song under the same cache key the on-demand lyrics path
 /// (`fetch_lyrics_inner`) and downloads use, so a cached song's lyrics work offline.
 /// The first payload becomes the primary entry; the rest are kept as provider variants.
@@ -7404,6 +7439,78 @@ mod tests {
             .optional()
             .unwrap();
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn played_song_lyrics_duration_prefers_stream_length_and_unknown_is_minus_one() {
+        // The library row carries 0 for every never-downloaded YouTube song; 0 must
+        // map to -1 (unknown) so LrcLib takes its similarity path instead of matching
+        // against a zero-length track and returning nothing.
+        assert_eq!(lyric_duration_for_cache(0, 0), -1);
+        assert_eq!(lyric_duration_for_cache(0, 200), 200);
+        assert_eq!(lyric_duration_for_cache(250, 0), 250);
+        assert_eq!(lyric_duration_for_cache(250, 200), 250);
+        assert_eq!(lyric_duration_for_cache(i64::MAX, 0), i32::MAX);
+    }
+
+    #[test]
+    fn played_song_lyrics_artist_resolution_matches_frontend_key() {
+        let db = cache_test_db();
+        db.execute(
+            "INSERT INTO songs (id, title, subtitle, video_id, kind, saved_at, duration) VALUES ('song-1', 'Song Name', 'Artist One • Album', 'video-1', 'song', 1, 0)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO artists (id, name, saved_at) VALUES ('a-1', 'Artist One', 1), ('a-2', 'Artist Two', 1)",
+            [],
+        )
+        .unwrap();
+        // Inserted out of order on purpose: position decides the order.
+        db.execute(
+            "INSERT INTO song_artists (song_id, artist_id, position) VALUES ('song-1', 'a-2', 1), ('song-1', 'a-1', 0)",
+            [],
+        )
+        .unwrap();
+        let names = song_artist_names(&db, "song-1").unwrap();
+        assert_eq!(
+            names,
+            vec!["Artist One".to_owned(), "Artist Two".to_owned()]
+        );
+        // The frontend builds its lyrics key from artists.join(", "); lyrics cached
+        // under the resolved artists must be found under that key. The key cleaner
+        // truncates at ", ", so the read key is "lyrics:song name:artist one".
+        let payloads = vec![LyricsPayload {
+            lines: Vec::new(),
+            provider: "LrcLib".to_owned(),
+            text: "[00:01.00]Line one".to_owned(),
+            synced: true,
+            matched_title: "Song Name".to_owned(),
+            matched_artist: "Artist One, Artist Two".to_owned(),
+        }];
+        cache_fetched_lyrics(&db, "Song Name", "Artist One, Artist Two", &payloads).unwrap();
+        let cached: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist one"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(cached, Some("LrcLib".to_owned()));
+        // Nothing is stored under the raw-subtitle key: that was the old bug, where
+        // the fill wrote lyrics the lyrics screen never read for search/home plays.
+        let subtitle_key: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist one • album"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(subtitle_key, None);
+        // No mapped artists: the subtitle is the fallback, as the frontend does.
+        assert!(song_artist_names(&db, "missing-song").unwrap().is_empty());
     }
 
     #[test]
