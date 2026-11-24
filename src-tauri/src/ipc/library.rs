@@ -442,11 +442,26 @@ fn repoint_song_artist(
         )
         .map_err(|error| format!("song artist lookup failed: {error}"))?;
     if shared <= 1 {
-        tx.execute(
-            "UPDATE artists SET name = ?1 WHERE id = ?2",
-            params![name, old_artist_id],
-        )
-        .map_err(|error| format!("artist edit failed: {error}"))?;
+        // Sole user of this artist: rename the row in place. When the
+        // mapping is dangling — the artist row does not exist at all, only
+        // possible from a restored / legacy database written with foreign
+        // keys off — the UPDATE touches 0 rows and the edit would otherwise
+        // report success while the mapping stays dangling. In that case
+        // insert the artist row under the old id instead, so the edit
+        // really saves and the mapping points at a real row.
+        let renamed = tx
+            .execute(
+                "UPDATE artists SET name = ?1 WHERE id = ?2",
+                params![name, old_artist_id],
+            )
+            .map_err(|error| format!("artist edit failed: {error}"))?;
+        if renamed == 0 {
+            tx.execute(
+                "INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, ?3)",
+                params![old_artist_id, name, now_seconds()],
+            )
+            .map_err(|error| format!("artist edit failed: {error}"))?;
+        }
         return Ok(());
     }
     let new_id = new_artist_id(tx, name, song_id)?;
@@ -1875,6 +1890,37 @@ mod tests {
             vec![(0, "artist-solo".to_owned(), "Solo Renamed".to_owned())]
         );
         assert_eq!(artist_count(&db), 1);
+    }
+
+    #[test]
+    fn edit_item_repairs_dangling_artist_mapping() {
+        let db = test_db();
+        seed_song(&db, "song-a", "Title A");
+        // A mapping pointing at an artist row that does not exist (a
+        // restored / legacy database written with foreign keys off). The
+        // test database enforces foreign keys (SCHEMA_SQL starts with
+        // `PRAGMA foreign_keys = ON`), so the dangling mapping is inserted
+        // with them temporarily off and they are restored before the edit
+        // — the edit itself runs with them on, as in the app.
+        db.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        map_artist(&db, "song-a", "artist-dangling", 0);
+        db.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        assert_eq!(artist_name(&db, "artist-dangling"), None);
+
+        assert!(edit_library_item(&db, "song-a", "Title A", "Repaired").is_ok());
+
+        // The edit really saved: the artist row now exists under the old id,
+        // the mapping is intact, and the song reads back with the new name —
+        // instead of reporting success while the mapping stays dangling.
+        assert_eq!(
+            artist_name(&db, "artist-dangling").as_deref(),
+            Some("Repaired")
+        );
+        assert_eq!(
+            artist_mappings(&db, "song-a"),
+            vec![(0, "artist-dangling".to_owned(), "Repaired".to_owned())]
+        );
+        assert_eq!(song_subtitle(&db, "song-a"), "Repaired");
     }
 
     #[test]
