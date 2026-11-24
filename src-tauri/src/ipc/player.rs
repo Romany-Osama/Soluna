@@ -414,7 +414,10 @@ pub async fn ytm_player(
                     // The lyrics key must match what the lyrics screen reads: the song's
                     // mapped artists, not the raw subtitle (YouTube subtitles interleave
                     // artists with album and duration text). Fall back to the subtitle
-                    // when the song has no mapped artists.
+                    // when the song has no mapped artists. The mappings are written by
+                    // history_add, which the frontend invokes right after ytm_player
+                    // returns, while this fill only reads them after the audio download
+                    // finishes — so they are present in practice for a played song.
                     let artist_names = song_artist_names(&db, &song_id).unwrap_or_default();
                     let artist = if artist_names.is_empty() {
                         subtitle

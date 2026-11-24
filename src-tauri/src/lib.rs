@@ -3858,6 +3858,28 @@ async fn fetch_all_playlist_songs(
     Ok(collected.items)
 }
 
+/// Upserts the artist rows and song-artist mappings for one item. Artists
+/// without an id (plain-text credits from `parse_artists`) cannot be mapped:
+/// no artist row is created for a bare name, and callers fall back to the
+/// subtitle for those. Shared by the library sync and by `history_add`, so a
+/// song played from search/home has its artists mapped even when it was
+/// never synced or saved — the playback-cache lyrics fill resolves the
+/// lyrics key from these mappings.
+fn upsert_song_artists(db: &Connection, item: &YtItem, timestamp: i64) -> Result<(), String> {
+    for (position, artist) in item.artists.iter().enumerate() {
+        let Some(artist_id) = artist.id.as_deref().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        db.execute("INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET name=excluded.name, saved_at=excluded.saved_at", params![artist_id, artist.name, timestamp]).map_err(|error| format!("artist sync write failed: {error}"))?;
+        db.execute(
+            "INSERT OR IGNORE INTO song_artists (song_id, artist_id, position) VALUES (?1, ?2, ?3)",
+            params![item.id, artist_id, position as i64],
+        )
+        .map_err(|error| format!("song artist sync mapping failed: {error}"))?;
+    }
+    Ok(())
+}
+
 fn upsert_catalog_mappings(
     db: &Connection,
     item: &YtItem,
@@ -3880,18 +3902,7 @@ fn upsert_catalog_mappings(
         )
         .map_err(|error| format!("song album sync mapping failed: {error}"))?;
     }
-    for (position, artist) in item.artists.iter().enumerate() {
-        let Some(artist_id) = artist.id.as_deref().filter(|value| !value.is_empty()) else {
-            continue;
-        };
-        db.execute("INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET name=excluded.name, saved_at=excluded.saved_at", params![artist_id, artist.name, timestamp]).map_err(|error| format!("artist sync write failed: {error}"))?;
-        db.execute(
-            "INSERT OR IGNORE INTO song_artists (song_id, artist_id, position) VALUES (?1, ?2, ?3)",
-            params![item.id, artist_id, position as i64],
-        )
-        .map_err(|error| format!("song artist sync mapping failed: {error}"))?;
-    }
-    Ok(())
+    upsert_song_artists(db, item, timestamp)
 }
 
 fn upsert_synced_song(
@@ -7511,6 +7522,104 @@ mod tests {
         assert_eq!(subtitle_key, None);
         // No mapped artists: the subtitle is the fallback, as the frontend does.
         assert!(song_artist_names(&db, "missing-song").unwrap().is_empty());
+    }
+
+    #[test]
+    fn played_song_lyrics_history_add_maps_artists_for_unsynced_songs() {
+        // The residual Bug 2 gap: a song played from search/home was never synced
+        // or saved, so it had no song_artists rows and the fill fell back to the
+        // raw subtitle key. history_add now upserts the mappings from the played
+        // item (via upsert_song_artists), so the lyrics land under the frontend
+        // key. history_add itself is a Tauri command and cannot be invoked in a
+        // unit test, so this exercises the exact helper it calls, on a song with
+        // no pre-existing mappings.
+        let db = cache_test_db();
+        db.execute(
+            "INSERT INTO songs (id, title, subtitle, video_id, kind, saved_at, duration) VALUES ('song-2', 'Song Name', 'Artist One • Album', 'video-2', 'song', 1, 0)",
+            [],
+        )
+        .unwrap();
+        // No song_artists rows yet: this is the never-synced case.
+        assert!(song_artist_names(&db, "song-2").unwrap().is_empty());
+        let item = YtItem {
+            id: "song-2".to_owned(),
+            kind: "song".to_owned(),
+            title: "Song Name".to_owned(),
+            subtitle: "Artist One • Album".to_owned(),
+            thumbnail: None,
+            artists: vec![
+                Artist {
+                    name: "Artist One".to_owned(),
+                    id: Some("a-1".to_owned()),
+                },
+                Artist {
+                    name: "Artist Two".to_owned(),
+                    id: Some("a-2".to_owned()),
+                },
+            ],
+            browse_id: None,
+            playlist_id: None,
+            video_id: Some("video-2".to_owned()),
+            set_video_id: None,
+            play_playlist_id: None,
+            play_video_id: None,
+            params: None,
+            explicit: false,
+            music_video_type: None,
+            history_remove_token: None,
+            album_id: None,
+            album_title: None,
+        };
+        upsert_song_artists(&db, &item, 1).unwrap();
+        let names = song_artist_names(&db, "song-2").unwrap();
+        assert_eq!(
+            names,
+            vec!["Artist One".to_owned(), "Artist Two".to_owned()]
+        );
+        // The fill joins them exactly as the frontend does, so the cached lyrics
+        // are found under the frontend key, not the subtitle key.
+        let payloads = vec![LyricsPayload {
+            lines: Vec::new(),
+            provider: "LrcLib".to_owned(),
+            text: "[00:01.00]Line one".to_owned(),
+            synced: true,
+            matched_title: "Song Name".to_owned(),
+            matched_artist: names.join(", "),
+        }];
+        cache_fetched_lyrics(&db, "Song Name", &names.join(", "), &payloads).unwrap();
+        let cached: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist one"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(cached, Some("LrcLib".to_owned()));
+        let subtitle_key: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist one • album"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(subtitle_key, None);
+        // Artists without an id (plain-text credits) cannot be mapped: the
+        // subtitle fallback remains for those, and no rows are written.
+        let item_no_ids = YtItem {
+            id: "song-2".to_owned(),
+            artists: vec![Artist {
+                name: "Plain Credit".to_owned(),
+                id: None,
+            }],
+            ..item.clone()
+        };
+        upsert_song_artists(&db, &item_no_ids, 1).unwrap();
+        assert_eq!(
+            song_artist_names(&db, "song-2").unwrap(),
+            vec!["Artist One".to_owned(), "Artist Two".to_owned()]
+        );
     }
 
     #[test]
