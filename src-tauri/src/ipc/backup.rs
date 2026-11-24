@@ -133,6 +133,27 @@ pub(crate) fn swap_restored_database(db_path: &Path, staged_path: &Path) -> Resu
     Ok(())
 }
 
+/// Reopen the live database after a failed restore swap, shared by both error branches of
+/// `backup_restore` (double-fault guard, M6 follow-up).
+///
+/// `Connection::open` creates an empty file when the path is missing, so the live database
+/// must never be opened unconditionally: if it is gone, promote the previous database back
+/// to live first. Returns the connection when the live database could be opened, and `None`
+/// when there is nothing usable to open — the caller keeps its in-memory replacement, and
+/// the next launch recovers from the previous file (or starts fresh when nothing is left).
+/// No path here ever creates a file: the only creation is `Connection::open` on a path
+/// already proven to exist.
+pub(crate) fn reopen_live_after_failed_swap(db_path: &Path) -> Option<Connection> {
+    let previous_path = restore_previous_path(db_path);
+    if !db_path.exists() {
+        let _ = fs::rename(&previous_path, db_path);
+    }
+    if !db_path.exists() {
+        return None;
+    }
+    Connection::open(db_path).ok()
+}
+
 #[tauri::command]
 pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String> {
     let input_path = FileDialog::new()
@@ -232,7 +253,7 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
         // The swap rolled itself back where possible; reopen whatever is live now (the old
         // database if the rollback worked). If the live file is gone, the next launch recovers
         // it from the staged or previous file instead of starting empty.
-        if let Ok(old_connection) = Connection::open(&db_path) {
+        if let Some(old_connection) = reopen_live_after_failed_swap(&db_path) {
             *db = old_connection;
         }
         return Err(IpcError::from(format!(
@@ -249,7 +270,7 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
         Err(error) => {
             let _ = fs::remove_file(&db_path);
             let _ = fs::rename(&previous_path, &db_path);
-            if let Ok(old_connection) = Connection::open(&db_path) {
+            if let Some(old_connection) = reopen_live_after_failed_swap(&db_path) {
                 *db = old_connection;
             }
             Err(IpcError::from(format!(

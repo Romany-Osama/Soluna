@@ -495,8 +495,17 @@ fn restore_journal_path(db_path: &Path) -> PathBuf {
 
 /// Flush a file's contents to stable storage. A restore must not promote a staged database whose
 /// bytes might still be sitting in the OS page cache when the machine loses power.
+///
+/// The file is opened read+write: on Windows `sync_all` is `FlushFileBuffers`, which needs a
+/// GENERIC_WRITE handle — a read-only open fails with Access denied (os error 5) and broke
+/// every restore on Windows at the swap's first line. On Unix the access mode makes no
+/// difference to fsync.
 fn sync_file(path: &Path) -> std::io::Result<()> {
-    fs::File::open(path)?.sync_all()
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_all()
 }
 
 /// Flush a directory entry to stable storage, so a rename (or a file creation) survives a crash.
@@ -511,9 +520,12 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         // FILE_FLAG_BACKUP_SEMANTICS (0x02000000): required to open a directory handle on Windows.
+        // The handle is opened read+write: `sync_all` is `FlushFileBuffers`, which needs a
+        // GENERIC_WRITE handle — a read-only directory handle fails with Access denied.
         use std::os::windows::fs::OpenOptionsExt;
         fs::OpenOptions::new()
             .read(true)
+            .write(true)
             .custom_flags(0x0200_0000)
             .open(path)?
             .sync_all()
@@ -586,19 +598,52 @@ fn recover_interrupted_restore(db_path: &Path) {
         }
     }
     if recovered || !staged_valid {
-        // A staged file that was promoted is already gone; one that failed validation can never
-        // become live, so it is a leftover, not a fallback — except when the rename itself
-        // failed, in which case a valid staged file is kept for the next launch to retry.
+        // A staged file that was promoted is already gone. One that failed validation can
+        // never become live, so it is a leftover. And when the staged rename failed but the
+        // previous database was promoted instead, the valid staged file is dropped as well:
+        // the previous database is live now, so the staged file is no longer a candidate.
+        // Only when nothing was recovered and the staged file is still valid is it left in
+        // place for the next launch to retry.
         let _ = fs::remove_file(&staged_path);
     }
     let _ = fs::remove_file(&journal_path);
 }
 
+/// Count the user-data rows (songs + settings) in a database file, opened read-only so the
+/// check never creates or modifies the file. Returns `None` when the file cannot be opened
+/// or the tables cannot be read.
+fn database_user_data_rows(path: &Path) -> Option<i64> {
+    let candidate =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let songs: i64 = candidate
+        .query_row("SELECT COUNT(*) FROM songs", [], |row| row.get(0))
+        .ok()?;
+    let settings: i64 = candidate
+        .query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))
+        .ok()?;
+    Some(songs + settings)
+}
+
 /// Retire the pre-restore safety copy (D3-144 / S5-051). Called only after the live database has
 /// opened and initialised successfully, so this launch proves the restored database works; the
 /// fallback's job is done. A later restore replaces it with a fresh one.
+///
+/// Double-fault guard: the fallback is NOT retired over an empty live database while the
+/// previous database still holds user data. A live database created empty by a failed restore
+/// must not destroy the only surviving copy of the user's library. When the live database
+/// cannot be read at all, the fallback is kept as well — its contents are unproven, so
+/// deleting it would be a gamble. The fallback IS retired when the live database provably
+/// holds data, or when the previous database provably holds none.
 fn discard_stale_restore_fallback(db_path: &Path) {
-    let _ = fs::remove_file(restore_previous_path(db_path));
+    let previous_path = restore_previous_path(db_path);
+    if !previous_path.exists() {
+        return;
+    }
+    let live_has_data = database_user_data_rows(db_path).is_some_and(|rows| rows > 0);
+    let previous_is_empty = database_user_data_rows(&previous_path) == Some(0);
+    if live_has_data || previous_is_empty {
+        let _ = fs::remove_file(previous_path);
+    }
 }
 
 fn now_seconds() -> i64 {
@@ -8913,6 +8958,13 @@ mod tests {
         .expect("seed song");
     }
 
+    /// A database with the schema but no user data: what a double fault leaves behind when
+    /// `Connection::open` creates an empty live file.
+    fn m6_empty_db(path: &Path) {
+        let db = Connection::open(path).expect("empty db");
+        db.execute_batch(SCHEMA_SQL).expect("schema");
+    }
+
     fn m6_titles(path: &Path) -> Vec<String> {
         let db = Connection::open(path).expect("open db");
         let mut statement = db
@@ -9055,6 +9107,104 @@ mod tests {
             !previous.exists(),
             "fallback is retired after a successful launch"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Windows: `sync_all` is `FlushFileBuffers`, which needs a GENERIC_WRITE handle — a
+    /// read-only `File::open` fails with Access denied (os error 5), so the old `sync_file`
+    /// broke every restore on Windows at the swap's first line. On Linux a read-only fsync
+    /// works, so this passes before and after the fix there; Windows CI is the real check.
+    #[test]
+    fn sync_file_flushes_a_regular_file() {
+        let dir = m6_test_dir("sync-file");
+        let path = dir.join("flush-me.txt");
+        fs::write(&path, b"durability probe").expect("write probe file");
+        sync_file(&path).expect("sync_file must succeed on a regular file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Same Windows rule for directories: `FlushFileBuffers` needs a write handle, so the
+    /// directory handle must be opened read+write (with FILE_FLAG_BACKUP_SEMANTICS). The
+    /// callers ignore a failed directory sync, so this only proves the flush itself works.
+    #[test]
+    fn sync_dir_flushes_a_directory() {
+        let dir = m6_test_dir("sync-dir");
+        sync_dir(&dir).expect("sync_dir must succeed on a directory");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Double fault, simulated: the swap's second rename failed AND its rollback rename
+    /// failed, so the live file is gone while the previous database still holds the library.
+    /// The error path must promote the previous database back to live — not open the
+    /// missing live path and silently create an empty file in its place.
+    #[test]
+    fn reopen_live_after_failed_swap_promotes_previous_when_live_is_missing() {
+        let dir = m6_test_dir("double-fault-promote");
+        let live = dir.join("soluna.sqlite3");
+        let previous = restore_previous_path(&live);
+        m6_seed_db(&previous, "Old Library Song");
+        assert!(!live.exists());
+        let reopened = crate::ipc::backup::reopen_live_after_failed_swap(&live);
+        assert!(reopened.is_some(), "previous must be promoted to live");
+        assert_eq!(m6_titles(&live), vec!["Old Library Song"]);
+        assert!(!previous.exists(), "previous was promoted, not copied");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Double fault with nothing left to promote: the error path must NOT create a live
+    /// file. An empty file here would make the next launch retire the fallback over
+    /// nothing and start on a fresh empty library.
+    #[test]
+    fn reopen_live_after_failed_swap_creates_no_file_when_nothing_to_promote() {
+        let dir = m6_test_dir("double-fault-nothing");
+        let live = dir.join("soluna.sqlite3");
+        assert!(!live.exists());
+        assert!(!restore_previous_path(&live).exists());
+        let reopened = crate::ipc::backup::reopen_live_after_failed_swap(&live);
+        assert!(reopened.is_none(), "nothing usable to reopen");
+        assert!(!live.exists(), "no empty live file may be created");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Guard: when the live database is present, the error path just reopens it and leaves
+    /// the previous database alone.
+    #[test]
+    fn reopen_live_after_failed_swap_reopens_existing_live() {
+        let dir = m6_test_dir("double-fault-live-present");
+        let live = dir.join("soluna.sqlite3");
+        let previous = restore_previous_path(&live);
+        m6_seed_db(&live, "Live Library Song");
+        m6_seed_db(&previous, "Old Library Song");
+        let reopened = crate::ipc::backup::reopen_live_after_failed_swap(&live);
+        assert!(reopened.is_some(), "existing live must reopen");
+        assert_eq!(m6_titles(&live), vec!["Live Library Song"]);
+        assert!(
+            previous.exists(),
+            "previous is untouched when live is present"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Double-fault guard at launch: the live database is empty (schema only, no songs or
+    /// settings) while the previous database still holds the library. Retiring the
+    /// fallback here would destroy the only surviving copy, so it must be kept.
+    #[test]
+    fn discard_keeps_fallback_when_live_is_empty_but_previous_has_data() {
+        let dir = m6_test_dir("empty-live-keeps-fallback");
+        let live = dir.join("soluna.sqlite3");
+        let previous = restore_previous_path(&live);
+        m6_empty_db(&live);
+        m6_seed_db(&previous, "Old Library Song");
+        // --- the startup sequence, in `RuntimeState::new` order ---
+        recover_interrupted_restore(&live);
+        let db = Connection::open(&live).expect("open live db");
+        initialize_database(&db, &MemKeyStore(Mutex::new(None))).expect("init");
+        discard_stale_restore_fallback(&live);
+        assert!(
+            previous.exists(),
+            "fallback must survive when live is empty but previous holds data"
+        );
+        assert_eq!(m6_titles(&previous), vec!["Old Library Song"]);
         let _ = fs::remove_dir_all(&dir);
     }
 
