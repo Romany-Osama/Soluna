@@ -125,6 +125,11 @@ export const COMMANDS = {
   download_cancel: c("downloads", "write-local"),
   download_remove: c("downloads", "destructive-local"),
   library_downloads: c("downloads", "read-local"),
+  playlist_download_start: c("downloads", "remote-read"),
+  playlist_download_status: c("downloads", "read-local"),
+  playlist_downloads: c("downloads", "read-local"),
+  playlist_download_cancel: c("downloads", "write-local"),
+  playlist_download_remove: c("downloads", "destructive-local"),
   // player (stream resolution, queue, playback cache)
   ytm_next: c("player", "remote-read"),
   ytm_related: c("player", "remote-read"),

@@ -114,6 +114,21 @@ export type DownloadInfo = {
   lyricsCached: boolean;
   artworkPath?: string | null;
 };
+export type PlaylistDownloadFailure = { songId: string; title: string; error: string };
+export type PlaylistDownloadStatus = {
+  playlistId: string;
+  title: string;
+  thumbnail?: string | null;
+  artworkPath?: string | null;
+  state: "downloading" | "completed" | "partial" | "failed" | "cancelled" | string;
+  totalSongs: number;
+  completedSongs: number;
+  failedSongs: number;
+  failures: PlaylistDownloadFailure[];
+  error?: string | null;
+  startedAt: number;
+  updatedAt: number;
+};
 export type PlayerPayload = {
   videoId: string;
   title?: string | null;

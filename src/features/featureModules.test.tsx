@@ -135,14 +135,19 @@ describe("useDownloads", () => {
       useDownloads({ audioQuality: "auto", setNotice, settings: {}, destructive: destructive() }),
     );
     act(() => result.current.startDownload(song("local", { localPath: "C:/music/a.mp3" })));
-    expect(invoke).not.toHaveBeenCalled();
+    // No single-song download starts; the hook's mount-time playlist-download list load is not one.
+    expect(invoke.mock.calls.filter(([command]) => command === "download_start")).toEqual([]);
     expect(setNotice).toHaveBeenLastCalledWith("Offline download requires a remote source video.", "warning");
     let started = 0;
     act(() => {
       started = result.current.downloadItems([song("a"), song("b", { videoId: undefined }), song("c")]);
     });
     expect(started).toBe(2);
-    expect(invoke.mock.calls.map(([, args]) => (args as { item: YtItem }).item.id)).toEqual(["a", "c"]);
+    expect(
+      invoke.mock.calls
+        .filter(([command]) => command === "download_start")
+        .map(([, args]) => (args as { item: YtItem }).item.id),
+    ).toEqual(["a", "c"]);
   });
 
   it("auto-downloads on like only when the setting is on", () => {
@@ -150,7 +155,7 @@ describe("useDownloads", () => {
       useDownloads({ audioQuality: "auto", setNotice: vi.fn(), settings: {}, destructive: destructive() }),
     );
     off.result.current.maybeAutoDownloadOnLike(song("a"), true);
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke.mock.calls.filter(([command]) => command === "download_start")).toEqual([]);
     const on = renderHook(() =>
       useDownloads({
         audioQuality: "low",
@@ -161,7 +166,7 @@ describe("useDownloads", () => {
     );
     on.result.current.maybeAutoDownloadOnLike(song("a"), false);
     on.result.current.maybeAutoDownloadOnLike(song("a"), true);
-    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "download_start")).toHaveLength(1);
     expect(invoke).toHaveBeenCalledWith("download_start", { item: song("a"), audioQuality: "low" });
   });
 });

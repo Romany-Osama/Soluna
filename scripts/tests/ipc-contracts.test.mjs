@@ -7,7 +7,7 @@ import { ipcContractState } from "../lib/ipc-contracts.mjs";
 test("every registered IPC command has a complete contract shape", () => {
   const { contracts, problems } = ipcContractState();
   assert.deepEqual(problems, []);
-  assert.equal(contracts.length, 105);
+  assert.equal(contracts.length, 110);
   for (const contract of contracts) {
     assert.equal(contract.malformedArgumentCoverage, true, contract.name);
     assert.equal(contract.oversizedArgumentCoverage, true, contract.name);

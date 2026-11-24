@@ -159,6 +159,27 @@ const SCHEMA_SQL: &str = "PRAGMA foreign_keys = ON;
                  artwork_path TEXT,
                  downloaded_at INTEGER NOT NULL
               );
+              CREATE TABLE IF NOT EXISTS playlist_downloads (
+                 playlist_id TEXT PRIMARY KEY,
+                 title TEXT NOT NULL,
+                 thumbnail TEXT,
+                 artwork_path TEXT,
+                 state TEXT NOT NULL DEFAULT 'downloading',
+                 total_songs INTEGER NOT NULL DEFAULT 0,
+                 completed_songs INTEGER NOT NULL DEFAULT 0,
+                 failed_songs INTEGER NOT NULL DEFAULT 0,
+                 error TEXT,
+                 started_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL
+              );
+              CREATE TABLE IF NOT EXISTS playlist_download_songs (
+                 playlist_id TEXT NOT NULL,
+                 song_id TEXT NOT NULL,
+                 title TEXT NOT NULL DEFAULT '',
+                 state TEXT NOT NULL DEFAULT 'pending',
+                 error TEXT,
+                 PRIMARY KEY (playlist_id, song_id)
+              );
               CREATE TABLE IF NOT EXISTS player_cache (
                  song_id TEXT PRIMARY KEY,
                  path TEXT NOT NULL,
@@ -366,6 +387,9 @@ fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqli
     // A download cannot survive a restart; rows still marked "downloading" are leftovers of a crash or forced quit.
     // Mark them cancelled (not failed) so the retained `.part` file stays resumable (v0.1.8 resume, see DECISIONS D-002).
     let _ = db.execute("UPDATE downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
+    // Same for a whole-playlist download: the per-song rows are reset to pending by the next start, and the
+    // per-song downloads underneath keep their own resumable state.
+    let _ = db.execute("UPDATE playlist_downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
     // Encrypt any session secret still stored as plaintext by an older version. Failure keeps the session working.
     let _ = secrets::migrate_with(db, store);
     Ok(())
@@ -1973,6 +1997,35 @@ fn download_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadI
     })
 }
 
+/// One song of a whole-playlist download that failed, with the reason the UI shows.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistDownloadFailure {
+    song_id: String,
+    title: String,
+    error: String,
+}
+
+/// Progress and outcome of downloading a whole playlist at once (one user action, per-song
+/// failures listed instead of aborting the playlist). `state` is `downloading`, `completed`,
+/// `partial` (some songs failed), `failed` (none succeeded) or `cancelled`.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistDownloadStatus {
+    playlist_id: String,
+    title: String,
+    thumbnail: Option<String>,
+    artwork_path: Option<String>,
+    state: String,
+    total_songs: i64,
+    completed_songs: i64,
+    failed_songs: i64,
+    failures: Vec<PlaylistDownloadFailure>,
+    error: Option<String>,
+    started_at: i64,
+    updated_at: i64,
+}
+
 fn download_cache_path(song_id: &str) -> PathBuf {
     let digest = Sha1::digest(song_id.as_bytes());
     database_path()
@@ -2204,6 +2257,28 @@ async fn cache_artwork(
         return None;
     }
     Some(path.to_string_lossy().to_string())
+}
+
+/// Local path for a downloaded playlist's own photo. It lives in the `artwork` folder (not `downloads`):
+/// startup cleanup deletes finished files in `downloads` it does not recognise, and the playlist photo is
+/// not a per-song download row, so it would be deleted as an orphan there.
+fn playlist_artwork_path(playlist_id: &str, extension: &str) -> PathBuf {
+    let digest = Sha1::digest(playlist_id.as_bytes());
+    let safe_extension = match extension {
+        "jpg" | "jpeg" => "jpg",
+        "png" => "png",
+        "webp" => "webp",
+        _ => "cover",
+    };
+    database_path()
+        .parent()
+        .map(|value| value.join("artwork"))
+        .unwrap_or_else(|| PathBuf::from("artwork"))
+        .join(format!("playlist-{digest:x}.{safe_extension}"))
+}
+
+async fn cache_playlist_artwork(playlist_id: &str, source_url: Option<&str>) -> Option<String> {
+    cache_artwork(playlist_id, source_url, playlist_artwork_path).await
 }
 
 fn player_cache_jobs() -> &'static Mutex<player_cache::CacheJobs> {
@@ -6841,7 +6916,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![updates::app_update_check, updates::app_update_install, updates::app_open_releases_page, ipc::system::request_cancel, ipc::library::ytm_history, ipc::library::ytm_remove_from_history, ipc::spotify::spotify_profile, ipc::spotify::spotify_library_node, ipc::spotify::spotify_playlists, ipc::spotify::spotify_playlist_tracks, ipc::spotify::spotify_remove_from_playlist, ipc::spotify::spotify_move_in_playlist, ipc::spotify::spotify_rename_playlist, ipc::spotify::spotify_liked_tracks, ipc::spotify::spotify_match_for_youtube, ipc::spotify::spotify_override_youtube, ipc::spotify::spotify_resolve_youtube, ipc::spotify::spotify_add_to_playlist, ipc::library::ytm_delete_uploaded_song, ipc::catalog::ytm_refetch, ipc::library::ytm_toggle_episode_saved, ipc::library::local_files_pick, ipc::library::library_local_files, ipc::downloads::library_downloads, ipc::player::library_player_cache, ipc::library::ytm_toggle_podcast_saved, ipc::downloads::download_start, ipc::downloads::download_info, ipc::downloads::download_cancel, ipc::downloads::download_remove, ipc::player::player_cache_remove, ipc::player::player_cache_usage, ipc::player::player_cache_clear, ipc::library::ytm_podcast_channels, ipc::library::library_saved_podcasts, ipc::library::ytm_refresh_saved_podcasts, ipc::library::library_downloaded_podcasts, ipc::library::library_albums, ipc::library::library_artists, ipc::catalog::ytm_home, ipc::catalog::ytm_home_continuation, ipc::catalog::ytm_search, ipc::catalog::ytm_search_continuation, ipc::library::sync_youtube_library, ipc::library::ytm_add_to_playlist, ipc::library::ytm_remove_from_playlist, ipc::library::ytm_create_playlist, ipc::catalog::ytm_playlist, ipc::catalog::ytm_playlist_continuation, ipc::catalog::ytm_browse, ipc::catalog::ytm_browse_continuation, ipc::catalog::ytm_detail, ipc::catalog::ytm_detail_continuation, ipc::catalog::ytm_podcast_cache_detail_page, ipc::player::ytm_next, ipc::player::ytm_related, ipc::player::ytm_queue_continuation, ipc::player::ytm_player, ipc::player::ytm_report_stream_failure, ipc::player::ytm_playback_report, ipc::library::history_add, ipc::library::history_record_playtime, ipc::library::history_items, ipc::library::history_clear, ipc::library::library_top_songs, ipc::library::library_stats, ipc::catalog::search_history_add, ipc::catalog::search_history_items, ipc::catalog::search_history_clear, ipc::library::ytm_toggle_like, ipc::lyrics::fetch_lyrics, ipc::lyrics::fetch_lyrics_fresh, ipc::lyrics::fetch_lyrics_from_provider, ipc::library::library_toggle_liked, ipc::library::library_edit_item, ipc::library::library_refetch_item, ipc::library::ytm_toggle_library, ipc::settings::settings_get, ipc::settings::settings_set, ipc::backup::backup_create, ipc::backup::backup_restore, ipc::library::library_save_item, ipc::library::library_remove_item, ipc::library::library_songs, ipc::library::library_mix_songs, ipc::library::library_liked_songs, ipc::library::library_uploaded_songs, ipc::library::library_playlists, ipc::library::library_create_playlist, ipc::library::library_add_to_playlist, ipc::library::library_remove_from_playlist, ipc::library::library_playlist_songs, ipc::library::library_item_state, ipc::library::library_artist_state, ipc::library::library_toggle_artist_bookmarked, ipc::library::speed_dial_toggle, ipc::library::speed_dial_items, ipc::account::open_google_login, ipc::account::account_refresh_profile, ipc::account::account_logout, ipc::account::clear_local_library_keep_downloads, ipc::account::session_status, ipc::account::open_spotify_login, ipc::account::spotify_session_status, ipc::account::spotify_logout])
+        .invoke_handler(tauri::generate_handler![updates::app_update_check, updates::app_update_install, updates::app_open_releases_page, ipc::system::request_cancel, ipc::library::ytm_history, ipc::library::ytm_remove_from_history, ipc::spotify::spotify_profile, ipc::spotify::spotify_library_node, ipc::spotify::spotify_playlists, ipc::spotify::spotify_playlist_tracks, ipc::spotify::spotify_remove_from_playlist, ipc::spotify::spotify_move_in_playlist, ipc::spotify::spotify_rename_playlist, ipc::spotify::spotify_liked_tracks, ipc::spotify::spotify_match_for_youtube, ipc::spotify::spotify_override_youtube, ipc::spotify::spotify_resolve_youtube, ipc::spotify::spotify_add_to_playlist, ipc::library::ytm_delete_uploaded_song, ipc::catalog::ytm_refetch, ipc::library::ytm_toggle_episode_saved, ipc::library::local_files_pick, ipc::library::library_local_files, ipc::downloads::library_downloads, ipc::player::library_player_cache, ipc::library::ytm_toggle_podcast_saved, ipc::downloads::download_start, ipc::downloads::download_info, ipc::downloads::download_cancel, ipc::downloads::download_remove, ipc::downloads::playlist_download_start, ipc::downloads::playlist_download_status, ipc::downloads::playlist_downloads, ipc::downloads::playlist_download_cancel, ipc::downloads::playlist_download_remove, ipc::player::player_cache_remove, ipc::player::player_cache_usage, ipc::player::player_cache_clear, ipc::library::ytm_podcast_channels, ipc::library::library_saved_podcasts, ipc::library::ytm_refresh_saved_podcasts, ipc::library::library_downloaded_podcasts, ipc::library::library_albums, ipc::library::library_artists, ipc::catalog::ytm_home, ipc::catalog::ytm_home_continuation, ipc::catalog::ytm_search, ipc::catalog::ytm_search_continuation, ipc::library::sync_youtube_library, ipc::library::ytm_add_to_playlist, ipc::library::ytm_remove_from_playlist, ipc::library::ytm_create_playlist, ipc::catalog::ytm_playlist, ipc::catalog::ytm_playlist_continuation, ipc::catalog::ytm_browse, ipc::catalog::ytm_browse_continuation, ipc::catalog::ytm_detail, ipc::catalog::ytm_detail_continuation, ipc::catalog::ytm_podcast_cache_detail_page, ipc::player::ytm_next, ipc::player::ytm_related, ipc::player::ytm_queue_continuation, ipc::player::ytm_player, ipc::player::ytm_report_stream_failure, ipc::player::ytm_playback_report, ipc::library::history_add, ipc::library::history_record_playtime, ipc::library::history_items, ipc::library::history_clear, ipc::library::library_top_songs, ipc::library::library_stats, ipc::catalog::search_history_add, ipc::catalog::search_history_items, ipc::catalog::search_history_clear, ipc::library::ytm_toggle_like, ipc::lyrics::fetch_lyrics, ipc::lyrics::fetch_lyrics_fresh, ipc::lyrics::fetch_lyrics_from_provider, ipc::library::library_toggle_liked, ipc::library::library_edit_item, ipc::library::library_refetch_item, ipc::library::ytm_toggle_library, ipc::settings::settings_get, ipc::settings::settings_set, ipc::backup::backup_create, ipc::backup::backup_restore, ipc::library::library_save_item, ipc::library::library_remove_item, ipc::library::library_songs, ipc::library::library_mix_songs, ipc::library::library_liked_songs, ipc::library::library_uploaded_songs, ipc::library::library_playlists, ipc::library::library_create_playlist, ipc::library::library_add_to_playlist, ipc::library::library_remove_from_playlist, ipc::library::library_playlist_songs, ipc::library::library_item_state, ipc::library::library_artist_state, ipc::library::library_toggle_artist_bookmarked, ipc::library::speed_dial_toggle, ipc::library::speed_dial_items, ipc::account::open_google_login, ipc::account::account_refresh_profile, ipc::account::account_logout, ipc::account::clear_local_library_keep_downloads, ipc::account::session_status, ipc::account::open_spotify_login, ipc::account::spotify_session_status, ipc::account::spotify_logout])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {

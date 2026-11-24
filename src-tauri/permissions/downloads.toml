@@ -9,4 +9,9 @@ permissions = [
   "allow-download-remove",
   "allow-download-start",
   "allow-library-downloads",
+  "allow-playlist-download-cancel",
+  "allow-playlist-download-remove",
+  "allow-playlist-download-start",
+  "allow-playlist-download-status",
+  "allow-playlist-downloads",
 ]

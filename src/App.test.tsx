@@ -45,6 +45,7 @@ const responses: Record<string, unknown> = {
   library_local_files: [],
   library_albums: [],
   library_artists: [],
+  playlist_downloads: [],
   library_item_state: { liked: false, youtubeLiked: false, inLibrary: false, uploaded: false, pinned: false },
 };
 // Per-test answers that take precedence over `responses` (for example a deferred, slow answer).
