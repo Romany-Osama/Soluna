@@ -187,6 +187,7 @@ export type IpcCommandMap = {
   ytm_report_stream_failure: { args: { videoId: VideoId; streamUrl: LongText }; result: ResolveModel<void> };
   ytm_playback_report: { args: { videoId: VideoId }; result: ResolveModel<string> };
   history_add: { args: { item: YtItem }; result: ResolveModel<number> };
+  library_ensure_played_song: { args: { item: YtItem }; result: ResolveModel<void> };
   history_record_playtime: { args: { historyId: number; playTimeMs: number }; result: ResolveModel<void> };
   history_items: { args: Record<string, never>; result: ResolveModel<YtItem[]> };
   history_clear: { args: Record<string, never>; result: ResolveModel<void> };

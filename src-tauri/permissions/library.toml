@@ -15,6 +15,7 @@ permissions = [
   "allow-library-create-playlist",
   "allow-library-downloaded-podcasts",
   "allow-library-edit-item",
+  "allow-library-ensure-played-song",
   "allow-library-item-state",
   "allow-library-liked-songs",
   "allow-library-local-files",

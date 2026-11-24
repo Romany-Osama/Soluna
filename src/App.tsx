@@ -1699,7 +1699,17 @@ function App() {
   };
 
   const beginPlaytime = async (item: YtItem) => {
-    if (settings.pauseListenHistory === true) return;
+    if (settings.pauseListenHistory === true) {
+      // History is paused: record nothing, but make sure the played song and
+      // its artists exist so the playback cache can store offline lyrics and
+      // a thumbnail for it. Best-effort: a failure must never break playback.
+      try {
+        await invoke("library_ensure_played_song", { item });
+      } catch {
+        /* Paused-history ensure must remain best-effort and never block playback. */
+      }
+      return;
+    }
     await flushPlaytime();
     try {
       const historyId = await invoke<number>("history_add", { item });

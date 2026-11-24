@@ -28,6 +28,7 @@ const COMMANDS: &[&str] = &[
     "library_downloaded_podcasts",
     "library_downloads",
     "library_edit_item",
+    "library_ensure_played_song",
     "library_item_state",
     "library_liked_songs",
     "library_local_files",
