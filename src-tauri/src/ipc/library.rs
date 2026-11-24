@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
+use rusqlite::Transaction;
 
 #[tauri::command]
 pub async fn ytm_delete_uploaded_song(
@@ -286,34 +287,214 @@ pub fn library_edit_item(
         .db
         .lock()
         .map_err(|_| "database state poisoned".to_owned())?;
+    edit_library_item(&db, id, title, artist.trim()).map_err(IpcError::from)
+}
+
+/// Edits one library song's title and artist in the local database, in a
+/// single transaction. `id`, `title` and `artist` must already be trimmed;
+/// `title` must be non-empty. A non-empty artist also becomes the song's
+/// subtitle, as before.
+///
+/// The artist edit is scoped to this song only (M2): the artist row is
+/// renamed in place only when no other song maps to it; when the artist is
+/// shared, just this song's mapping is re-pointed at the artist row for the
+/// new name (an existing row with that name, or a fresh `local-artist:<sha1>`
+/// row in the local-files convention). A song with no artist mapping gets
+/// one attached instead of the edit being silently dropped. The old artist
+/// row is left in place even when it becomes unmapped — it may be bookmarked
+/// (see `library_artists`), and unmapped rows are invisible there anyway.
+fn edit_library_item(db: &Connection, id: &str, title: &str, artist: &str) -> Result<(), String> {
+    let artist = artist.trim();
     let tx = db
         .unchecked_transaction()
         .map_err(|error| format!("song edit transaction failed: {error}"))?;
-    let updated = tx.execute("UPDATE songs SET title = ?1, subtitle = CASE WHEN ?2 <> '' THEN ?2 ELSE subtitle END WHERE id = ?3", params![title, artist.trim(), id]).map_err(|error| format!("song edit failed: {error}"))?;
+    let updated = tx.execute("UPDATE songs SET title = ?1, subtitle = CASE WHEN ?2 <> '' THEN ?2 ELSE subtitle END WHERE id = ?3", params![title, artist, id]).map_err(|error| format!("song edit failed: {error}"))?;
     if updated == 0 {
-        return Err(IpcError::from(
-            "song edit target was not found in the local Soluna database".to_owned(),
-        ));
+        return Err("song edit target was not found in the local Soluna database".to_owned());
     }
-    if !artist.trim().is_empty() {
-        if let Some(artist_id) = tx
+    if !artist.is_empty() {
+        let mapped = tx
             .query_row(
-                "SELECT artist_id FROM song_artists WHERE song_id = ?1 ORDER BY position LIMIT 1",
+                "SELECT artist_id, position FROM song_artists WHERE song_id = ?1 ORDER BY position LIMIT 1",
                 params![id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()
-            .map_err(|error| format!("song artist lookup failed: {error}"))?
-        {
-            tx.execute(
-                "UPDATE artists SET name = ?1 WHERE id = ?2",
-                params![artist.trim(), artist_id],
-            )
-            .map_err(|error| format!("artist edit failed: {error}"))?;
+            .map_err(|error| format!("song artist lookup failed: {error}"))?;
+        match mapped {
+            Some((artist_id, position)) => {
+                let current_name = tx
+                    .query_row(
+                        "SELECT name FROM artists WHERE id = ?1",
+                        params![artist_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(|error| format!("song artist lookup failed: {error}"))?;
+                // A missing artist row (a dangling mapping from an older
+                // database) is repaired by the re-point below, not skipped.
+                if current_name.as_deref() != Some(artist) {
+                    repoint_song_artist(&tx, id, &artist_id, position, artist)?;
+                }
+            }
+            None => {
+                let target = artist_id_for_name(&tx, id, artist)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO song_artists (song_id, artist_id, position) VALUES (?1, ?2, 0)",
+                    params![id, target],
+                )
+                .map_err(|error| format!("song artist mapping failed: {error}"))?;
+            }
         }
     }
     tx.commit()
         .map_err(|error| format!("song edit commit failed: {error}"))?;
+    Ok(())
+}
+
+/// The artist row for `name`: an existing row with that exact name, or a
+/// newly created row (see `new_artist_id`).
+fn artist_id_for_name(tx: &Transaction<'_>, song_id: &str, name: &str) -> Result<String, String> {
+    if let Some(id) = tx
+        .query_row(
+            "SELECT id FROM artists WHERE name = ?1 LIMIT 1",
+            params![name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("song artist lookup failed: {error}"))?
+    {
+        return Ok(id);
+    }
+    let id = new_artist_id(tx, name, song_id)?;
+    tx.execute(
+        "INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, ?3)",
+        params![id, name, now_seconds()],
+    )
+    .map_err(|error| format!("artist edit failed: {error}"))?;
+    Ok(id)
+}
+
+/// The `local-artist:<sha1>` id for a name, as used for local files. Salted
+/// with the song id when a row already holds that id under a different name
+/// — a local-artist row renamed by the old shared-rename bug — so the new
+/// artist gets its own row instead of failing on the primary key or
+/// hijacking that row.
+fn new_artist_id(tx: &Transaction<'_>, name: &str, song_id: &str) -> Result<String, String> {
+    let base = local_artist_id(name);
+    let clash = tx
+        .query_row(
+            "SELECT name FROM artists WHERE id = ?1",
+            params![base],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("song artist lookup failed: {error}"))?;
+    if clash.as_deref().is_some_and(|existing| existing != name) {
+        Ok(format!("{base}-{}", &local_artist_id(song_id)[13..21]))
+    } else {
+        Ok(base)
+    }
+}
+
+/// The deterministic `local-artist:<sha1>` id for a name (the local-files
+/// convention, also used in `local_item_from_path`).
+fn local_artist_id(name: &str) -> String {
+    format!(
+        "local-artist:{}",
+        Sha1::digest(name.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+/// Re-points one song's first artist mapping at the artist row for `name`:
+/// an existing row with that name wins; otherwise the shared row is renamed
+/// in place when this song is its only user, and a new row is created when
+/// it is shared. The old row is never deleted.
+fn repoint_song_artist(
+    tx: &Transaction<'_>,
+    song_id: &str,
+    old_artist_id: &str,
+    position: i64,
+    name: &str,
+) -> Result<(), String> {
+    if let Some(existing_id) = tx
+        .query_row(
+            "SELECT id FROM artists WHERE name = ?1 LIMIT 1",
+            params![name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("song artist lookup failed: {error}"))?
+    {
+        if existing_id != old_artist_id {
+            move_song_artist(tx, song_id, old_artist_id, &existing_id, position)?;
+        }
+        return Ok(());
+    }
+    let shared: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM song_artists WHERE artist_id = ?1",
+            params![old_artist_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("song artist lookup failed: {error}"))?;
+    if shared <= 1 {
+        // Sole user of this artist: rename the row in place. When the
+        // mapping is dangling — the artist row does not exist at all, only
+        // possible from a restored / legacy database written with foreign
+        // keys off — the UPDATE touches 0 rows and the edit would otherwise
+        // report success while the mapping stays dangling. In that case
+        // insert the artist row under the old id instead, so the edit
+        // really saves and the mapping points at a real row.
+        let renamed = tx
+            .execute(
+                "UPDATE artists SET name = ?1 WHERE id = ?2",
+                params![name, old_artist_id],
+            )
+            .map_err(|error| format!("artist edit failed: {error}"))?;
+        if renamed == 0 {
+            tx.execute(
+                "INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, ?3)",
+                params![old_artist_id, name, now_seconds()],
+            )
+            .map_err(|error| format!("artist edit failed: {error}"))?;
+        }
+        return Ok(());
+    }
+    let new_id = new_artist_id(tx, name, song_id)?;
+    tx.execute(
+        "INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, ?3)",
+        params![new_id, name, now_seconds()],
+    )
+    .map_err(|error| format!("artist edit failed: {error}"))?;
+    move_song_artist(tx, song_id, old_artist_id, &new_id, position)?;
+    Ok(())
+}
+
+/// Moves one song's mapping from `old_artist_id` to `new_artist_id`,
+/// keeping its position. The delete-then-insert (rather than an UPDATE)
+/// keeps the (song_id, artist_id) primary key intact when the song already
+/// maps to the target artist at another position.
+fn move_song_artist(
+    tx: &Transaction<'_>,
+    song_id: &str,
+    old_artist_id: &str,
+    new_artist_id: &str,
+    position: i64,
+) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM song_artists WHERE song_id = ?1 AND artist_id = ?2",
+        params![song_id, old_artist_id],
+    )
+    .map_err(|error| format!("song artist mapping failed: {error}"))?;
+    tx.execute(
+        "INSERT OR IGNORE INTO song_artists (song_id, artist_id, position) VALUES (?1, ?2, ?3)",
+        params![song_id, new_artist_id, position],
+    )
+    .map_err(|error| format!("song artist mapping failed: {error}"))?;
     Ok(())
 }
 
@@ -1581,4 +1762,283 @@ pub fn library_playlist_songs(
     Ok(rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("playlist songs row decode failed: {e}"))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA_SQL).unwrap();
+        db
+    }
+
+    fn seed_song(db: &Connection, id: &str, title: &str) {
+        db.execute(
+            "INSERT INTO songs (id, title, subtitle, kind, saved_at, in_library) VALUES (?1, ?2, '', 'song', 1, 1)",
+            params![id, title],
+        )
+        .unwrap();
+    }
+
+    fn seed_artist(db: &Connection, id: &str, name: &str) {
+        db.execute(
+            "INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, 1)",
+            params![id, name],
+        )
+        .unwrap();
+    }
+
+    fn map_artist(db: &Connection, song_id: &str, artist_id: &str, position: i64) {
+        db.execute(
+            "INSERT INTO song_artists (song_id, artist_id, position) VALUES (?1, ?2, ?3)",
+            params![song_id, artist_id, position],
+        )
+        .unwrap();
+    }
+
+    /// (position, artist_id, artist name) for one song, in mapping order.
+    fn artist_mappings(db: &Connection, song_id: &str) -> Vec<(i64, String, String)> {
+        let mut statement = db
+            .prepare(
+                "SELECT sa.position, a.id, a.name FROM song_artists sa JOIN artists a ON a.id = sa.artist_id WHERE sa.song_id = ?1 ORDER BY sa.position",
+            )
+            .unwrap();
+        statement
+            .query_map(params![song_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn artist_name(db: &Connection, artist_id: &str) -> Option<String> {
+        db.query_row(
+            "SELECT name FROM artists WHERE id = ?1",
+            params![artist_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    fn artist_count(db: &Connection) -> i64 {
+        db.query_row("SELECT COUNT(*) FROM artists", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn song_title(db: &Connection, song_id: &str) -> String {
+        db.query_row(
+            "SELECT title FROM songs WHERE id = ?1",
+            params![song_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn song_subtitle(db: &Connection, song_id: &str) -> String {
+        db.query_row(
+            "SELECT subtitle FROM songs WHERE id = ?1",
+            params![song_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn edit_item_renames_only_the_edited_songs_artist() {
+        let db = test_db();
+        seed_song(&db, "song-a", "Title A");
+        seed_song(&db, "song-b", "Title B");
+        seed_artist(&db, "artist-shared", "Shared");
+        map_artist(&db, "song-a", "artist-shared", 0);
+        map_artist(&db, "song-b", "artist-shared", 0);
+
+        assert!(edit_library_item(&db, "song-a", "Title A Edited", "Renamed").is_ok());
+
+        assert_eq!(song_title(&db, "song-a"), "Title A Edited");
+        assert_eq!(song_subtitle(&db, "song-a"), "Renamed");
+        // The shared artist row itself is untouched, so song B still shows it.
+        assert_eq!(artist_name(&db, "artist-shared").as_deref(), Some("Shared"));
+        assert_eq!(
+            artist_mappings(&db, "song-b"),
+            vec![(0, "artist-shared".to_owned(), "Shared".to_owned())]
+        );
+        assert_eq!(song_title(&db, "song-b"), "Title B");
+        // Only song A's mapping moved, to an artist row named "Renamed".
+        let mappings = artist_mappings(&db, "song-a");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].0, 0);
+        assert_eq!(mappings[0].2, "Renamed");
+        assert_ne!(mappings[0].1, "artist-shared");
+    }
+
+    #[test]
+    fn edit_item_renames_sole_artist_in_place() {
+        let db = test_db();
+        seed_song(&db, "song-a", "Title A");
+        seed_artist(&db, "artist-solo", "Solo");
+        map_artist(&db, "song-a", "artist-solo", 0);
+
+        assert!(edit_library_item(&db, "song-a", "Title A", "Solo Renamed").is_ok());
+
+        // No other song uses this artist, so the row itself is renamed.
+        assert_eq!(
+            artist_mappings(&db, "song-a"),
+            vec![(0, "artist-solo".to_owned(), "Solo Renamed".to_owned())]
+        );
+        assert_eq!(artist_count(&db), 1);
+    }
+
+    #[test]
+    fn edit_item_repairs_dangling_artist_mapping() {
+        let db = test_db();
+        seed_song(&db, "song-a", "Title A");
+        // A mapping pointing at an artist row that does not exist (a
+        // restored / legacy database written with foreign keys off). The
+        // test database enforces foreign keys (SCHEMA_SQL starts with
+        // `PRAGMA foreign_keys = ON`), so the dangling mapping is inserted
+        // with them temporarily off and they are restored before the edit
+        // — the edit itself runs with them on, as in the app.
+        db.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        map_artist(&db, "song-a", "artist-dangling", 0);
+        db.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        assert_eq!(artist_name(&db, "artist-dangling"), None);
+
+        assert!(edit_library_item(&db, "song-a", "Title A", "Repaired").is_ok());
+
+        // The edit really saved: the artist row now exists under the old id,
+        // the mapping is intact, and the song reads back with the new name —
+        // instead of reporting success while the mapping stays dangling.
+        assert_eq!(
+            artist_name(&db, "artist-dangling").as_deref(),
+            Some("Repaired")
+        );
+        assert_eq!(
+            artist_mappings(&db, "song-a"),
+            vec![(0, "artist-dangling".to_owned(), "Repaired".to_owned())]
+        );
+        assert_eq!(song_subtitle(&db, "song-a"), "Repaired");
+    }
+
+    #[test]
+    fn edit_item_attaches_artist_when_song_has_no_mapping() {
+        let db = test_db();
+        seed_song(&db, "song-a", "Title A");
+
+        assert!(edit_library_item(&db, "song-a", "Title A", "New Artist").is_ok());
+
+        assert_eq!(song_subtitle(&db, "song-a"), "New Artist");
+        let mappings = artist_mappings(&db, "song-a");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].0, 0);
+        assert_eq!(mappings[0].2, "New Artist");
+    }
+
+    #[test]
+    fn edit_item_reuses_existing_artist_row_with_the_same_name() {
+        let db = test_db();
+        seed_song(&db, "song-a", "Title A");
+        seed_song(&db, "song-b", "Title B");
+        seed_artist(&db, "artist-foo", "Foo");
+        seed_artist(&db, "artist-bar", "Bar");
+        map_artist(&db, "song-a", "artist-foo", 0);
+        map_artist(&db, "song-b", "artist-bar", 0);
+
+        assert!(edit_library_item(&db, "song-a", "Title A", "Bar").is_ok());
+
+        // Song A now shares song B's artist row; no duplicate "Bar" row.
+        assert_eq!(
+            artist_mappings(&db, "song-a"),
+            vec![(0, "artist-bar".to_owned(), "Bar".to_owned())]
+        );
+        assert_eq!(artist_count(&db), 2);
+        assert_eq!(artist_name(&db, "artist-foo").as_deref(), Some("Foo"));
+        assert_eq!(
+            artist_mappings(&db, "song-b"),
+            vec![(0, "artist-bar".to_owned(), "Bar".to_owned())]
+        );
+    }
+
+    #[test]
+    fn edit_item_keeps_other_artists_of_a_multi_artist_song() {
+        let db = test_db();
+        seed_song(&db, "song-a", "Title A");
+        seed_song(&db, "song-b", "Title B");
+        seed_artist(&db, "artist-shared", "Shared");
+        seed_artist(&db, "artist-other", "Other");
+        map_artist(&db, "song-a", "artist-shared", 0);
+        map_artist(&db, "song-a", "artist-other", 1);
+        map_artist(&db, "song-b", "artist-shared", 0);
+
+        assert!(edit_library_item(&db, "song-a", "Title A", "Renamed").is_ok());
+
+        // Only the first mapping moved; the second artist is untouched and
+        // keeps its position, and song B still shows "Shared".
+        let mappings = artist_mappings(&db, "song-a");
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].0, 0);
+        assert_eq!(mappings[0].2, "Renamed");
+        assert_ne!(mappings[0].1, "artist-shared");
+        assert_eq!(
+            mappings[1],
+            (1, "artist-other".to_owned(), "Other".to_owned())
+        );
+        assert_eq!(
+            artist_mappings(&db, "song-b"),
+            vec![(0, "artist-shared".to_owned(), "Shared".to_owned())]
+        );
+    }
+
+    #[test]
+    fn edit_item_on_missing_song_errors() {
+        let db = test_db();
+        assert!(edit_library_item(&db, "no-such-song", "Title", "Artist").is_err());
+    }
+
+    #[test]
+    fn edit_item_renamed_local_artist_row_gets_a_fresh_id() {
+        let db = test_db();
+        // A local-artist row the old shared-rename bug had renamed: its id
+        // still derives from "Foo" but its name is now "Bar", shared by two
+        // songs. Editing one song's artist back to "Foo" must not fail on
+        // the primary key and must not hijack the renamed row.
+        seed_song(&db, "song-a", "Title A");
+        seed_song(&db, "song-b", "Title B");
+        let renamed_id = local_artist_id("Foo");
+        seed_artist(&db, &renamed_id, "Bar");
+        map_artist(&db, "song-a", &renamed_id, 0);
+        map_artist(&db, "song-b", &renamed_id, 0);
+
+        assert!(edit_library_item(&db, "song-a", "Title A", "Foo").is_ok());
+
+        let mappings = artist_mappings(&db, "song-a");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].2, "Foo");
+        assert_ne!(mappings[0].1, renamed_id);
+        assert_eq!(artist_name(&db, &renamed_id).as_deref(), Some("Bar"));
+        assert_eq!(
+            artist_mappings(&db, "song-b"),
+            vec![(0, renamed_id, "Bar".to_owned())]
+        );
+    }
+
+    #[test]
+    fn edit_item_with_empty_artist_keeps_existing_mapping() {
+        let db = test_db();
+        seed_song(&db, "song-a", "Title A");
+        seed_artist(&db, "artist-keep", "Keep");
+        map_artist(&db, "song-a", "artist-keep", 0);
+
+        assert!(edit_library_item(&db, "song-a", "Title A Edited", "").is_ok());
+
+        assert_eq!(song_title(&db, "song-a"), "Title A Edited");
+        assert_eq!(song_subtitle(&db, "song-a"), "");
+        assert_eq!(
+            artist_mappings(&db, "song-a"),
+            vec![(0, "artist-keep".to_owned(), "Keep".to_owned())]
+        );
+    }
 }
