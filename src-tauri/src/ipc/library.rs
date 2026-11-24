@@ -544,25 +544,32 @@ pub fn library_remove_item(id: LibraryId, state: tauri::State<'_, RuntimeState>)
 #[tauri::command]
 pub fn history_add(item: YtItem, state: tauri::State<'_, RuntimeState>) -> IpcResult<i64> {
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
-    let is_video = item
-        .music_video_type
-        .as_deref()
-        .is_some_and(|value| value != "MUSIC_VIDEO_TYPE_ATV");
-    db.execute("INSERT INTO songs (id, title, subtitle, thumbnail, browse_id, playlist_id, video_id, set_video_id, kind, saved_at, explicit, music_video_type, liked, liked_date, in_library, is_video) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, NULL, 0, ?13) ON CONFLICT(id) DO UPDATE SET title=excluded.title, subtitle=excluded.subtitle, thumbnail=excluded.thumbnail, browse_id=excluded.browse_id, playlist_id=excluded.playlist_id, video_id=excluded.video_id, set_video_id=excluded.set_video_id, kind=excluded.kind, explicit=excluded.explicit, music_video_type=excluded.music_video_type, is_video=excluded.is_video", params![item.id, item.title, item.subtitle, item.thumbnail, item.browse_id, item.playlist_id, item.video_id, item.set_video_id, item.kind, now_seconds(), if item.explicit { 1 } else { 0 }, item.music_video_type, if is_video { 1 } else { 0 }]).map_err(|e| format!("history song save failed: {e}"))?;
-    // A played song's artists must be mapped even when it was never synced or
-    // saved: the playback-cache lyrics fill resolves the lyrics key from these
-    // mappings, and without them it falls back to the raw subtitle — a key the
-    // lyrics screen never reads for search/home plays. Artists without an id
-    // (plain-text credits) cannot be mapped, and the subtitle fallback remains
-    // for those. Best-effort: a mapping failure must never break the history
-    // save or playback.
-    let _ = upsert_song_artists(&db, &item, now_seconds());
+    upsert_played_song(&db, &item, now_seconds())
+        .map_err(|error| format!("history song save failed: {error}"))?;
     db.execute(
         "INSERT INTO history (song_id, played_at, play_time_ms) VALUES (?1, ?2, 0)",
         params![item.id, now_seconds()],
     )
     .map_err(|e| format!("history write failed: {e}"))?;
     Ok(db.last_insert_rowid())
+}
+
+/// Ensures the songs row and artist mappings for a played song exist, without
+/// recording any listening history. Used by the frontend while listen history
+/// is paused: `beginPlaytime` calls this instead of `history_add`, so the
+/// playback-cache lyrics fill still finds the song and its artists and the
+/// song keeps working offline — with no history row and no playtime. The
+/// songs upsert is the only fallible step; a failure is reported, never
+/// swallowed here (the caller treats it as best-effort).
+#[tauri::command]
+pub fn library_ensure_played_song(
+    item: YtItem,
+    state: tauri::State<'_, RuntimeState>,
+) -> IpcResult<()> {
+    let db = state.db.lock().map_err(|_| "database state poisoned")?;
+    upsert_played_song(&db, &item, now_seconds())
+        .map_err(|error| format!("played song ensure failed: {error}"))?;
+    Ok(())
 }
 
 #[tauri::command]

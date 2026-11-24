@@ -116,6 +116,7 @@ export const COMMANDS = {
   speed_dial_toggle: c("library", "write-local"),
   speed_dial_items: c("library", "read-local"),
   history_add: c("library", "write-local"),
+  library_ensure_played_song: c("library", "write-local"),
   history_record_playtime: c("library", "write-local"),
   history_items: c("library", "read-local"),
   history_clear: c("library", "destructive-local"),

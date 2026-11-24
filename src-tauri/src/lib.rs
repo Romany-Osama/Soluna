@@ -3936,10 +3936,11 @@ async fn fetch_all_playlist_songs(
 /// Upserts the artist rows and song-artist mappings for one item. Artists
 /// without an id (plain-text credits from `parse_artists`) cannot be mapped:
 /// no artist row is created for a bare name, and callers fall back to the
-/// subtitle for those. Shared by the library sync and by `history_add`, so a
-/// song played from search/home has its artists mapped even when it was
-/// never synced or saved — the playback-cache lyrics fill resolves the
-/// lyrics key from these mappings.
+/// subtitle for those. Shared by the library sync and by `upsert_played_song`
+/// (`history_add` and the paused-history ensure path), so a song played from
+/// search/home has its artists mapped even when it was never synced or
+/// saved — the playback-cache lyrics fill resolves the lyrics key from these
+/// mappings.
 fn upsert_song_artists(db: &Connection, item: &YtItem, timestamp: i64) -> Result<(), String> {
     for (position, artist) in item.artists.iter().enumerate() {
         let Some(artist_id) = artist.id.as_deref().filter(|value| !value.is_empty()) else {
@@ -3952,6 +3953,35 @@ fn upsert_song_artists(db: &Connection, item: &YtItem, timestamp: i64) -> Result
         )
         .map_err(|error| format!("song artist sync mapping failed: {error}"))?;
     }
+    Ok(())
+}
+
+/// Upserts the songs row and artist mappings for one played song, shared by
+/// `history_add` and by `library_ensure_played_song` (the history-free path
+/// used while listen history is paused). Writes no history row and records
+/// no playtime: the playback-cache lyrics fill resolves its key from these
+/// rows, so a paused play of a never-saved song would otherwise leave it
+/// with no offline lyrics, no cached thumbnail, and no Cached-list entry.
+/// Only the songs upsert itself returns an error (callers map it to their
+/// own message); the artist mapping stays best-effort, as in `history_add`.
+fn upsert_played_song(
+    db: &Connection,
+    item: &YtItem,
+    timestamp: i64,
+) -> Result<(), rusqlite::Error> {
+    let is_video = item
+        .music_video_type
+        .as_deref()
+        .is_some_and(|value| value != "MUSIC_VIDEO_TYPE_ATV");
+    db.execute("INSERT INTO songs (id, title, subtitle, thumbnail, browse_id, playlist_id, video_id, set_video_id, kind, saved_at, explicit, music_video_type, liked, liked_date, in_library, is_video) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, NULL, 0, ?13) ON CONFLICT(id) DO UPDATE SET title=excluded.title, subtitle=excluded.subtitle, thumbnail=excluded.thumbnail, browse_id=excluded.browse_id, playlist_id=excluded.playlist_id, video_id=excluded.video_id, set_video_id=excluded.set_video_id, kind=excluded.kind, explicit=excluded.explicit, music_video_type=excluded.music_video_type, is_video=excluded.is_video", params![item.id, item.title, item.subtitle, item.thumbnail, item.browse_id, item.playlist_id, item.video_id, item.set_video_id, item.kind, timestamp, if item.explicit { 1 } else { 0 }, item.music_video_type, if is_video { 1 } else { 0 }])?;
+    // A played song's artists must be mapped even when it was never synced or
+    // saved: the playback-cache lyrics fill resolves the lyrics key from these
+    // mappings, and without them it falls back to the raw subtitle — a key the
+    // lyrics screen never reads for search/home plays. Artists without an id
+    // (plain-text credits) cannot be mapped, and the subtitle fallback remains
+    // for those. Best-effort: a mapping failure must never break the song
+    // save or playback.
+    let _ = upsert_song_artists(db, item, timestamp);
     Ok(())
 }
 
@@ -6916,7 +6946,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![updates::app_update_check, updates::app_update_install, updates::app_open_releases_page, ipc::system::request_cancel, ipc::library::ytm_history, ipc::library::ytm_remove_from_history, ipc::spotify::spotify_profile, ipc::spotify::spotify_library_node, ipc::spotify::spotify_playlists, ipc::spotify::spotify_playlist_tracks, ipc::spotify::spotify_remove_from_playlist, ipc::spotify::spotify_move_in_playlist, ipc::spotify::spotify_rename_playlist, ipc::spotify::spotify_liked_tracks, ipc::spotify::spotify_match_for_youtube, ipc::spotify::spotify_override_youtube, ipc::spotify::spotify_resolve_youtube, ipc::spotify::spotify_add_to_playlist, ipc::library::ytm_delete_uploaded_song, ipc::catalog::ytm_refetch, ipc::library::ytm_toggle_episode_saved, ipc::library::local_files_pick, ipc::library::library_local_files, ipc::downloads::library_downloads, ipc::player::library_player_cache, ipc::library::ytm_toggle_podcast_saved, ipc::downloads::download_start, ipc::downloads::download_info, ipc::downloads::download_cancel, ipc::downloads::download_remove, ipc::downloads::playlist_download_start, ipc::downloads::playlist_download_status, ipc::downloads::playlist_downloads, ipc::downloads::playlist_download_cancel, ipc::downloads::playlist_download_remove, ipc::player::player_cache_remove, ipc::player::player_cache_usage, ipc::player::player_cache_clear, ipc::library::ytm_podcast_channels, ipc::library::library_saved_podcasts, ipc::library::ytm_refresh_saved_podcasts, ipc::library::library_downloaded_podcasts, ipc::library::library_albums, ipc::library::library_artists, ipc::catalog::ytm_home, ipc::catalog::ytm_home_continuation, ipc::catalog::ytm_search, ipc::catalog::ytm_search_continuation, ipc::library::sync_youtube_library, ipc::library::ytm_add_to_playlist, ipc::library::ytm_remove_from_playlist, ipc::library::ytm_create_playlist, ipc::catalog::ytm_playlist, ipc::catalog::ytm_playlist_continuation, ipc::catalog::ytm_browse, ipc::catalog::ytm_browse_continuation, ipc::catalog::ytm_detail, ipc::catalog::ytm_detail_continuation, ipc::catalog::ytm_podcast_cache_detail_page, ipc::player::ytm_next, ipc::player::ytm_related, ipc::player::ytm_queue_continuation, ipc::player::ytm_player, ipc::player::ytm_report_stream_failure, ipc::player::ytm_playback_report, ipc::library::history_add, ipc::library::history_record_playtime, ipc::library::history_items, ipc::library::history_clear, ipc::library::library_top_songs, ipc::library::library_stats, ipc::catalog::search_history_add, ipc::catalog::search_history_items, ipc::catalog::search_history_clear, ipc::library::ytm_toggle_like, ipc::lyrics::fetch_lyrics, ipc::lyrics::fetch_lyrics_fresh, ipc::lyrics::fetch_lyrics_from_provider, ipc::library::library_toggle_liked, ipc::library::library_edit_item, ipc::library::library_refetch_item, ipc::library::ytm_toggle_library, ipc::settings::settings_get, ipc::settings::settings_set, ipc::backup::backup_create, ipc::backup::backup_restore, ipc::library::library_save_item, ipc::library::library_remove_item, ipc::library::library_songs, ipc::library::library_mix_songs, ipc::library::library_liked_songs, ipc::library::library_uploaded_songs, ipc::library::library_playlists, ipc::library::library_create_playlist, ipc::library::library_add_to_playlist, ipc::library::library_remove_from_playlist, ipc::library::library_playlist_songs, ipc::library::library_item_state, ipc::library::library_artist_state, ipc::library::library_toggle_artist_bookmarked, ipc::library::speed_dial_toggle, ipc::library::speed_dial_items, ipc::account::open_google_login, ipc::account::account_refresh_profile, ipc::account::account_logout, ipc::account::clear_local_library_keep_downloads, ipc::account::session_status, ipc::account::open_spotify_login, ipc::account::spotify_session_status, ipc::account::spotify_logout])
+        .invoke_handler(tauri::generate_handler![updates::app_update_check, updates::app_update_install, updates::app_open_releases_page, ipc::system::request_cancel, ipc::library::ytm_history, ipc::library::ytm_remove_from_history, ipc::spotify::spotify_profile, ipc::spotify::spotify_library_node, ipc::spotify::spotify_playlists, ipc::spotify::spotify_playlist_tracks, ipc::spotify::spotify_remove_from_playlist, ipc::spotify::spotify_move_in_playlist, ipc::spotify::spotify_rename_playlist, ipc::spotify::spotify_liked_tracks, ipc::spotify::spotify_match_for_youtube, ipc::spotify::spotify_override_youtube, ipc::spotify::spotify_resolve_youtube, ipc::spotify::spotify_add_to_playlist, ipc::library::ytm_delete_uploaded_song, ipc::catalog::ytm_refetch, ipc::library::ytm_toggle_episode_saved, ipc::library::local_files_pick, ipc::library::library_local_files, ipc::downloads::library_downloads, ipc::player::library_player_cache, ipc::library::ytm_toggle_podcast_saved, ipc::downloads::download_start, ipc::downloads::download_info, ipc::downloads::download_cancel, ipc::downloads::download_remove, ipc::downloads::playlist_download_start, ipc::downloads::playlist_download_status, ipc::downloads::playlist_downloads, ipc::downloads::playlist_download_cancel, ipc::downloads::playlist_download_remove, ipc::player::player_cache_remove, ipc::player::player_cache_usage, ipc::player::player_cache_clear, ipc::library::ytm_podcast_channels, ipc::library::library_saved_podcasts, ipc::library::ytm_refresh_saved_podcasts, ipc::library::library_downloaded_podcasts, ipc::library::library_albums, ipc::library::library_artists, ipc::catalog::ytm_home, ipc::catalog::ytm_home_continuation, ipc::catalog::ytm_search, ipc::catalog::ytm_search_continuation, ipc::library::sync_youtube_library, ipc::library::ytm_add_to_playlist, ipc::library::ytm_remove_from_playlist, ipc::library::ytm_create_playlist, ipc::catalog::ytm_playlist, ipc::catalog::ytm_playlist_continuation, ipc::catalog::ytm_browse, ipc::catalog::ytm_browse_continuation, ipc::catalog::ytm_detail, ipc::catalog::ytm_detail_continuation, ipc::catalog::ytm_podcast_cache_detail_page, ipc::player::ytm_next, ipc::player::ytm_related, ipc::player::ytm_queue_continuation, ipc::player::ytm_player, ipc::player::ytm_report_stream_failure, ipc::player::ytm_playback_report, ipc::library::history_add, ipc::library::library_ensure_played_song, ipc::library::history_record_playtime, ipc::library::history_items, ipc::library::history_clear, ipc::library::library_top_songs, ipc::library::library_stats, ipc::catalog::search_history_add, ipc::catalog::search_history_items, ipc::catalog::search_history_clear, ipc::library::ytm_toggle_like, ipc::lyrics::fetch_lyrics, ipc::lyrics::fetch_lyrics_fresh, ipc::lyrics::fetch_lyrics_from_provider, ipc::library::library_toggle_liked, ipc::library::library_edit_item, ipc::library::library_refetch_item, ipc::library::ytm_toggle_library, ipc::settings::settings_get, ipc::settings::settings_set, ipc::backup::backup_create, ipc::backup::backup_restore, ipc::library::library_save_item, ipc::library::library_remove_item, ipc::library::library_songs, ipc::library::library_mix_songs, ipc::library::library_liked_songs, ipc::library::library_uploaded_songs, ipc::library::library_playlists, ipc::library::library_create_playlist, ipc::library::library_add_to_playlist, ipc::library::library_remove_from_playlist, ipc::library::library_playlist_songs, ipc::library::library_item_state, ipc::library::library_artist_state, ipc::library::library_toggle_artist_bookmarked, ipc::library::speed_dial_toggle, ipc::library::speed_dial_items, ipc::account::open_google_login, ipc::account::account_refresh_profile, ipc::account::account_logout, ipc::account::clear_local_library_keep_downloads, ipc::account::session_status, ipc::account::open_spotify_login, ipc::account::spotify_session_status, ipc::account::spotify_logout])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
@@ -7695,6 +7725,129 @@ mod tests {
             song_artist_names(&db, "song-2").unwrap(),
             vec!["Artist One".to_owned(), "Artist Two".to_owned()]
         );
+    }
+
+    #[test]
+    fn paused_history_search_play_ensures_offline_lyrics_for_unsynced_song() {
+        // Regression test for the pause-listen-history offline-lyrics gap.
+        // With pauseListenHistory on, the frontend's beginPlaytime calls
+        // library_ensure_played_song instead of history_add (src/App.tsx),
+        // so a never-synced, never-saved Search/Home song still gets its
+        // songs row and song_artists rows at fill time — but no history row
+        // and no playtime. This drives the fill's exact input resolution
+        // (src-tauri/src/ipc/player.rs) on that DB state and asserts the
+        // lyrics end up under the key the lyrics screen reads
+        // (src/features/lyrics/useLyrics.ts:52). It FAILED on the code
+        // before the fix: with history_add skipped and no ensure path, the
+        // fill resolution finds no songs row, so the thumbnail assert below
+        // fails (and the final lyrics assert is never reached) — nothing is
+        // stored under any key.
+        let db = cache_test_db();
+        let item = YtItem {
+            id: "song-3".to_owned(),
+            kind: "song".to_owned(),
+            title: "Song Name".to_owned(),
+            subtitle: "Artist One • Album".to_owned(),
+            thumbnail: Some("https://i.ytimg.com/vi/video-3/hqdefault.jpg".to_owned()),
+            artists: vec![
+                Artist {
+                    name: "Artist One".to_owned(),
+                    id: Some("a-1".to_owned()),
+                },
+                Artist {
+                    name: "Artist Two".to_owned(),
+                    id: Some("a-2".to_owned()),
+                },
+            ],
+            browse_id: None,
+            playlist_id: None,
+            video_id: Some("video-3".to_owned()),
+            set_video_id: None,
+            play_playlist_id: None,
+            play_video_id: None,
+            params: None,
+            explicit: false,
+            music_video_type: None,
+            history_remove_token: None,
+            album_id: None,
+            album_title: None,
+        };
+        // Pause-ON play: the frontend invokes the history-free ensure path
+        // instead of history_add. library_ensure_played_song itself is a
+        // Tauri command and cannot be invoked in a unit test, so this calls
+        // the exact helper it delegates to — upsert_played_song — on the
+        // same item history_add would have received.
+        upsert_played_song(&db, &item, 1).unwrap();
+        // The ensure path records no listening history: no history row, so
+        // no playtime can ever be attached to this play.
+        let history_rows: i64 = db
+            .query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(history_rows, 0);
+        // Fill-time resolution, verbatim from src-tauri/src/ipc/player.rs:
+        let (song_id, title, subtitle, thumbnail, duration) = db
+            .query_row(
+                "SELECT id, title, subtitle, thumbnail, duration FROM songs WHERE id = ?1 OR video_id = ?1",
+                params!["video-3"],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or_default();
+        // The songs row exists now, so the fill has a title, a thumbnail
+        // URL, and a duration to work from.
+        assert!(thumbnail.is_some());
+        assert_eq!(lyric_duration_for_cache(0, duration), -1);
+        if !title.trim().is_empty() {
+            let artist_names = song_artist_names(&db, &song_id).unwrap_or_default();
+            let artist = if artist_names.is_empty() {
+                subtitle
+            } else {
+                artist_names.join(", ")
+            };
+            let payloads = vec![LyricsPayload {
+                lines: Vec::new(),
+                provider: "LrcLib".to_owned(),
+                text: "[00:01.00]Line one".to_owned(),
+                synced: true,
+                matched_title: title.clone(),
+                matched_artist: artist.clone(),
+            }];
+            cache_fetched_lyrics(&db, &title, &artist, &payloads).unwrap();
+        }
+        // The lyrics screen reads this key: item.artists joined with ", ",
+        // then the same lyrics:<title>:<artist> construction as
+        // fetch_lyrics_inner. The ensure path maps the artists, so the
+        // lyrics land under it.
+        let screen_artist = item
+            .artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let screen_key = format!(
+            "lyrics:{}:{}",
+            clean_lyrics_title(&item.title).to_lowercase(),
+            clean_lyrics_artist(&screen_artist).to_lowercase()
+        );
+        assert_eq!(screen_key, "lyrics:song name:artist one");
+        let cached: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params![screen_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(cached, Some("LrcLib".to_owned()));
     }
 
     #[test]

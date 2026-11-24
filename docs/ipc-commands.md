@@ -11,7 +11,7 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | Class | Meaning | Commands |
 | --- | --- | --- |
 | `read-local` | Reads Soluna's own database, settings or files. | 28 |
-| `write-local` | Changes Soluna's own data; the change can be reversed. | 19 |
+| `write-local` | Changes Soluna's own data; the change can be reversed. | 20 |
 | `remote-read` | Calls YouTube Music, Spotify or a lyrics/update server; reads only (may cache the answer). | 33 |
 | `remote-write` | Changes the signed-in YouTube Music or Spotify account; the change can be reversed. | 9 |
 | `destructive-local` | Deletes or replaces Soluna data (history, cache, downloads, a backup restore). | 8 |
@@ -19,7 +19,7 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | `system` | Reaches outside the app: file dialogs, opening a browser, installing an update, writing a backup file. | 4 |
 | `credentials` | Opens a login window or creates, refreshes or deletes a stored session. | 5 |
 
-## Commands (110)
+## Commands (111)
 
 ### account (8)
 
@@ -71,7 +71,7 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | `ytm_search` | remote-read | `features/search/useSearchData.ts`, `features/spotify/useSpotifyLibrary.ts` |
 | `ytm_search_continuation` | remote-read | `features/search/useSearchData.ts` |
 
-### library (44)
+### library (45)
 
 | Command | Risk | Callers |
 | --- | --- | --- |
@@ -86,6 +86,7 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | `library_create_playlist` | write-local | `features/playlist/usePlaylists.ts` |
 | `library_downloaded_podcasts` | read-local | `features/library/useLibraryData.ts` |
 | `library_edit_item` | write-local | `features/library/EditItemDialog.tsx` |
+| `library_ensure_played_song` | write-local | `App.tsx` |
 | `library_item_state` | read-local | `App.tsx`, `components/InlineLikeButton.tsx` |
 | `library_liked_songs` | read-local | `features/library/useLibraryData.ts` |
 | `library_local_files` | read-local | `features/library/useLibraryData.ts` |
