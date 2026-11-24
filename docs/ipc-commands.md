@@ -106,7 +106,7 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | `local_files_pick` | system | `App.tsx` |
 | `speed_dial_items` | read-local | `features/home/useHomeData.ts` |
 | `speed_dial_toggle` | write-local | `App.tsx` |
-| `sync_youtube_library` | remote-read | `App.tsx`, `features/playlist/usePlaylists.ts` |
+| `sync_youtube_library` | remote-read | `App.tsx`, `features/library/useLikedSyncOnOpen.ts`, `features/playlist/usePlaylists.ts` |
 | `ytm_add_to_playlist` | remote-write | `features/playlist/usePlaylists.ts` |
 | `ytm_create_playlist` | remote-write | `features/playlist/usePlaylists.ts` |
 | `ytm_delete_uploaded_song` | remote-destructive | `App.tsx` |

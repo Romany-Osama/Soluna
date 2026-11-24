@@ -185,7 +185,8 @@ const SCHEMA_SQL: &str = "PRAGMA foreign_keys = ON;
                  path TEXT NOT NULL,
                  bytes INTEGER NOT NULL DEFAULT 0,
                  cached_at INTEGER NOT NULL,
-                 quality TEXT NOT NULL DEFAULT 'auto'
+                 quality TEXT NOT NULL DEFAULT 'auto',
+                 artwork_path TEXT
               );
               CREATE TABLE IF NOT EXISTS podcasts (
                  id TEXT PRIMARY KEY,
@@ -382,6 +383,7 @@ fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqli
         "ALTER TABLE player_cache ADD COLUMN quality TEXT NOT NULL DEFAULT 'auto'",
         [],
     );
+    let _ = db.execute("ALTER TABLE player_cache ADD COLUMN artwork_path TEXT", []);
     // A download cannot survive a restart; rows still marked "downloading" are leftovers of a crash or forced quit.
     // Mark them cancelled (not failed) so the retained `.part` file stays resumable (v0.1.8 resume, see DECISIONS D-002).
     let _ = db.execute("UPDATE downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
@@ -1161,9 +1163,16 @@ fn setting_value(db: &Connection, key: &str) -> Result<Option<String>, String> {
 
 fn auth_session(state: &tauri::State<'_, RuntimeState>) -> Result<Option<AuthSession>, String> {
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
-    let cookie = secrets::get(&db, "cookie").ok().flatten();
-    let data_sync_id = setting_value(&db, "dataSyncId")?;
-    let visitor_data = setting_value(&db, "visitorData")?;
+    auth_session_from_db(&db)
+}
+
+/// Resolve the YouTube auth session from a database connection, with the same rules as
+/// `auth_session` (which reads the same rows through the managed state). Used by the
+/// background player-cache fill, which opens its own connection and cannot hold a `State`.
+fn auth_session_from_db(db: &Connection) -> Result<Option<AuthSession>, String> {
+    let cookie = secrets::get(db, "cookie").ok().flatten();
+    let data_sync_id = setting_value(db, "dataSyncId")?;
+    let visitor_data = setting_value(db, "visitorData")?;
     Ok(match (cookie, data_sync_id, visitor_data) {
         (Some(cookie), Some(data_sync_id), Some(visitor_data))
             if !cookie.trim().is_empty()
@@ -1174,10 +1183,10 @@ fn auth_session(state: &tauri::State<'_, RuntimeState>) -> Result<Option<AuthSes
                 cookie,
                 data_sync_id,
                 visitor_data,
-                account_name: setting_value(&db, "accountName")?,
-                account_email: setting_value(&db, "accountEmail")?,
-                account_channel_handle: setting_value(&db, "accountChannelHandle")?,
-                account_avatar: setting_value(&db, "accountAvatar")?,
+                account_name: setting_value(db, "accountName")?,
+                account_email: setting_value(db, "accountEmail")?,
+                account_channel_handle: setting_value(db, "accountChannelHandle")?,
+                account_avatar: setting_value(db, "accountAvatar")?,
             })
         }
         _ => None,
@@ -2027,7 +2036,9 @@ fn download_cache_path(song_id: &str) -> PathBuf {
 }
 
 /// A playback-cache file usable for this song at this quality (PLAY-021): a copy cached at another quality is
-/// never served, and an empty or vanished file is ignored.
+/// never served, and an empty or vanished file is ignored. An entry unplayed for
+/// [`player_cache::CACHE_MAX_AGE_DAYS`] days is expired: its files and row are deleted and it is not served,
+/// so the next play resolves a fresh stream and starts a new fill.
 fn cached_player_file(
     db: &Connection,
     song_id: &str,
@@ -2035,15 +2046,60 @@ fn cached_player_file(
 ) -> Result<Option<String>, String> {
     let cached = db
         .query_row(
-            "SELECT path, bytes FROM player_cache WHERE song_id = ?1 AND quality = ?2",
+            "SELECT path, bytes, cached_at FROM player_cache WHERE song_id = ?1 AND quality = ?2",
             params![song_id, quality],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(|error| format!("player cache state read failed: {error}"))?;
-    Ok(cached
-        .filter(|(path, bytes)| *bytes > 0 && Path::new(path).is_file())
-        .map(|(path, _)| path))
+    let Some((path, bytes, cached_at)) = cached else {
+        return Ok(None);
+    };
+    if bytes <= 0 || !Path::new(&path).is_file() {
+        return Ok(None);
+    }
+    if player_cache::is_expired(cached_at, now_seconds()) {
+        let _ = delete_player_cache_entry(db, song_id);
+        return Ok(None);
+    }
+    Ok(Some(path))
+}
+
+/// Deletes one playback-cache entry: its audio file, its cached thumbnail, and its row. Returns whether
+/// a row was deleted. A file the OS will not delete (for example the one playing right now) keeps its
+/// row and is retried next time, exactly like the old quota eviction behaved.
+fn delete_player_cache_entry(db: &Connection, song_id: &str) -> Result<bool, String> {
+    let row: Option<(String, Option<String>)> = db
+        .query_row(
+            "SELECT path, artwork_path FROM player_cache WHERE song_id = ?1",
+            params![song_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("player cache entry read failed: {error}"))?;
+    let Some((path, artwork_path)) = row else {
+        return Ok(false);
+    };
+    if let Err(error) = fs::remove_file(&path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Ok(false);
+        }
+    }
+    if let Some(artwork) = artwork_path {
+        let _ = fs::remove_file(artwork);
+    }
+    db.execute(
+        "DELETE FROM player_cache WHERE song_id = ?1",
+        params![song_id],
+    )
+    .map_err(|error| format!("player cache removal failed: {error}"))?;
+    Ok(true)
 }
 
 fn normalize_audio_quality(value: Option<&str>) -> &'static str {
@@ -2089,6 +2145,24 @@ fn download_artwork_path(song_id: &str, extension: &str) -> PathBuf {
         .join(format!("{digest:x}.{safe_extension}"))
 }
 
+/// Thumbnail cached for a playback-cache entry. It lives next to the cached audio in `player-cache/`,
+/// not in `downloads/`, so evicting or removing a cached song never deletes a download's artwork (and
+/// vice versa): the two rows point at different files even for the same song.
+fn player_cache_artwork_path(song_id: &str, extension: &str) -> PathBuf {
+    let digest = Sha1::digest(song_id.as_bytes());
+    let safe_extension = match extension {
+        "jpg" | "jpeg" => "jpg",
+        "png" => "png",
+        "webp" => "webp",
+        _ => "cover",
+    };
+    database_path()
+        .parent()
+        .map(|value| value.join("player-cache"))
+        .unwrap_or_else(|| PathBuf::from("player-cache"))
+        .join(format!("{digest:x}.{safe_extension}"))
+}
+
 fn artwork_extension(content_type: &str) -> &'static str {
     let mime = content_type
         .split(';')
@@ -2123,12 +2197,24 @@ fn download_retry(status: reqwest::StatusCode, resume: download_resume::Resume) 
     }
 }
 
-/// Fetches thumbnail bytes from a YouTube-owned host only, with the image's extension.
-/// Always defense-in-depth, not a response to a known exploit: this only ever receives thumbnail URLs
-/// parsed out of YouTube's own API responses, never user-entered text, but a future parsing bug or
-/// upstream API change should not turn into fetching an arbitrary host.
-async fn download_artwork_bytes(source_url: &str) -> Option<(Vec<u8>, &'static str)> {
-    let url = source_url.trim();
+async fn cache_download_artwork(song_id: &str, source_url: Option<&str>) -> Option<String> {
+    cache_artwork(song_id, source_url, download_artwork_path).await
+}
+
+/// Thumbnail cached for a playback-cache entry, so a song played before still shows its artwork offline.
+async fn cache_player_artwork(song_id: &str, source_url: Option<&str>) -> Option<String> {
+    cache_artwork(song_id, source_url, player_cache_artwork_path).await
+}
+
+async fn cache_artwork(
+    song_id: &str,
+    source_url: Option<&str>,
+    path_for: fn(&str, &str) -> PathBuf,
+) -> Option<String> {
+    let url = source_url?.trim();
+    // Always defense-in-depth, not a response to a known exploit: this only ever receives thumbnail URLs
+    // parsed out of YouTube's own API responses (the one caller passes item.thumbnail), never user-entered
+    // text, but a future parsing bug or upstream API change should not turn into fetching an arbitrary host.
     let parsed = url::Url::parse(url).ok()?;
     if parsed.scheme() != "https" {
         return None;
@@ -2160,27 +2246,17 @@ async fn download_artwork_bytes(source_url: &str) -> Option<(Vec<u8>, &'static s
     if bytes.is_empty() || bytes.len() > 10 * 1024 * 1024 {
         return None;
     }
-    Some((bytes.to_vec(), artwork_extension(&content_type)))
-}
-
-/// Writes artwork bytes atomically (via `.part` + rename) and returns the path on success.
-async fn write_artwork_file(path: &PathBuf, bytes: &[u8]) -> Option<String> {
+    let path = path_for(song_id, artwork_extension(&content_type));
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.ok()?;
     }
     let partial = PathBuf::from(format!("{}.part", path.to_string_lossy()));
-    tokio::fs::write(&partial, bytes).await.ok()?;
-    if tokio::fs::rename(&partial, path).await.is_err() {
+    tokio::fs::write(&partial, &bytes).await.ok()?;
+    if tokio::fs::rename(&partial, &path).await.is_err() {
         let _ = tokio::fs::remove_file(&partial).await;
         return None;
     }
     Some(path.to_string_lossy().to_string())
-}
-
-async fn cache_download_artwork(song_id: &str, source_url: Option<&str>) -> Option<String> {
-    let (bytes, extension) = download_artwork_bytes(source_url?).await?;
-    let path = download_artwork_path(song_id, extension);
-    write_artwork_file(&path, &bytes).await
 }
 
 /// Local path for a downloaded playlist's own photo. It lives in the `artwork` folder (not `downloads`):
@@ -2202,9 +2278,7 @@ fn playlist_artwork_path(playlist_id: &str, extension: &str) -> PathBuf {
 }
 
 async fn cache_playlist_artwork(playlist_id: &str, source_url: Option<&str>) -> Option<String> {
-    let (bytes, extension) = download_artwork_bytes(source_url?).await?;
-    let path = playlist_artwork_path(playlist_id, extension);
-    write_artwork_file(&path, &bytes).await
+    cache_artwork(playlist_id, source_url, playlist_artwork_path).await
 }
 
 fn player_cache_jobs() -> &'static Mutex<player_cache::CacheJobs> {
@@ -2266,8 +2340,9 @@ fn player_cache_limit_mb(db: &Connection) -> i64 {
 }
 
 /// Deletes least-recently-used playback-cache files until the cache fits the user's limit (PLAY-041).
-/// A file Windows will not delete (for example the one playing right now) keeps its row and is retried
-/// next time. Returns the number of entries removed.
+/// The quota counts audio bytes only; a cached thumbnail is a few tens of kilobytes next to megabytes of
+/// audio and does not count towards it. A file Windows will not delete (for example the one playing right
+/// now) keeps its row and is retried next time. Returns the number of entries removed.
 fn enforce_player_cache_quota(db: &Connection) -> Result<usize, String> {
     let quota = player_cache::limit_bytes(player_cache_limit_mb(db));
     let mut statement = db
@@ -2292,19 +2367,7 @@ fn enforce_player_cache_quota(db: &Connection) -> Result<usize, String> {
         rows.iter().map(|(entry, _)| entry.clone()).collect();
     let mut removed = 0;
     for song_id in player_cache::plan_eviction(&entries, quota) {
-        let Some((_, path)) = rows.iter().find(|(entry, _)| entry.song_id == song_id) else {
-            continue;
-        };
-        let gone = match fs::remove_file(path) {
-            Ok(()) => true,
-            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-        };
-        if gone {
-            db.execute(
-                "DELETE FROM player_cache WHERE song_id = ?1",
-                params![song_id],
-            )
-            .map_err(|error| format!("player cache eviction failed: {error}"))?;
+        if delete_player_cache_entry(db, &song_id)? {
             removed += 1;
         }
     }
@@ -2323,8 +2386,9 @@ fn files_in(directory: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Start-up housekeeping (R6-026): drop rows whose cache file vanished, delete abandoned `.part` files and
-/// unreferenced playback-cache files, then apply the cache limit. Finished offline downloads are never
+/// Start-up housekeeping (R6-026): drop rows whose cache file vanished, delete entries unplayed for
+/// [`player_cache::CACHE_MAX_AGE_DAYS`] days, delete abandoned `.part` files and unreferenced
+/// playback-cache files, then apply the cache limit. Finished offline downloads are never
 /// deleted here; only `.part` files that no download can resume.
 fn clean_media_on_startup(db: &Connection) -> Result<(usize, usize), String> {
     let cache_dir = player_cache_path("probe").parent().map(Path::to_path_buf);
@@ -2337,16 +2401,40 @@ fn clean_media_dirs(
     cache_dir: Option<&Path>,
     download_dir: Option<&Path>,
 ) -> Result<(usize, usize), String> {
-    let cache_rows: Vec<(String, String)> = db
-        .prepare("SELECT song_id, path FROM player_cache")
+    let cache_rows: Vec<(String, String, Option<String>, i64)> = db
+        .prepare("SELECT song_id, path, artwork_path, cached_at FROM player_cache")
         .and_then(|mut statement| {
             statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
                 .collect()
         })
         .map_err(|error| format!("player cache cleanup query failed: {error}"))?;
-    for (song_id, path) in &cache_rows {
+    // Expired entries go first: their audio and thumbnail files are deleted with the row, and the
+    // count of deleted files includes them.
+    let mut deleted = 0;
+    let mut live_rows: Vec<(String, String, Option<String>, i64)> = Vec::new();
+    for (song_id, path, artwork_path, cached_at) in cache_rows {
+        if player_cache::is_expired(cached_at, now_seconds()) {
+            let files: usize = usize::from(Path::new(&path).is_file())
+                + usize::from(
+                    artwork_path
+                        .as_deref()
+                        .is_some_and(|artwork| Path::new(artwork).is_file()),
+                );
+            if delete_player_cache_entry(db, &song_id)? {
+                deleted += files;
+            }
+        } else {
+            live_rows.push((song_id, path, artwork_path, cached_at));
+        }
+    }
+    for (song_id, path, artwork_path, _) in &live_rows {
         if !Path::new(path).is_file() {
+            if let Some(artwork) = artwork_path {
+                let _ = fs::remove_file(artwork);
+            }
             db.execute(
                 "DELETE FROM player_cache WHERE song_id = ?1",
                 params![song_id],
@@ -2354,9 +2442,20 @@ fn clean_media_dirs(
             .map_err(|error| format!("player cache cleanup failed: {error}"))?;
         }
     }
-    let known: HashSet<PathBuf> = cache_rows
+    // Cached thumbnails live in the same folder as the cached audio, so they are known files too:
+    // without them the orphan sweep below would delete every cached thumbnail at start-up. Only rows
+    // whose audio file still exists count: a row dropped above leaves its thumbnail orphaned, and the
+    // sweep below is what removes it.
+    let known: HashSet<PathBuf> = live_rows
         .iter()
-        .map(|(_, path)| PathBuf::from(path))
+        .filter(|(_, path, _, _)| Path::new(path).is_file())
+        .flat_map(|(_, path, artwork_path, _)| {
+            let mut paths = vec![PathBuf::from(path)];
+            if let Some(artwork) = artwork_path {
+                paths.push(PathBuf::from(artwork));
+            }
+            paths
+        })
         .collect();
     let resumable: HashSet<PathBuf> = db
         .prepare("SELECT path FROM downloads WHERE state != 'completed'")
@@ -2377,7 +2476,6 @@ fn clean_media_dirs(
             .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "part")),
     );
-    let mut deleted = 0;
     for file in player_cache::orphaned_files(&candidates, &known, &resumable) {
         if fs::remove_file(&file).is_ok() {
             deleted += 1;
@@ -3835,6 +3933,28 @@ async fn fetch_all_playlist_songs(
     Ok(collected.items)
 }
 
+/// Upserts the artist rows and song-artist mappings for one item. Artists
+/// without an id (plain-text credits from `parse_artists`) cannot be mapped:
+/// no artist row is created for a bare name, and callers fall back to the
+/// subtitle for those. Shared by the library sync and by `history_add`, so a
+/// song played from search/home has its artists mapped even when it was
+/// never synced or saved — the playback-cache lyrics fill resolves the
+/// lyrics key from these mappings.
+fn upsert_song_artists(db: &Connection, item: &YtItem, timestamp: i64) -> Result<(), String> {
+    for (position, artist) in item.artists.iter().enumerate() {
+        let Some(artist_id) = artist.id.as_deref().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        db.execute("INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET name=excluded.name, saved_at=excluded.saved_at", params![artist_id, artist.name, timestamp]).map_err(|error| format!("artist sync write failed: {error}"))?;
+        db.execute(
+            "INSERT OR IGNORE INTO song_artists (song_id, artist_id, position) VALUES (?1, ?2, ?3)",
+            params![item.id, artist_id, position as i64],
+        )
+        .map_err(|error| format!("song artist sync mapping failed: {error}"))?;
+    }
+    Ok(())
+}
+
 fn upsert_catalog_mappings(
     db: &Connection,
     item: &YtItem,
@@ -3857,18 +3977,7 @@ fn upsert_catalog_mappings(
         )
         .map_err(|error| format!("song album sync mapping failed: {error}"))?;
     }
-    for (position, artist) in item.artists.iter().enumerate() {
-        let Some(artist_id) = artist.id.as_deref().filter(|value| !value.is_empty()) else {
-            continue;
-        };
-        db.execute("INSERT INTO artists (id, name, saved_at) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET name=excluded.name, saved_at=excluded.saved_at", params![artist_id, artist.name, timestamp]).map_err(|error| format!("artist sync write failed: {error}"))?;
-        db.execute(
-            "INSERT OR IGNORE INTO song_artists (song_id, artist_id, position) VALUES (?1, ?2, ?3)",
-            params![item.id, artist_id, position as i64],
-        )
-        .map_err(|error| format!("song artist sync mapping failed: {error}"))?;
-    }
-    Ok(())
+    upsert_song_artists(db, item, timestamp)
 }
 
 fn upsert_synced_song(
@@ -4552,19 +4661,30 @@ async fn youtube_plain_lyrics_fetch(
 ) -> Option<String> {
     let visitor_data = visitor(state).await.ok()?;
     let session = auth_session(state).ok().flatten();
-    let data_sync_id = session.as_ref().map(|value| value.data_sync_id.as_str());
-    let response = post("next", json!({ "context": context(&visitor_data, session.is_some(), data_sync_id), "videoId": video_id }), session.as_ref()).await.ok()?;
+    youtube_plain_lyrics_fetch_with_session(video_id, &visitor_data, session.as_ref()).await
+}
+
+/// The YouTube watch-page lyrics fetch, driven by already-resolved visitor data and auth
+/// session instead of a live `State`. Used by the background player-cache fill, which
+/// resolves both from its own database connection and cannot hold a `State`.
+async fn youtube_plain_lyrics_fetch_with_session(
+    video_id: &str,
+    visitor_data: &str,
+    session: Option<&AuthSession>,
+) -> Option<String> {
+    let data_sync_id = session.map(|value| value.data_sync_id.as_str());
+    let response = post("next", json!({ "context": context(visitor_data, session.is_some(), data_sync_id), "videoId": video_id }), session).await.ok()?;
     let endpoint = response.pointer("/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/watchNextTabbedResultsRenderer/tabs/1/tabRenderer/endpoint/browseEndpoint")?;
     let browse_id = endpoint.get("browseId").and_then(Value::as_str)?.trim();
     if browse_id.is_empty() {
         return None;
     }
     let params = endpoint.get("params").and_then(Value::as_str);
-    let mut body = json!({ "context": context(&visitor_data, session.is_some(), data_sync_id), "browseId": browse_id });
+    let mut body = json!({ "context": context(visitor_data, session.is_some(), data_sync_id), "browseId": browse_id });
     if let Some(params) = params {
         body["params"] = Value::String(params.to_owned());
     }
-    let browse = post("browse", body, session.as_ref()).await.ok()?;
+    let browse = post("browse", body, session).await.ok()?;
     let sections = browse
         .pointer("/contents/sectionListRenderer/contents")?
         .as_array()?;
@@ -5059,33 +5179,72 @@ async fn fetch_lyrics_provider(
     video_id: Option<&str>,
     state: &tauri::State<'_, RuntimeState>,
 ) -> Result<Option<LyricsPayload>, String> {
-    let make_payload =
-        |text: String, synced: bool, matched_title: String, matched_artist: String| {
-            let filtered = filter_lyrics_credit_lines(&text);
-            LyricsPayload {
-                lines: if synced {
-                    parse_lyric_lines(&filtered)
-                } else {
-                    Vec::new()
-                },
-                provider: provider.to_owned(),
-                text: filtered,
-                synced,
-                matched_title,
-                matched_artist,
-            }
-        };
+    // The YouTube watch-page provider needs the live auth session; every other
+    // provider is session-free and lives in `fetch_lyrics_provider_for_cache`.
+    if provider == "YouTube" {
+        return Ok(match video_id.filter(|value| !value.trim().is_empty()) {
+            Some(id) => youtube_plain_lyrics_fetch(id, state)
+                .await
+                .map(|text| {
+                    make_lyrics_payload(provider, text, false, title.to_owned(), artist.to_owned())
+                })
+                .filter(|payload| !payload.text.is_empty()),
+            None => None,
+        });
+    }
+    fetch_lyrics_provider_for_cache(provider, title, artist, duration, album, video_id, None).await
+}
 
+/// Build a lyrics payload from fetched text, shared by the stateful and the
+/// state-free provider dispatchers.
+fn make_lyrics_payload(
+    provider: &str,
+    text: String,
+    synced: bool,
+    matched_title: String,
+    matched_artist: String,
+) -> LyricsPayload {
+    let filtered = filter_lyrics_credit_lines(&text);
+    LyricsPayload {
+        lines: if synced {
+            parse_lyric_lines(&filtered)
+        } else {
+            Vec::new()
+        },
+        provider: provider.to_owned(),
+        text: filtered,
+        synced,
+        matched_title,
+        matched_artist,
+    }
+}
+
+/// Fetch lyrics from one provider without a live `tauri::State`, for the background
+/// player-cache fill (a detached task cannot hold `State`). `youtube` carries the
+/// visitor data and auth session the YouTube watch-page provider needs, resolved from
+/// a database connection; `None` means that provider is unavailable — the on-demand
+/// lyrics path still covers it when the lyrics UI opens.
+async fn fetch_lyrics_provider_for_cache(
+    provider: &str,
+    title: &str,
+    artist: &str,
+    duration: i32,
+    album: Option<&str>,
+    video_id: Option<&str>,
+    youtube: Option<(&str, Option<&AuthSession>)>,
+) -> Result<Option<LyricsPayload>, String> {
     match provider {
         "BetterLyrics" => Ok(betterlyrics_fetch(title, artist, duration, album)
             .await
-            .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
+            .map(|text| {
+                make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+            })
             .filter(|payload| !payload.text.is_empty())),
         "Paxsenix" => Ok(paxsenix_fetch(title, artist, duration, album)
             .await
             .map(|text| {
                 let synced = !parse_lyric_lines(&text).is_empty();
-                make_payload(text, synced, title.to_owned(), artist.to_owned())
+                make_lyrics_payload(provider, text, synced, title.to_owned(), artist.to_owned())
             })
             .filter(|payload| !payload.text.is_empty())),
         "LrcLib" => {
@@ -5151,7 +5310,8 @@ async fn fetch_lyrics_provider(
                         .synced_lyrics
                         .clone()
                         .or_else(|| track.plain_lyrics.clone())?;
-                    Some(make_payload(
+                    Some(make_lyrics_payload(
+                        provider,
                         text,
                         track.synced_lyrics.is_some(),
                         track.track_name.clone(),
@@ -5162,30 +5322,50 @@ async fn fetch_lyrics_provider(
         }
         "KuGou" => Ok(kugou_fetch(title, artist, duration, album)
             .await
-            .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
+            .map(|text| {
+                make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+            })
             .filter(|payload| !payload.text.is_empty())),
         "LyricsPlus" => Ok(lyricsplus_fetch(title, artist, duration, album)
             .await
-            .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
+            .map(|text| {
+                make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+            })
             .filter(|payload| !payload.text.is_empty())),
         "Musixmatch" => Ok(musixmatch_fetch(title, artist, duration, album)
             .await
-            .map(|(text, synced)| make_payload(text, synced, title.to_owned(), artist.to_owned()))
+            .map(|(text, synced)| {
+                make_lyrics_payload(provider, text, synced, title.to_owned(), artist.to_owned())
+            })
             .filter(|payload| !payload.text.is_empty())),
         "YouTubeSubtitle" => Ok(match video_id.filter(|value| !value.trim().is_empty()) {
             Some(id) => youtube_subtitle_fetch(id)
                 .await
-                .map(|text| make_payload(text, true, title.to_owned(), artist.to_owned()))
+                .map(|text| {
+                    make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+                })
                 .filter(|payload| !payload.text.is_empty()),
             None => None,
         }),
-        "YouTube" => Ok(match video_id.filter(|value| !value.trim().is_empty()) {
-            Some(id) => youtube_plain_lyrics_fetch(id, state)
-                .await
-                .map(|text| make_payload(text, false, title.to_owned(), artist.to_owned()))
-                .filter(|payload| !payload.text.is_empty()),
-            None => None,
-        }),
+        "YouTube" => Ok(
+            match (youtube, video_id.filter(|value| !value.trim().is_empty())) {
+                (Some((visitor_data, session)), Some(id)) => {
+                    youtube_plain_lyrics_fetch_with_session(id, visitor_data, session)
+                        .await
+                        .map(|text| {
+                            make_lyrics_payload(
+                                provider,
+                                text,
+                                false,
+                                title.to_owned(),
+                                artist.to_owned(),
+                            )
+                        })
+                        .filter(|payload| !payload.text.is_empty())
+                }
+                _ => None,
+            },
+        ),
         _ => Ok(None),
     }
 }
@@ -5208,6 +5388,69 @@ fn cache_lyrics_payload(
     cache_lyrics_variant(db, cache_id, payload)
 }
 
+/// Artists mapped to a song, in the order the frontend lists them. The lyrics screen
+/// builds its cache key from `artists.join(", ")`, so the playback-cache fill must
+/// resolve the same list instead of using the raw subtitle (YouTube subtitles
+/// interleave artists with album and duration text).
+fn song_artist_names(db: &Connection, song_id: &str) -> Result<Vec<String>, String> {
+    let mut statement = db
+        .prepare(
+            "SELECT a.name FROM song_artists sa JOIN artists a ON a.id = sa.artist_id WHERE sa.song_id = ?1 ORDER BY sa.position",
+        )
+        .map_err(|error| format!("song artists read failed: {error}"))?;
+    let rows = statement
+        .query_map(params![song_id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("song artists read failed: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("song artists read failed: {error}"))
+}
+
+/// Duration passed to the lyrics providers for a cached play. The synced library row
+/// carries 0 for every never-downloaded YouTube song, and 0 would make LrcLib (and
+/// KuGou's validated path) match against a zero-length track and return nothing, so
+/// prefer the just-resolved stream length and fall back to -1 (unknown) so providers
+/// take their similarity path instead.
+fn lyric_duration_for_cache(payload_duration: i64, db_duration: i64) -> i32 {
+    let duration = if payload_duration > 0 {
+        payload_duration
+    } else {
+        db_duration
+    };
+    if duration > 0 {
+        duration.clamp(0, i32::MAX as i64) as i32
+    } else {
+        -1
+    }
+}
+
+/// Store lyrics fetched for a song under the same cache key the on-demand lyrics path
+/// (`fetch_lyrics_inner`) and downloads use, so a cached song's lyrics work offline.
+/// The first payload becomes the primary entry; the rest are kept as provider variants.
+/// An empty result stores nothing.
+fn cache_fetched_lyrics(
+    db: &Connection,
+    title: &str,
+    artist: &str,
+    results: &[LyricsPayload],
+) -> Result<(), String> {
+    if results.is_empty() {
+        return Ok(());
+    }
+    let cache_id = format!(
+        "lyrics:{}:{}",
+        clean_lyrics_title(title).to_lowercase(),
+        clean_lyrics_artist(artist).to_lowercase()
+    );
+    for (index, lyrics) in results.iter().enumerate() {
+        if index == 0 {
+            cache_lyrics_payload(db, &cache_id, lyrics)?;
+        } else {
+            cache_lyrics_variant(db, &cache_id, lyrics)?;
+        }
+    }
+    Ok(())
+}
+
 fn cached_lyrics_provider(
     db: &Connection,
     cache_id: &str,
@@ -5218,6 +5461,21 @@ fn cached_lyrics_provider(
         let synced: i64 = row.get(1)?;
         Ok(LyricsPayload { lines: if synced != 0 { parse_lyric_lines(&text) } else { Vec::new() }, provider: provider.to_owned(), text, synced: synced != 0, matched_title: row.get(2)?, matched_artist: row.get(3)? })
     }).optional().map_err(|error| format!("lyrics provider cache read failed: {error}"))
+}
+
+/// Whether one lyrics provider is enabled, from the stored settings. One source of truth
+/// for the enabled flags, shared by the stateful and the state-free provider loops.
+fn lyric_provider_enabled(db: &Connection, provider: &str) -> Result<bool, String> {
+    Ok(match provider {
+        "BetterLyrics" => lyric_setting_enabled(db, "enableBetterLyrics", true)?,
+        "Paxsenix" => lyric_setting_enabled(db, "enablePaxsenix", true)?,
+        "LrcLib" => lyric_setting_enabled(db, "enableLrclib", true)?,
+        "KuGou" => lyric_setting_enabled(db, "enableKugou", true)?,
+        "LyricsPlus" => lyric_setting_enabled(db, "enableLyricsPlus", false)?,
+        "Musixmatch" => lyric_setting_enabled(db, "enableMusixmatch", false)?,
+        "YouTubeSubtitle" | "YouTube" => true,
+        _ => false,
+    })
 }
 
 async fn fetch_all_enabled_lyrics(
@@ -5242,16 +5500,7 @@ async fn fetch_all_enabled_lyrics(
                 .db
                 .lock()
                 .map_err(|_| "database state poisoned".to_owned())?;
-            match provider.as_str() {
-                "BetterLyrics" => lyric_setting_enabled(&db, "enableBetterLyrics", true)?,
-                "Paxsenix" => lyric_setting_enabled(&db, "enablePaxsenix", true)?,
-                "LrcLib" => lyric_setting_enabled(&db, "enableLrclib", true)?,
-                "KuGou" => lyric_setting_enabled(&db, "enableKugou", true)?,
-                "LyricsPlus" => lyric_setting_enabled(&db, "enableLyricsPlus", false)?,
-                "Musixmatch" => lyric_setting_enabled(&db, "enableMusixmatch", false)?,
-                "YouTubeSubtitle" | "YouTube" => true,
-                _ => false,
-            }
+            lyric_provider_enabled(&db, &provider)?
         };
         if !enabled {
             continue;
@@ -5266,6 +5515,52 @@ async fn fetch_all_enabled_lyrics(
         }
     }
     Ok(results)
+}
+
+/// Provider names, in order, that are enabled in the stored settings. Used by the
+/// player-cache fill, which resolves the list from its own connection before awaiting
+/// any fetch (`Connection` is `!Sync`, so a `&Connection` cannot be held across an
+/// await in the detached fill task).
+fn enabled_lyrics_providers(db: &Connection) -> Vec<String> {
+    match ordered_lyrics_providers(db) {
+        Ok(order) => order
+            .into_iter()
+            .filter(|provider| lyric_provider_enabled(db, provider).unwrap_or(false))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Same provider loop as `fetch_all_enabled_lyrics`, but driven by a pre-resolved
+/// provider list instead of a live `tauri::State`: the player-cache fill runs in a
+/// detached task and cannot hold `State` (or a `&Connection`) across an await.
+/// `youtube` carries the visitor data and auth session the YouTube watch-page provider
+/// needs, resolved from the same connection; `None` skips that provider (the on-demand
+/// lyrics path still covers it when the lyrics UI opens).
+/// Returns an empty list — never an error — so a lyrics failure can never break the fill.
+async fn fetch_all_enabled_lyrics_for_cache(
+    title: &str,
+    artist: &str,
+    duration: i32,
+    album: Option<&str>,
+    video_id: Option<&str>,
+    providers: Vec<String>,
+    youtube: Option<(&str, Option<&AuthSession>)>,
+) -> Vec<LyricsPayload> {
+    let mut results = Vec::new();
+    for provider in providers {
+        let result = timeout(
+            Duration::from_secs(12),
+            fetch_lyrics_provider_for_cache(
+                &provider, title, artist, duration, album, video_id, youtube,
+            ),
+        )
+        .await;
+        if let Ok(Ok(Some(payload))) = result {
+            results.push(payload);
+        }
+    }
+    results
 }
 
 async fn fetch_lyrics_inner(
@@ -6436,6 +6731,7 @@ fn allowed_setting(key: &str) -> bool {
             | "show_uploaded_playlist"
             | "show_top_playlist"
             | "show_cached_playlist"
+            | "likedSongsSync"
     )
 }
 
@@ -6904,9 +7200,11 @@ mod tests {
         write_file(&kept, 8);
         write_file(&cache.join("orphan.audio"), 8);
         write_file(&cache.join("abandoned.audio.part"), 8);
+        // `cached_at` must be fresh: an entry unplayed for 90 days is expired and pruned here too.
+        let now = now_seconds();
         db.execute(
-            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('kept', ?1, 8, 1, 'auto'), ('vanished', ?2, 8, 1, 'auto')",
-            params![kept.to_string_lossy().to_string(), cache.join("vanished.audio").to_string_lossy().to_string()],
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('kept', ?1, 8, ?3, 'auto'), ('vanished', ?2, 8, ?3, 'auto')",
+            params![kept.to_string_lossy().to_string(), cache.join("vanished.audio").to_string_lossy().to_string(), now],
         )
         .unwrap();
         let finished = downloads.join("finished.audio");
@@ -6944,8 +7242,71 @@ mod tests {
     }
 
     #[test]
+    fn player_cache_expiry_prunes_stale_entries_and_keeps_fresh_ones() {
+        let root = std::env::temp_dir().join(format!("soluna-expiry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cache = root.join("player-cache");
+        let downloads = root.join("downloads");
+        let db = cache_test_db();
+        let now = now_seconds();
+        let stale_at = now - player_cache::CACHE_MAX_AGE_SECS - 60;
+        let fresh = cache.join("fresh.audio");
+        let fresh_artwork = cache.join("fresh.cover");
+        let stale = cache.join("stale.audio");
+        let stale_artwork = cache.join("stale.cover");
+        for path in [&fresh, &fresh_artwork, &stale, &stale_artwork] {
+            write_file(path, 8);
+        }
+        db.execute(
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality, artwork_path) VALUES ('fresh', ?1, 8, ?3, 'auto', ?4), ('stale', ?2, 8, ?5, 'auto', ?6)",
+            params![fresh.to_string_lossy().to_string(), stale.to_string_lossy().to_string(), now, fresh_artwork.to_string_lossy().to_string(), stale_at, stale_artwork.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        let (deleted, _) = clean_media_dirs(&db, Some(&cache), Some(&downloads)).unwrap();
+        assert_eq!(deleted, 2, "the stale audio and its thumbnail are deleted");
+        assert!(
+            fresh.exists() && fresh_artwork.exists(),
+            "a recently played song keeps its files"
+        );
+        assert!(!stale.exists() && !stale_artwork.exists());
+        let left: Vec<String> = db
+            .prepare("SELECT song_id FROM player_cache ORDER BY song_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, vec!["fresh".to_owned()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn player_cache_limit_setting_is_validated() {
         assert!(allowed_setting("playerCacheLimitMb"));
+    }
+
+    #[test]
+    fn liked_songs_sync_setting_is_allowed() {
+        assert!(allowed_setting("likedSongsSync"));
+    }
+
+    #[test]
+    fn player_cache_artwork_lives_beside_the_cached_audio() {
+        let path = player_cache_artwork_path("song-1", "jpg");
+        assert!(path.to_string_lossy().contains("player-cache"));
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("jpg"));
+        assert_eq!(
+            player_cache_artwork_path("song-1", "bmp")
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("cover"),
+            "unknown artwork types fall back to the cover extension"
+        );
+        assert_ne!(
+            player_cache_artwork_path("song-1", "jpg"),
+            download_artwork_path("song-1", "jpg"),
+            "cache artwork must not share a file with download artwork"
+        );
     }
 
     #[test]
@@ -6956,8 +7317,8 @@ mod tests {
         let low = dir.join("low.audio");
         write_file(&low, 16);
         db.execute(
-            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('song', ?1, 16, 1, 'low')",
-            params![low.to_string_lossy().to_string()],
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('song', ?1, 16, ?2, 'low')",
+            params![low.to_string_lossy().to_string(), now_seconds()],
         )
         .unwrap();
         assert_eq!(
@@ -6973,6 +7334,24 @@ mod tests {
             None,
             "a vanished file is not served"
         );
+        // An entry unplayed for 90 days is expired: it is deleted and never served again.
+        let stale = dir.join("stale.audio");
+        write_file(&stale, 16);
+        db.execute(
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES ('stale', ?1, 16, ?2, 'low')",
+            params![stale.to_string_lossy().to_string(), now_seconds() - player_cache::CACHE_MAX_AGE_SECS - 60],
+        )
+        .unwrap();
+        assert_eq!(cached_player_file(&db, "stale", "low").unwrap(), None);
+        assert!(!stale.exists(), "the expired file is deleted");
+        let remaining: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM player_cache WHERE song_id = 'stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
         assert_eq!(normalize_audio_quality(Some("low")), "low");
         assert_eq!(normalize_audio_quality(Some("high")), "high");
         assert_eq!(normalize_audio_quality(Some("best")), "auto");
@@ -7088,6 +7467,234 @@ mod tests {
             "Song Name"
         );
         assert_eq!(clean_lyrics_title("Song Name [Lyrics]"), "Song Name");
+    }
+
+    #[test]
+    fn played_song_lyrics_store_uses_the_on_demand_cache_key() {
+        let db = cache_test_db();
+        let payloads = vec![
+            LyricsPayload {
+                lines: Vec::new(),
+                provider: "LrcLib".to_owned(),
+                text: "[00:01.00]Line one".to_owned(),
+                synced: true,
+                matched_title: "Song Name".to_owned(),
+                matched_artist: "Artist".to_owned(),
+            },
+            LyricsPayload {
+                lines: Vec::new(),
+                provider: "BetterLyrics".to_owned(),
+                text: "[00:01.00]Line one".to_owned(),
+                synced: true,
+                matched_title: "Song Name".to_owned(),
+                matched_artist: "Artist".to_owned(),
+            },
+        ];
+        cache_fetched_lyrics(&db, "Song Name (Official Video)", "Artist", &payloads).unwrap();
+        // The on-demand path reads the lyrics table first (same SELECT as fetch_lyrics_inner),
+        // so a played song's stored lyrics are found offline with no network.
+        let cached: Option<(String, String, i64)> = db
+            .query_row(
+                "SELECT provider, text, synced FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            cached,
+            Some(("LrcLib".to_owned(), "[00:01.00]Line one".to_owned(), 1))
+        );
+        // The first payload is also a variant, so both providers are kept for switching.
+        let variants: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM lyrics_variants WHERE song_id = ?1",
+                params!["lyrics:song name:artist"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(variants, 2);
+        // No providers means nothing stored.
+        cache_fetched_lyrics(&db, "Other Song", "Artist", &[]).unwrap();
+        let missing: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:other song:artist"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn played_song_lyrics_duration_prefers_stream_length_and_unknown_is_minus_one() {
+        // The library row carries 0 for every never-downloaded YouTube song; 0 must
+        // map to -1 (unknown) so LrcLib takes its similarity path instead of matching
+        // against a zero-length track and returning nothing.
+        assert_eq!(lyric_duration_for_cache(0, 0), -1);
+        assert_eq!(lyric_duration_for_cache(0, 200), 200);
+        assert_eq!(lyric_duration_for_cache(250, 0), 250);
+        assert_eq!(lyric_duration_for_cache(250, 200), 250);
+        assert_eq!(lyric_duration_for_cache(i64::MAX, 0), i32::MAX);
+    }
+
+    #[test]
+    fn played_song_lyrics_artist_resolution_matches_frontend_key() {
+        let db = cache_test_db();
+        db.execute(
+            "INSERT INTO songs (id, title, subtitle, video_id, kind, saved_at, duration) VALUES ('song-1', 'Song Name', 'Artist One • Album', 'video-1', 'song', 1, 0)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO artists (id, name, saved_at) VALUES ('a-1', 'Artist One', 1), ('a-2', 'Artist Two', 1)",
+            [],
+        )
+        .unwrap();
+        // Inserted out of order on purpose: position decides the order.
+        db.execute(
+            "INSERT INTO song_artists (song_id, artist_id, position) VALUES ('song-1', 'a-2', 1), ('song-1', 'a-1', 0)",
+            [],
+        )
+        .unwrap();
+        let names = song_artist_names(&db, "song-1").unwrap();
+        assert_eq!(
+            names,
+            vec!["Artist One".to_owned(), "Artist Two".to_owned()]
+        );
+        // The frontend builds its lyrics key from artists.join(", "); lyrics cached
+        // under the resolved artists must be found under that key. The key cleaner
+        // truncates at ", ", so the read key is "lyrics:song name:artist one".
+        let payloads = vec![LyricsPayload {
+            lines: Vec::new(),
+            provider: "LrcLib".to_owned(),
+            text: "[00:01.00]Line one".to_owned(),
+            synced: true,
+            matched_title: "Song Name".to_owned(),
+            matched_artist: "Artist One, Artist Two".to_owned(),
+        }];
+        cache_fetched_lyrics(&db, "Song Name", "Artist One, Artist Two", &payloads).unwrap();
+        let cached: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist one"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(cached, Some("LrcLib".to_owned()));
+        // Nothing is stored under the raw-subtitle key: that was the old bug, where
+        // the fill wrote lyrics the lyrics screen never read for search/home plays.
+        let subtitle_key: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist one • album"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(subtitle_key, None);
+        // No mapped artists: the subtitle is the fallback, as the frontend does.
+        assert!(song_artist_names(&db, "missing-song").unwrap().is_empty());
+    }
+
+    #[test]
+    fn played_song_lyrics_history_add_maps_artists_for_unsynced_songs() {
+        // The residual Bug 2 gap: a song played from search/home was never synced
+        // or saved, so it had no song_artists rows and the fill fell back to the
+        // raw subtitle key. history_add now upserts the mappings from the played
+        // item (via upsert_song_artists), so the lyrics land under the frontend
+        // key. history_add itself is a Tauri command and cannot be invoked in a
+        // unit test, so this exercises the exact helper it calls, on a song with
+        // no pre-existing mappings.
+        let db = cache_test_db();
+        db.execute(
+            "INSERT INTO songs (id, title, subtitle, video_id, kind, saved_at, duration) VALUES ('song-2', 'Song Name', 'Artist One • Album', 'video-2', 'song', 1, 0)",
+            [],
+        )
+        .unwrap();
+        // No song_artists rows yet: this is the never-synced case.
+        assert!(song_artist_names(&db, "song-2").unwrap().is_empty());
+        let item = YtItem {
+            id: "song-2".to_owned(),
+            kind: "song".to_owned(),
+            title: "Song Name".to_owned(),
+            subtitle: "Artist One • Album".to_owned(),
+            thumbnail: None,
+            artists: vec![
+                Artist {
+                    name: "Artist One".to_owned(),
+                    id: Some("a-1".to_owned()),
+                },
+                Artist {
+                    name: "Artist Two".to_owned(),
+                    id: Some("a-2".to_owned()),
+                },
+            ],
+            browse_id: None,
+            playlist_id: None,
+            video_id: Some("video-2".to_owned()),
+            set_video_id: None,
+            play_playlist_id: None,
+            play_video_id: None,
+            params: None,
+            explicit: false,
+            music_video_type: None,
+            history_remove_token: None,
+            album_id: None,
+            album_title: None,
+        };
+        upsert_song_artists(&db, &item, 1).unwrap();
+        let names = song_artist_names(&db, "song-2").unwrap();
+        assert_eq!(
+            names,
+            vec!["Artist One".to_owned(), "Artist Two".to_owned()]
+        );
+        // The fill joins them exactly as the frontend does, so the cached lyrics
+        // are found under the frontend key, not the subtitle key.
+        let payloads = vec![LyricsPayload {
+            lines: Vec::new(),
+            provider: "LrcLib".to_owned(),
+            text: "[00:01.00]Line one".to_owned(),
+            synced: true,
+            matched_title: "Song Name".to_owned(),
+            matched_artist: names.join(", "),
+        }];
+        cache_fetched_lyrics(&db, "Song Name", &names.join(", "), &payloads).unwrap();
+        let cached: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist one"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(cached, Some("LrcLib".to_owned()));
+        let subtitle_key: Option<String> = db
+            .query_row(
+                "SELECT provider FROM lyrics WHERE song_id = ?1",
+                params!["lyrics:song name:artist one • album"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(subtitle_key, None);
+        // Artists without an id (plain-text credits) cannot be mapped: the
+        // subtitle fallback remains for those, and no rows are written.
+        let item_no_ids = YtItem {
+            id: "song-2".to_owned(),
+            artists: vec![Artist {
+                name: "Plain Credit".to_owned(),
+                id: None,
+            }],
+            ..item.clone()
+        };
+        upsert_song_artists(&db, &item_no_ids, 1).unwrap();
+        assert_eq!(
+            song_artist_names(&db, "song-2").unwrap(),
+            vec!["Artist One".to_owned(), "Artist Two".to_owned()]
+        );
     }
 
     #[test]

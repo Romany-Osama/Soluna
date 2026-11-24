@@ -28,6 +28,7 @@ export function useSettingsState({ setNotice }: SettingsStateDeps) {
     enableLyricsPlus: false,
     enableMusixmatch: false,
     ytmSync: true,
+    likedSongsSync: true,
     similarContent: true,
     autoLoadMore: true,
     disableLoadMoreWhenRepeatAll: false,

@@ -302,6 +302,22 @@ export function SettingsScreen({
                     </label>
                     <label className="setting-row">
                       <span>
+                        <strong>Sync Liked Songs on app open</strong>
+                        <small>
+                          When enabled, Soluna syncs your YouTube Music Liked Songs each time the app opens while you
+                          are online, so new likes are picked up. Offline, the full liked list already stored in the
+                          local library stays available. Requires Sync YouTube Music library above.
+                        </small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        disabled={!sessionStatus.authenticated || settings.ytmSync === false}
+                        checked={settings.likedSongsSync !== false}
+                        onChange={(event) => void setSetting("likedSongsSync", event.target.checked)}
+                      />
+                    </label>
+                    <label className="setting-row">
+                      <span>
                         <strong>Use login for browse</strong>
                         <small>
                           Use the connected YouTube Music session for Home, search, details, playlists, and related

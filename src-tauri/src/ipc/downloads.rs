@@ -642,6 +642,15 @@ pub async fn playlist_download_start(
             "playlist download needs at least one song".to_owned(),
         ));
     }
+    // The cap above only saw the frontend-provided list; the backend top-up can grow the
+    // merged list past it, so enforce it again here before any artwork, membership or
+    // download work starts. (The active-download guard cleans the cancel map up on return.)
+    if merged.len() > 5_000 {
+        return Err(IpcError::from(format!(
+            "playlist download supports at most 5000 songs at once; this playlist has {}",
+            merged.len()
+        )));
+    }
     let artwork_path = cache_playlist_artwork(&playlist_id, playlist.thumbnail.as_deref()).await;
     let started_at = now_seconds();
     {

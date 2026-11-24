@@ -41,6 +41,18 @@ pub fn ytm_report_stream_failure(
         .map_err(|error| format!("player cache path read failed: {error}"))?;
     if let Some(path) = cached.filter(|path| path == &stream_url) {
         let _ = fs::remove_file(&path);
+        let artwork: Option<String> = db
+            .query_row(
+                "SELECT artwork_path FROM player_cache WHERE song_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("player cache artwork read failed: {error}"))?
+            .flatten();
+        if let Some(artwork) = artwork {
+            let _ = fs::remove_file(artwork);
+        }
         db.execute("DELETE FROM player_cache WHERE song_id = ?1", params![id])
             .map_err(|error| format!("player cache removal failed: {error}"))?;
     }
@@ -165,21 +177,24 @@ pub fn player_cache_clear(state: tauri::State<'_, RuntimeState>) -> IpcResult<us
         .db
         .lock()
         .map_err(|_| "database state poisoned".to_owned())?;
-    let paths: Vec<(String, String)> = db
-        .prepare("SELECT song_id, path FROM player_cache")
+    let paths: Vec<(String, String, Option<String>)> = db
+        .prepare("SELECT song_id, path, artwork_path FROM player_cache")
         .and_then(|mut statement| {
             statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect()
         })
         .map_err(|error| format!("player cache read failed: {error}"))?;
     let mut removed = 0;
-    for (song_id, path) in paths {
+    for (song_id, path, artwork_path) in paths {
         let gone = match fs::remove_file(&path) {
             Ok(()) => true,
             Err(error) => error.kind() == std::io::ErrorKind::NotFound,
         };
         if gone {
+            if let Some(artwork) = artwork_path {
+                let _ = fs::remove_file(artwork);
+            }
             db.execute(
                 "DELETE FROM player_cache WHERE song_id = ?1",
                 params![song_id],
@@ -197,16 +212,39 @@ pub fn library_player_cache(state: tauri::State<'_, RuntimeState>) -> IpcResult<
         .db
         .lock()
         .map_err(|_| "database state poisoned".to_owned())?;
-    let mut statement = db.prepare("SELECT s.id, s.kind, s.title, s.subtitle, s.thumbnail, s.browse_id, s.playlist_id, s.video_id, s.set_video_id, s.explicit, s.music_video_type, pc.path FROM player_cache pc INNER JOIN songs s ON s.id = pc.song_id WHERE pc.bytes > 0 AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.song_id = pc.song_id AND d.state = 'completed') ORDER BY pc.cached_at DESC").map_err(|error| format!("player cache query failed: {error}"))?;
+    // Entries unplayed for 90 days are expired: drop them (audio and thumbnail) instead of listing
+    // songs that no longer play offline.
+    let expired: Vec<String> = db
+        .prepare("SELECT song_id FROM player_cache WHERE cached_at < ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_map(
+                    params![now_seconds() - player_cache::CACHE_MAX_AGE_SECS],
+                    |row| row.get(0),
+                )?
+                .collect()
+        })
+        .map_err(|error| format!("player cache expiry query failed: {error}"))?;
+    for song_id in expired {
+        let _ = delete_player_cache_entry(&db, &song_id);
+    }
+    let mut statement = db.prepare("SELECT s.id, s.kind, s.title, s.subtitle, s.thumbnail, s.browse_id, s.playlist_id, s.video_id, s.set_video_id, s.explicit, s.music_video_type, pc.path, pc.artwork_path FROM player_cache pc INNER JOIN songs s ON s.id = pc.song_id WHERE pc.bytes > 0 AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.song_id = pc.song_id AND d.state = 'completed') ORDER BY pc.cached_at DESC").map_err(|error| format!("player cache query failed: {error}"))?;
     let rows = statement
         .query_map([], |row| {
+            // A cached thumbnail is the offline one: prefer the local file, fall back to the remote
+            // URL from the library row (same pattern as the downloads list).
+            let remote_thumbnail: Option<String> = row.get(4)?;
+            let artwork_path: Option<String> = row.get(12)?;
+            let thumbnail = artwork_path
+                .filter(|value| Path::new(value).is_file())
+                .or(remote_thumbnail);
             Ok((
                 YtItem {
                     id: row.get(0)?,
                     kind: row.get(1)?,
                     title: row.get(2)?,
                     subtitle: row.get(3)?,
-                    thumbnail: row.get(4)?,
+                    thumbnail,
                     artists: Vec::new(),
                     browse_id: row.get(5)?,
                     playlist_id: row.get(6)?,
@@ -262,16 +300,19 @@ pub fn player_cache_remove(
         .db
         .lock()
         .map_err(|_| "database state poisoned".to_owned())?;
-    if let Some(path) = db
+    if let Some((path, artwork_path)) = db
         .query_row(
-            "SELECT path FROM player_cache WHERE song_id = ?1",
+            "SELECT path, artwork_path FROM player_cache WHERE song_id = ?1",
             params![id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()
         .map_err(|error| format!("player cache path read failed: {error}"))?
     {
         let _ = fs::remove_file(path);
+        if let Some(artwork) = artwork_path {
+            let _ = fs::remove_file(artwork);
+        }
         let _ = fs::remove_file(format!("{}.part", player_cache_path(id).to_string_lossy()));
     }
     db.execute("DELETE FROM player_cache WHERE song_id = ?1", params![id])
@@ -331,6 +372,7 @@ pub async fn ytm_player(
     let payload =
         resolve_player_payload(&id, playlist_id.as_deref(), requested_quality, &state).await?;
     let cache_url = payload.stream_url.clone();
+    let payload_duration = payload.duration;
     let cache_id = id.clone();
     let cache_path = player_cache_path(&cache_id);
     let started = if cache_limit_mb == 0 {
@@ -351,7 +393,43 @@ pub async fn ytm_player(
                 fs::rename(&part_path, &cache_path).map_err(|error| format!("player cache finalize failed: {error}"))?;
                 if player_cache_is_blocked(&cache_id) { let _ = fs::remove_file(&cache_path); return Err("player cache was removed".to_owned()); }
                 let db = Connection::open(database_path()).map_err(|error| format!("player cache database open failed: {error}"))?;
-                db.execute("INSERT INTO player_cache (song_id, path, bytes, cached_at, quality) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(song_id) DO UPDATE SET path=excluded.path, bytes=excluded.bytes, cached_at=excluded.cached_at, quality=excluded.quality", params![cache_id, cache_path.to_string_lossy().to_string(), bytes, now_seconds(), requested_quality]).map_err(|error| format!("player cache state write failed: {error}"))?;
+                // The cached entry carries its thumbnail: a song played before keeps its artwork offline.
+                // The thumbnail URL comes from the library row; a failed or missing fetch leaves the
+                // artwork empty (non-fatal) and the remote URL stays the fallback in the cache list.
+                // The song row carries everything the offline fill needs: the thumbnail URL
+                // plus the title/duration the lyrics fetch matches on. The artist comes
+                // from the mapped artists (see below), not the subtitle.
+                let (song_id, title, subtitle, thumbnail, duration) = db.query_row("SELECT id, title, subtitle, thumbnail, duration FROM songs WHERE id = ?1 OR video_id = ?1", params![cache_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?))).optional().map_err(|error| format!("player cache song read failed: {error}"))?.unwrap_or_default();
+                let artwork_path = cache_player_artwork(&cache_id, thumbnail.as_deref()).await;
+                // The cached entry carries its lyrics too: a song played before keeps its lyrics
+                // offline, fetched from all enabled providers exactly like downloads do. The
+                // YouTube watch-page provider needs the visitor data and auth session, resolved
+                // here from the same database connection; without them it is skipped and the
+                // on-demand lyrics path still covers it. Best-effort — a failure here must
+                // never break the audio cache commit below.
+                if !title.trim().is_empty() {
+                    let visitor_data = setting_value(&db, "visitorData").ok().flatten().filter(|value| value.starts_with(VISITOR_PREFIX)).unwrap_or_default();
+                    let session = auth_session_from_db(&db).ok().flatten();
+                    let youtube = if visitor_data.is_empty() { None } else { Some((visitor_data.as_str(), session.as_ref())) };
+                    // The lyrics key must match what the lyrics screen reads: the song's
+                    // mapped artists, not the raw subtitle (YouTube subtitles interleave
+                    // artists with album and duration text). Fall back to the subtitle
+                    // when the song has no mapped artists. The mappings are written by
+                    // history_add, which the frontend invokes right after ytm_player
+                    // returns, while this fill only reads them after the audio download
+                    // finishes — so they are present in practice for a played song.
+                    let artist_names = song_artist_names(&db, &song_id).unwrap_or_default();
+                    let artist = if artist_names.is_empty() {
+                        subtitle
+                    } else {
+                        artist_names.join(", ")
+                    };
+                    let lyric_duration = lyric_duration_for_cache(payload_duration, duration);
+                    let providers = enabled_lyrics_providers(&db);
+                    let lyrics_results = fetch_all_enabled_lyrics_for_cache(&title, &artist, lyric_duration, None, Some(cache_id.as_str()), providers, youtube).await;
+                    let _ = cache_fetched_lyrics(&db, &title, &artist, &lyrics_results);
+                }
+                db.execute("INSERT INTO player_cache (song_id, path, bytes, cached_at, quality, artwork_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(song_id) DO UPDATE SET path=excluded.path, bytes=excluded.bytes, cached_at=excluded.cached_at, quality=excluded.quality, artwork_path=COALESCE(excluded.artwork_path, player_cache.artwork_path)", params![cache_id, cache_path.to_string_lossy().to_string(), bytes, now_seconds(), requested_quality, artwork_path]).map_err(|error| format!("player cache state write failed: {error}"))?;
                 enforce_player_cache_quota(&db)?;
                 Ok(())
             }.await;
