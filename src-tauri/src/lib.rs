@@ -419,6 +419,9 @@ impl RuntimeState {
                 Self::fail_to_start("Could not create the app data folder", error);
             }
         }
+        // A restore interrupted by a crash can leave no live database at all (M6). Repair that
+        // before opening, or the open below would silently create a fresh empty library.
+        recover_interrupted_restore(&path);
         let db = match Connection::open(&path) {
             Ok(db) => db,
             Err(error) => Self::fail_to_start(
@@ -429,6 +432,10 @@ impl RuntimeState {
         if let Err(error) = initialize_database(&db, &secrets::KeyringStore) {
             Self::fail_to_start("Could not initialize the database schema", error);
         }
+        // The live database opened and migrated: the pre-restore safety copy is retired
+        // (D3-144 / S5-051). A restore that crashed leaves the fallback in place because
+        // recovery above runs first and a failed open/initialise never reaches this line.
+        discard_stale_restore_fallback(&path);
         // The data folder was renamed from "Meld Desktop" (see `database_path`); stored file paths still name the old one.
         if let Some(data_dir) = path.parent() {
             let _ = legacy_paths::rewrite_data_dir_paths(
@@ -469,6 +476,129 @@ fn database_path() -> PathBuf {
         let _ = fs::rename(&legacy_db, &db_path);
     }
     db_path
+}
+
+/// Siblings of the live database used by the crash-safe restore protocol (M6 / D3-152).
+/// `backup_restore` stages the restored database at `restore.part`, keeps the pre-restore live
+/// database at `restore.previous`, and writes `restore.journal` before the swap starts.
+fn restore_staged_path(db_path: &Path) -> PathBuf {
+    db_path.with_extension("restore.part")
+}
+
+fn restore_previous_path(db_path: &Path) -> PathBuf {
+    db_path.with_extension("restore.previous")
+}
+
+fn restore_journal_path(db_path: &Path) -> PathBuf {
+    db_path.with_extension("restore.journal")
+}
+
+/// Flush a file's contents to stable storage. A restore must not promote a staged database whose
+/// bytes might still be sitting in the OS page cache when the machine loses power.
+fn sync_file(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+/// Flush a directory entry to stable storage, so a rename (or a file creation) survives a crash.
+/// Best-effort: opening a directory needs `FILE_FLAG_BACKUP_SEMANTICS` on Windows, and some
+/// filesystems do not support it at all. The recovery journal makes every swap state recoverable
+/// even when a directory sync is skipped, so a failure here never aborts a restore.
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        // FILE_FLAG_BACKUP_SEMANTICS (0x02000000): required to open a directory handle on Windows.
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0x0200_0000)
+            .open(path)?
+            .sync_all()
+    }
+}
+
+/// The same two checks `backup_restore` applies to a staged database before promoting it:
+/// `PRAGMA integrity_check` must be `ok` and the four Soluna tables must exist. Recovery uses
+/// this before promoting a leftover staged file, so a half-written extract can never become live.
+/// Opened read-only, so a candidate is never created or modified by the check itself.
+fn restored_database_is_valid(path: &Path) -> bool {
+    let Ok(candidate) =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return false;
+    };
+    let Ok(integrity): Result<String, _> =
+        candidate.query_row("PRAGMA integrity_check", [], |row| row.get(0))
+    else {
+        return false;
+    };
+    if integrity != "ok" {
+        return false;
+    }
+    let Ok(required_tables): Result<i64, _> = candidate.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('songs', 'settings', 'history', 'downloads')",
+        [],
+        |row| row.get(0),
+    ) else {
+        return false;
+    };
+    required_tables == 4
+}
+
+/// Recover from a backup restore interrupted by a crash (M6 / D3-152). Runs before the live
+/// database is opened, so the app never starts on a fresh empty library while a usable database
+/// is sitting next to it.
+///
+/// The files left behind tell the story:
+/// - live present: the swap either never started (staged + journal present) or already finished
+///   (staged gone). Either way the live database is authoritative; drop the staged leftover and
+///   the journal. The previous database is kept as a fallback (D3-144 / S5-051).
+/// - live missing, staged present and valid: the crash happened between the two renames. Complete
+///   the swap by promoting the staged database to live.
+/// - live missing, staged absent or invalid, previous present: the crash happened after the live
+///   database was moved aside. This is also the state the pre-journal two-rename swap left
+///   behind, so a crash from the old code is recovered the same way. Roll back by promoting the
+///   previous database to live.
+/// - live missing and nothing usable left: nothing to recover; the caller creates a fresh database.
+fn recover_interrupted_restore(db_path: &Path) {
+    let previous_path = restore_previous_path(db_path);
+    let staged_path = restore_staged_path(db_path);
+    let journal_path = restore_journal_path(db_path);
+    if db_path.exists() {
+        let _ = fs::remove_file(&staged_path);
+        let _ = fs::remove_file(&journal_path);
+        return;
+    }
+    let mut recovered = false;
+    let staged_valid = staged_path.exists() && restored_database_is_valid(&staged_path);
+    if staged_valid {
+        recovered = fs::rename(&staged_path, db_path).is_ok();
+    }
+    if !recovered && previous_path.exists() {
+        recovered = fs::rename(&previous_path, db_path).is_ok();
+    }
+    if recovered {
+        if let Some(parent) = db_path.parent() {
+            let _ = sync_dir(parent);
+        }
+    }
+    if recovered || !staged_valid {
+        // A staged file that was promoted is already gone; one that failed validation can never
+        // become live, so it is a leftover, not a fallback — except when the rename itself
+        // failed, in which case a valid staged file is kept for the next launch to retry.
+        let _ = fs::remove_file(&staged_path);
+    }
+    let _ = fs::remove_file(&journal_path);
+}
+
+/// Retire the pre-restore safety copy (D3-144 / S5-051). Called only after the live database has
+/// opened and initialised successfully, so this launch proves the restored database works; the
+/// fallback's job is done. A later restore replaces it with a fresh one.
+fn discard_stale_restore_fallback(db_path: &Path) {
+    let _ = fs::remove_file(restore_previous_path(db_path));
 }
 
 fn now_seconds() -> i64 {
@@ -8760,6 +8890,175 @@ mod tests {
         assert_eq!(listened_minutes(&db, 0).expect("minutes"), 4); // 60 s measured + 180 s fallback
         assert_eq!(listened_minutes(&db, 101).expect("minutes"), 0);
     }
+
+    // --- M6: crash-safe backup restore (begin) ---
+    fn m6_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "soluna-m6-test-{}-{}-{name}",
+            std::process::id(),
+            now_millis()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("m6 test dir");
+        dir
+    }
+
+    fn m6_seed_db(path: &Path, title: &str) {
+        let db = Connection::open(path).expect("seed db");
+        db.execute_batch(SCHEMA_SQL).expect("schema");
+        db.execute(
+            "INSERT INTO songs (id, title, kind, saved_at) VALUES ('s1', ?1, 'song', 0)",
+            params![title],
+        )
+        .expect("seed song");
+    }
+
+    fn m6_titles(path: &Path) -> Vec<String> {
+        let db = Connection::open(path).expect("open db");
+        let mut statement = db
+            .prepare("SELECT title FROM songs ORDER BY id")
+            .expect("prepare");
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect()
+    }
+
+    /// The crash window in the old two-rename swap: the live database was renamed aside and the
+    /// staged one never took its place. With no journal and no recovery, the next start created a
+    /// fresh empty library and the old data was orphaned in `restore.previous`.
+    #[test]
+    fn restore_recovery_brings_back_previous_when_live_is_missing() {
+        let dir = m6_test_dir("previous");
+        let live = dir.join("soluna.sqlite3");
+        let previous = restore_previous_path(&live);
+        m6_seed_db(&previous, "Old Library Song");
+        // No journal: this is exactly what the pre-fix swap left behind.
+        assert!(!live.exists());
+        recover_interrupted_restore(&live);
+        assert_eq!(m6_titles(&live), vec!["Old Library Song"]);
+        assert!(!previous.exists(), "previous was promoted, not copied");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_recovery_completes_swap_when_staged_is_valid() {
+        let dir = m6_test_dir("staged");
+        let live = dir.join("soluna.sqlite3");
+        let staged = restore_staged_path(&live);
+        let previous = restore_previous_path(&live);
+        m6_seed_db(&staged, "Restored Library Song");
+        m6_seed_db(&previous, "Old Library Song");
+        fs::write(restore_journal_path(&live), "restore in progress").expect("journal");
+        assert!(!live.exists());
+        recover_interrupted_restore(&live);
+        assert_eq!(m6_titles(&live), vec!["Restored Library Song"]);
+        assert!(!staged.exists(), "staged was promoted, not copied");
+        assert!(previous.exists(), "previous is kept as the fallback");
+        assert_eq!(m6_titles(&previous), vec!["Old Library Song"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_recovery_refuses_corrupt_staged_and_falls_back_to_previous() {
+        let dir = m6_test_dir("corrupt-staged");
+        let live = dir.join("soluna.sqlite3");
+        let staged = restore_staged_path(&live);
+        let previous = restore_previous_path(&live);
+        fs::write(&staged, b"this is not a database at all").expect("staged");
+        m6_seed_db(&previous, "Old Library Song");
+        recover_interrupted_restore(&live);
+        assert_eq!(m6_titles(&live), vec!["Old Library Song"]);
+        assert!(!staged.exists(), "invalid staged leftover must not linger");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_recovery_leaves_live_alone_and_cleans_stale_staged() {
+        let dir = m6_test_dir("live-present");
+        let live = dir.join("soluna.sqlite3");
+        let staged = restore_staged_path(&live);
+        let previous = restore_previous_path(&live);
+        m6_seed_db(&live, "Live Library Song");
+        m6_seed_db(&staged, "Restored Library Song");
+        m6_seed_db(&previous, "Old Library Song");
+        fs::write(restore_journal_path(&live), "restore in progress").expect("journal");
+        recover_interrupted_restore(&live);
+        // The live database is authoritative: the restore never visibly happened, so roll back.
+        assert_eq!(m6_titles(&live), vec!["Live Library Song"]);
+        assert!(!staged.exists());
+        assert!(!restore_journal_path(&live).exists());
+        assert!(previous.exists(), "previous is kept as the fallback");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_swap_keeps_previous_as_fallback() {
+        let dir = m6_test_dir("swap");
+        let live = dir.join("soluna.sqlite3");
+        let staged = restore_staged_path(&live);
+        let previous = restore_previous_path(&live);
+        m6_seed_db(&live, "Old Library Song");
+        m6_seed_db(&staged, "Restored Library Song");
+        crate::ipc::backup::swap_restored_database(&live, &staged).expect("swap");
+        assert_eq!(m6_titles(&live), vec!["Restored Library Song"]);
+        assert!(previous.exists(), "previous is kept as the fallback");
+        assert_eq!(m6_titles(&previous), vec!["Old Library Song"]);
+        assert!(!staged.exists());
+        assert!(!restore_journal_path(&live).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The full next-start sequence (the order `RuntimeState::new` runs it): recover, open,
+    /// initialise. A simulated interrupted restore must never end in an empty library.
+    #[test]
+    fn restore_interrupted_swap_never_starts_with_an_empty_library() {
+        let dir = m6_test_dir("next-start");
+        let live = dir.join("soluna.sqlite3");
+        let staged = restore_staged_path(&live);
+        let previous = restore_previous_path(&live);
+        m6_seed_db(&staged, "Restored Library Song");
+        m6_seed_db(&previous, "Old Library Song");
+        fs::write(restore_journal_path(&live), "restore in progress").expect("journal");
+        // --- the startup sequence, in `RuntimeState::new` order ---
+        recover_interrupted_restore(&live);
+        let db = Connection::open(&live).expect("open recovered live db");
+        initialize_database(&db, &MemKeyStore(Mutex::new(None))).expect("init");
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM songs", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "next start must see the restored library, not an empty one"
+        );
+        assert_eq!(m6_titles(&live), vec!["Restored Library Song"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// D3-144 / S5-051: the pre-restore database is kept until the app has reopened successfully
+    /// once; that successful launch is what retires the safety copy.
+    #[test]
+    fn restore_previous_is_retired_after_the_next_successful_launch() {
+        let dir = m6_test_dir("retire-previous");
+        let live = dir.join("soluna.sqlite3");
+        let previous = restore_previous_path(&live);
+        m6_seed_db(&live, "Live Library Song");
+        m6_seed_db(&previous, "Old Library Song");
+        // --- the startup sequence, in `RuntimeState::new` order ---
+        recover_interrupted_restore(&live);
+        let db = Connection::open(&live).expect("open live db");
+        initialize_database(&db, &MemKeyStore(Mutex::new(None))).expect("init");
+        discard_stale_restore_fallback(&live);
+        assert_eq!(m6_titles(&live), vec!["Live Library Song"]);
+        assert!(
+            !previous.exists(),
+            "fallback is retired after a successful launch"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- M6: crash-safe backup restore (end) ---
 
     // --- regression tests for the review fixes (end) ---
 }

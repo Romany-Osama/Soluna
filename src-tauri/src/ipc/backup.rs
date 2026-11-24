@@ -75,6 +75,64 @@ pub fn backup_create(state: tauri::State<'_, RuntimeState>) -> IpcResult<String>
     Ok(result.map(|_| output_path.to_string_lossy().to_string())?)
 }
 
+/// Crash-safe swap of the staged database into place (M6 / D3-152).
+///
+/// Order matters; a crash at ANY point must leave either the old live database or the restored
+/// database as the live database, and startup recovery (`recover_interrupted_restore`) must be
+/// able to finish or roll back from the files left behind:
+/// 1. fsync the staged file, so its bytes are on disk before it can become live. A failure here
+///    aborts the restore with the live database untouched.
+/// 2. Write + fsync the journal, then fsync the directory: from here on, a crash is recoverable.
+/// 3. Rename live -> previous. The old live database is preserved as a fallback; it is NOT
+///    deleted here (D3-144 / S5-051). If the live file is already gone there is nothing to
+///    preserve and the swap continues.
+/// 4. Rename staged -> live. A crash between 3 and 4 leaves no live database — exactly the
+///    state recovery repairs by promoting the staged file (or, if it is unusable, the previous
+///    one). If this rename fails while the process is still alive, roll the first rename back.
+/// 5. fsync the directory so both renames are durable, then remove the journal and fsync again.
+pub(crate) fn swap_restored_database(db_path: &Path, staged_path: &Path) -> Result<(), String> {
+    let previous_path = restore_previous_path(db_path);
+    let journal_path = restore_journal_path(db_path);
+    sync_file(staged_path)
+        .map_err(|error| format!("restore staged database sync failed: {error}"))?;
+    fs::write(&journal_path, "soluna restore in progress\n")
+        .map_err(|error| format!("restore journal write failed: {error}"))?;
+    if let Err(error) = sync_file(&journal_path) {
+        let _ = fs::remove_file(&journal_path);
+        return Err(format!("restore journal sync failed: {error}"));
+    }
+    if let Some(parent) = db_path.parent() {
+        let _ = sync_dir(parent);
+    }
+    let moved_old = match fs::rename(db_path, &previous_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            let _ = fs::remove_file(&journal_path);
+            return Err(format!(
+                "restore could not move the live database aside: {error}"
+            ));
+        }
+    };
+    if let Err(error) = fs::rename(staged_path, db_path) {
+        if moved_old {
+            let _ = fs::rename(&previous_path, db_path);
+        }
+        let _ = fs::remove_file(&journal_path);
+        return Err(format!(
+            "restore could not move the staged database into place: {error}"
+        ));
+    }
+    if let Some(parent) = db_path.parent() {
+        let _ = sync_dir(parent);
+    }
+    let _ = fs::remove_file(&journal_path);
+    if let Some(parent) = db_path.parent() {
+        let _ = sync_dir(parent);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String> {
     let input_path = FileDialog::new()
@@ -161,7 +219,7 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
     drop(candidate);
 
     let db_path = database_path();
-    let previous_path = db_path.with_extension("restore.previous");
+    let previous_path = restore_previous_path(&db_path);
     let mut db = state
         .db
         .lock()
@@ -170,12 +228,10 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
         .map_err(|error| format!("restore temporary connection failed: {error}"))?;
     let old = std::mem::replace(&mut *db, replacement);
     drop(old);
-    let _ = fs::remove_file(&previous_path);
-    let swap_result =
-        fs::rename(&db_path, &previous_path).and_then(|_| fs::rename(&temp_db, &db_path));
-    if let Err(error) = swap_result {
-        let _ = fs::rename(&temp_db, &db_path);
-        let _ = fs::rename(&previous_path, &db_path);
+    if let Err(error) = swap_restored_database(&db_path, &temp_db) {
+        // The swap rolled itself back where possible; reopen whatever is live now (the old
+        // database if the rollback worked). If the live file is gone, the next launch recovers
+        // it from the staged or previous file instead of starting empty.
         if let Ok(old_connection) = Connection::open(&db_path) {
             *db = old_connection;
         }
@@ -186,7 +242,8 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
     match Connection::open(&db_path) {
         Ok(restored) => {
             *db = restored;
-            let _ = fs::remove_file(&previous_path);
+            // The previous database is deliberately kept: it is the fallback until the next
+            // successful launch (D3-144 / S5-051), which retires it.
             Ok(input_path.to_string_lossy().to_string())
         }
         Err(error) => {
