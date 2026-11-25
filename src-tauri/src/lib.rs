@@ -251,6 +251,13 @@ const SCHEMA_SQL: &str = "PRAGMA foreign_keys = ON;
 /// still accepted when the schema checks pass. A restored database carrying a
 /// higher version was written by a newer Soluna than this build and must not be
 /// trusted: this build cannot know what its schema means.
+///
+/// 1 is the first versioned schema: every `ALTER TABLE` in
+/// `MIGRATION_ADD_COLUMNS` applied (M10). Bump this when a future migration
+/// adds statements, and gate the new statements on the recorded version (see
+/// `initialize_database`). The stamp is written only inside the migration
+/// transaction, only when migration actually runs — never best-effort, so a
+/// higher version written by a newer build is never downgraded.
 const SCHEMA_VERSION: i64 = 1;
 
 /// The tables — and the columns `initialize_database` cannot add — that a restored
@@ -457,78 +464,148 @@ struct SessionStatus {
     account_avatar: Option<String>,
 }
 
+/// Every column the migration adds, in the order they were introduced. The SQL strings are unchanged from the
+/// original inline `ALTER TABLE` calls; collecting them here keeps the migration loop, and its transaction, in one
+/// place. `SCHEMA_SQL` already defines most of these columns for fresh databases, so on an old database most of
+/// these are no-ops — except `podcasts.detail_json`, which only this list adds.
+const MIGRATION_ADD_COLUMNS: &[&str] = &[
+    "ALTER TABLE songs ADD COLUMN set_video_id TEXT",
+    "ALTER TABLE songs ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN music_video_type TEXT",
+    "ALTER TABLE songs ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN liked_date INTEGER",
+    "ALTER TABLE songs ADD COLUMN in_library INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN is_video INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN uploaded INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN youtube_liked INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN album_id TEXT",
+    "ALTER TABLE songs ADD COLUMN duration INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN is_local INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN local_path TEXT",
+    "ALTER TABLE songs ADD COLUMN date_modified INTEGER",
+    "ALTER TABLE downloads ADD COLUMN total_bytes INTEGER",
+    "ALTER TABLE downloads ADD COLUMN state TEXT NOT NULL DEFAULT 'completed'",
+    "ALTER TABLE downloads ADD COLUMN error TEXT",
+    "ALTER TABLE downloads ADD COLUMN lyrics_cached INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE downloads ADD COLUMN artwork_path TEXT",
+    "ALTER TABLE albums ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE playlists ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+    "ALTER TABLE podcasts ADD COLUMN detail_json TEXT",
+    "ALTER TABLE history ADD COLUMN play_time_ms INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE player_cache ADD COLUMN quality TEXT NOT NULL DEFAULT 'auto'",
+    "ALTER TABLE player_cache ADD COLUMN artwork_path TEXT",
+];
+
+/// Reads the recorded schema version (`PRAGMA user_version`, 0 when never stamped).
+fn schema_user_version(db: &Connection) -> rusqlite::Result<i64> {
+    db.query_row("PRAGMA user_version", [], |row| row.get(0))
+}
+
+/// Runs one migration `ALTER TABLE ... ADD COLUMN`. The expected re-run case — a previous start already added the
+/// column — fails with "duplicate column name: <table>.<column>" and is swallowed, preserving the migration's
+/// idempotency. Any other failure (a missing table, adding a column to a view, a bad default, ...) is genuine and
+/// is returned so startup fails loudly instead of booting on a half-migrated schema.
+fn add_column_if_missing(db: &Connection, sql: &str) -> rusqlite::Result<()> {
+    match db.execute(sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Path of the pre-migration backup for a file-backed database: a sibling of the live file
+/// (`soluna.sqlite3` -> `soluna.migration-backup`, the same `with_extension` convention as the M6 restore
+/// files). Returns `None` when there is nothing worth snapshotting: an in-memory or temporary database
+/// (`Connection::path` is `""`), or a brand-new, still-empty file (a fresh install has no user data to roll
+/// back to). The backup is deliberately kept after a successful migration — it is the rollback target if the
+/// migrated database ever turns out to be bad, and the next migration overwrites it with a fresh snapshot.
+/// Note it is a byte-for-byte snapshot of the pre-migration database, so a database upgraded from a version
+/// that stored session secrets in plaintext still holds those plaintext secrets in the backup; restoring it
+/// re-runs the same upgrade path, which seals them again.
+fn migration_backup_path(db: &Connection) -> Option<PathBuf> {
+    let path_str = db.path()?;
+    if path_str.is_empty() || path_str == ":memory:" {
+        return None;
+    }
+    let path = Path::new(path_str);
+    if fs::metadata(path).map_or(0, |metadata| metadata.len()) == 0 {
+        return None;
+    }
+    Some(path.with_extension("migration-backup"))
+}
+
+/// Copies the live database to its `*.migration-backup` sibling with SQLite's online backup API, before any
+/// schema change is applied. The backup runs against the open connection, so it sees a consistent snapshot
+/// even while the file is open; the destination is a fresh file, so a stale backup from an earlier interrupted
+/// migration is superseded, never merged. A failure here aborts the migration (and therefore startup):
+/// migrating without a rollback target is exactly the hazard this exists to remove. A partial copy left by a
+/// failed backup is deleted so it can never be mistaken for a valid rollback target.
+fn backup_database_before_migration(db: &Connection) -> rusqlite::Result<()> {
+    let Some(backup_path) = migration_backup_path(db) else {
+        return Ok(());
+    };
+    let _ = fs::remove_file(&backup_path);
+    let backup_result = (|| -> rusqlite::Result<()> {
+        let mut dest = Connection::open(&backup_path)?;
+        let backup = rusqlite::backup::Backup::new(db, &mut dest)?;
+        backup.run_to_completion(100, Duration::from_millis(10), None)?;
+        drop(backup);
+        drop(dest);
+        Ok(())
+    })();
+    if let Err(error) = backup_result {
+        let _ = fs::remove_file(&backup_path);
+        return Err(error);
+    }
+    // Best-effort durability for the copy: closing the destination already flushed its pages, so a failed
+    // fsync must not fail startup when the backup itself is complete.
+    let _ = sync_file(&backup_path);
+    Ok(())
+}
+
 /// Creates or upgrades the schema of an existing database (any released version from v0.1.0 to v0.1.8), recovers
 /// interrupted downloads, and seals plaintext session secrets. Separate from `RuntimeState::new` so upgrade tests can
 /// run it against a real older database file with an in-memory key store.
+///
+/// Migration (M10): before any schema change, a database whose recorded schema version is older than
+/// `SCHEMA_VERSION` is snapshotted to a sibling `*.migration-backup` file, the column additions run inside
+/// one transaction together with the version stamp, and a genuine `ALTER TABLE` failure aborts startup (via
+/// `RuntimeState::new`'s `fail_to_start`) instead of being silently swallowed. A crash mid-migration therefore
+/// leaves either the old schema (version stamp rolled back, backup next to the database) or the new one, never a
+/// half-migrated mix with no record of how far it got.
 fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqlite::Result<()> {
+    let version = schema_user_version(db)?;
+    let needs_migration = version < SCHEMA_VERSION;
+    if needs_migration {
+        backup_database_before_migration(db)?;
+    }
     db.execute_batch(SCHEMA_SQL)?;
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN set_video_id TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN music_video_type TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN liked_date INTEGER", []);
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN in_library INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN is_video INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN uploaded INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN youtube_liked INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN album_id TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN duration INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN is_local INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN local_path TEXT", []);
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN date_modified INTEGER", []);
-    let _ = db.execute("ALTER TABLE downloads ADD COLUMN total_bytes INTEGER", []);
-    let _ = db.execute(
-        "ALTER TABLE downloads ADD COLUMN state TEXT NOT NULL DEFAULT 'completed'",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE downloads ADD COLUMN error TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE downloads ADD COLUMN lyrics_cached INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE downloads ADD COLUMN artwork_path TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE albums ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE playlists ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE podcasts ADD COLUMN detail_json TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE history ADD COLUMN play_time_ms INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE player_cache ADD COLUMN quality TEXT NOT NULL DEFAULT 'auto'",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE player_cache ADD COLUMN artwork_path TEXT", []);
+    if needs_migration {
+        // One transaction for the whole migration, so a crash or a genuine failure cannot leave a partial set of
+        // columns behind. `PRAGMA user_version` is written through the pager, so the stamp commits — or rolls
+        // back — with the ALTERs. SCHEMA_SQL stays outside the transaction on purpose: it starts with
+        // `PRAGMA foreign_keys = ON`, which is a no-op inside a transaction, and its `CREATE TABLE IF NOT
+        // EXISTS` statements never modify existing data.
+        db.execute_batch("BEGIN IMMEDIATE")?;
+        let migrated = (|| -> rusqlite::Result<()> {
+            for sql in MIGRATION_ADD_COLUMNS {
+                add_column_if_missing(db, sql)?;
+            }
+            db.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+            Ok(())
+        })();
+        match migrated {
+            Ok(()) => db.execute_batch("COMMIT")?,
+            Err(error) => {
+                let _ = db.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
+    }
     // A download cannot survive a restart; rows still marked "downloading" are leftovers of a crash or forced quit.
     // Mark them cancelled (not failed) so the retained `.part` file stays resumable (v0.1.8 resume, see DECISIONS D-002).
     let _ = db.execute("UPDATE downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
@@ -537,9 +614,6 @@ fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqli
     let _ = db.execute("UPDATE playlist_downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
     // Encrypt any session secret still stored as plaintext by an older version. Failure keeps the session working.
     let _ = secrets::migrate_with(db, store);
-    // Stamp the schema version this build understands (M7). Best-effort: a stamp
-    // failure must not fail startup, and an unstamped database is still usable.
-    let _ = db.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
     Ok(())
 }
 
@@ -8935,6 +9009,212 @@ mod tests {
             Some("SAPISID=V018PLAINCOOKIE0123456789; __Secure-3PSID=V018PLAINPSID")
         );
         drop(db);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn has_column(db: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = db
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("table_info");
+        let mut rows = stmt.query([]).expect("query");
+        while let Some(row) = rows.next().expect("row") {
+            let name: String = row.get(1).expect("column name");
+            if name == column {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// M10: migrating a genuinely old database records the schema version and leaves a pre-migration backup.
+    /// The old schema here is the real old shape — tables without the columns the migration adds — not the
+    /// v0.1.8 fixture, whose CREATE TABLEs already contain most of them.
+    #[test]
+    fn migration_records_version_and_keeps_pre_migration_backup() {
+        let dir = m6_test_dir("m10-migration-backup");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("old db");
+            old.execute_batch(
+                "CREATE TABLE songs (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE playlists (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE playlist_songs (playlist_id TEXT NOT NULL, position INTEGER NOT NULL, song_id TEXT NOT NULL, PRIMARY KEY (playlist_id, position));
+                 CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, song_id TEXT NOT NULL, played_at INTEGER NOT NULL);
+                 CREATE TABLE downloads (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, downloaded_at INTEGER NOT NULL);
+                 CREATE TABLE albums (id TEXT PRIMARY KEY, title TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE podcasts (id TEXT PRIMARY KEY, title TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE player_cache (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, cached_at INTEGER NOT NULL);
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO songs (id, title, kind, saved_at) VALUES ('s1', 'Old Song', 'song', 1700000000000);",
+            )
+            .expect("old schema");
+        }
+        let backup_path = path.with_extension("migration-backup");
+        assert!(!backup_path.exists(), "premise: no backup before migration");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        for (table, column) in [
+            ("songs", "liked"),
+            ("songs", "date_modified"),
+            ("downloads", "artwork_path"),
+            ("albums", "liked"),
+            ("playlists", "source"),
+            ("podcasts", "detail_json"),
+            ("history", "play_time_ms"),
+            ("player_cache", "artwork_path"),
+        ] {
+            assert!(
+                has_column(&db, table, column),
+                "{table}.{column} added by migration"
+            );
+        }
+        drop(db);
+
+        // The backup is the database as it was before the migration: same song, old schema, version 0.
+        assert!(backup_path.exists(), "pre-migration backup exists");
+        let backup = Connection::open(&backup_path).expect("open backup");
+        assert_eq!(schema_user_version(&backup).expect("backup version"), 0);
+        assert!(
+            !has_column(&backup, "songs", "liked"),
+            "backup predates the migration"
+        );
+        assert!(!has_column(&backup, "podcasts", "detail_json"));
+        assert_eq!(
+            backup
+                .query_row("SELECT COUNT(*) FROM songs", [], |row| row.get::<_, i64>(0))
+                .expect("count"),
+            1,
+            "backup keeps the library"
+        );
+        assert_eq!(
+            backup
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .expect("integrity"),
+            "ok"
+        );
+        drop(backup);
+        let backup_bytes = fs::read(&backup_path).expect("read backup");
+
+        // A second start is still a no-op: the version is already current, so no new backup is taken and
+        // the old one is left untouched.
+        let db = Connection::open(&path).expect("reopen");
+        initialize_database(&db, &store).expect("second start is a no-op");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        drop(db);
+        assert_eq!(
+            fs::read(&backup_path).expect("reread backup"),
+            backup_bytes,
+            "second start leaves the backup untouched"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: the expected duplicate-column re-run is swallowed; a genuine ALTER failure is not.
+    #[test]
+    fn migration_add_column_only_swallows_duplicate_column() {
+        let db = Connection::open_in_memory().expect("db");
+        db.execute_batch(SCHEMA_SQL).expect("schema");
+        // Re-adding a column the schema already has is the idempotent re-run case.
+        add_column_if_missing(
+            &db,
+            "ALTER TABLE songs ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
+        )
+        .expect("duplicate column is expected");
+        add_column_if_missing(
+            &db,
+            "ALTER TABLE songs ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
+        )
+        .expect("duplicate column is expected on repeat");
+        // A genuine failure — no such table — must surface.
+        let error = add_column_if_missing(&db, "ALTER TABLE no_such_table ADD COLUMN x TEXT")
+            .expect_err("genuine failure must surface");
+        assert!(
+            format!("{error}").contains("no such table"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// M10: a genuine ALTER failure aborts the migration, rolls the earlier ALTERs back, and leaves the
+    /// pre-migration backup behind. The sabotage replaces `history` with a view after the schema is built:
+    /// `SCHEMA_SQL` skips it (`CREATE TABLE IF NOT EXISTS` is a no-op against the name), then the `history`
+    /// ALTER fails with "Cannot add a column to a view" — after the `podcasts.detail_json` ALTER, so without
+    /// the transaction that column would survive the failure.
+    #[test]
+    fn migration_genuine_failure_surfaces_and_rolls_back() {
+        let dir = m6_test_dir("m10-migration-failure");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let db = Connection::open(&path).expect("db");
+            db.execute_batch(SCHEMA_SQL).expect("schema");
+            db.execute_batch(
+                "DROP TABLE history;
+                 CREATE VIEW history AS SELECT 1 AS id, 'x' AS song_id, 0 AS played_at;",
+            )
+            .expect("sabotage");
+            assert!(
+                !has_column(&db, "podcasts", "detail_json"),
+                "premise: detail_json not yet added"
+            );
+        }
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        let error =
+            initialize_database(&db, &store).expect_err("genuine ALTER failure must surface");
+        assert!(
+            format!("{error}").contains("Cannot add a column to a view"),
+            "unexpected error: {error}"
+        );
+        // The transaction rolled the earlier ALTERs back with the version stamp.
+        assert_eq!(schema_user_version(&db).expect("version"), 0);
+        assert!(
+            !has_column(&db, "podcasts", "detail_json"),
+            "failed migration rolls back"
+        );
+        drop(db);
+        // The backup was still taken before the failed migration.
+        let backup_path = path.with_extension("migration-backup");
+        assert!(
+            backup_path.exists(),
+            "backup exists even when migration fails"
+        );
+        let backup = Connection::open(&backup_path).expect("open backup");
+        assert_eq!(schema_user_version(&backup).expect("backup version"), 0);
+        drop(backup);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: a database stamped by a newer build is left alone — no migration, no backup, and the recorded
+    /// version is never downgraded. This is the guarantee the deleted best-effort stamp existed to break:
+    /// stamping unconditionally on every startup would rewrite the newer version to SCHEMA_VERSION.
+    #[test]
+    fn migration_preserves_a_newer_schema_version_and_takes_no_backup() {
+        let dir = m6_test_dir("m10-migration-newer-version");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let db = Connection::open(&path).expect("db");
+            db.execute_batch(SCHEMA_SQL).expect("schema");
+            db.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
+                .expect("stamp newer version");
+        }
+        let backup_path = path.with_extension("migration-backup");
+        assert!(!backup_path.exists(), "premise: no backup before start");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for start");
+        initialize_database(&db, &store).expect("newer version is a no-op");
+        assert_eq!(
+            schema_user_version(&db).expect("version"),
+            SCHEMA_VERSION + 1,
+            "newer version is preserved, not downgraded"
+        );
+        drop(db);
+        assert!(
+            !backup_path.exists(),
+            "no backup is taken when nothing migrates"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
     fn current_thread_runtime() -> tokio::runtime::Runtime {
