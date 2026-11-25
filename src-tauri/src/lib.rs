@@ -523,9 +523,10 @@ fn add_column_if_missing(db: &Connection, sql: &str) -> rusqlite::Result<()> {
 /// (`Connection::path` is `""`), or a brand-new, still-empty file (a fresh install has no user data to roll
 /// back to). The backup is deliberately kept after a successful migration — it is the rollback target if the
 /// migrated database ever turns out to be bad, and the next migration overwrites it with a fresh snapshot.
-/// Note it is a byte-for-byte snapshot of the pre-migration database, so a database upgraded from a version
-/// that stored session secrets in plaintext still holds those plaintext secrets in the backup; restoring it
-/// re-runs the same upgrade path, which seals them again.
+/// The backup keeps the library and settings but not session credentials: the copy is scrubbed of every
+/// session row before it is renamed over this name (see `backup_database_before_migration`), so rolling
+/// back to it means signing in again. A secret-bearing backup never exists under the final name — the
+/// temporary `.part` file does hold secrets briefly while it is being scrubbed.
 fn migration_backup_path(db: &Connection) -> Option<PathBuf> {
     let path_str = db.path()?;
     if path_str.is_empty() || path_str == ":memory:" {
@@ -538,32 +539,78 @@ fn migration_backup_path(db: &Connection) -> Option<PathBuf> {
     Some(path.with_extension("migration-backup"))
 }
 
+/// Deletes every session row from a backup copy's `settings` table and rebuilds the file so the
+/// deleted secrets leave no residue in SQLite's free pages. Reuses the M9 logout path's
+/// `delete_settings` and the same `secure_delete` + `VACUUM` statements `forget_session` uses —
+/// but deliberately NOT `forget_session` itself, which would also destroy the shared encryption key
+/// in the credential store; the live database still needs that key. A copy with no `settings` object
+/// at all is left alone; a `settings` object that cannot be written (a view, for example) is a genuine
+/// failure, not a skip — failing loudly is safer than shipping an unscrubbed backup.
+fn scrub_session_rows_from_backup(db: &Connection) -> rusqlite::Result<()> {
+    let has_settings: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'settings')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_settings {
+        return Ok(());
+    }
+    let mut session_keys: Vec<&str> =
+        Vec::with_capacity(GOOGLE_SESSION_KEYS.len() + SPOTIFY_SESSION_KEYS.len());
+    session_keys.extend_from_slice(GOOGLE_SESSION_KEYS);
+    session_keys.extend_from_slice(SPOTIFY_SESSION_KEYS);
+    delete_settings(db, &session_keys)?;
+    db.execute_batch("PRAGMA secure_delete = ON; VACUUM;")?;
+    Ok(())
+}
+
 /// Copies the live database to its `*.migration-backup` sibling with SQLite's online backup API, before any
-/// schema change is applied. The backup runs against the open connection, so it sees a consistent snapshot
-/// even while the file is open; the destination is a fresh file, so a stale backup from an earlier interrupted
-/// migration is superseded, never merged. A failure here aborts the migration (and therefore startup):
-/// migrating without a rollback target is exactly the hazard this exists to remove. A partial copy left by a
-/// failed backup is deleted so it can never be mistaken for a valid rollback target.
+/// schema change is applied, then scrubs every session credential out of the copy. The backup is first written
+/// to a temporary `*.migration-backup.part` sibling: the copy holds the live database's session rows (plaintext
+/// on a 0.1.8-or-older database, sealed on a 0.2.0–0.4.0 one) until the scrub deletes them, so a secret-bearing
+/// backup never exists under the final name. Only after the scrub succeeds is the temporary file renamed over
+/// the final name. A failure at any step — backup, scrub, or rename — deletes the temporary file and the
+/// stale final file and returns the error, so the migration aborts (and therefore startup) exactly as a backup
+/// failure does today. (The durability sync of the temporary file stays best-effort, as before: closing the
+/// destination already flushed its pages, so a failed fsync must not fail startup when the backup itself is
+/// complete.) A stale `.part` file left by an interrupted scrub is removed at the start of every
+/// backup, so the next start cleans it up. Crash safety of this path is by design (temporary file + rename,
+/// never a half-scrubbed final file) and is not tested with a real crash.
 fn backup_database_before_migration(db: &Connection) -> rusqlite::Result<()> {
     let Some(backup_path) = migration_backup_path(db) else {
         return Ok(());
     };
-    let _ = fs::remove_file(&backup_path);
-    let backup_result = (|| -> rusqlite::Result<()> {
-        let mut dest = Connection::open(&backup_path)?;
-        let backup = rusqlite::backup::Backup::new(db, &mut dest)?;
-        backup.run_to_completion(100, Duration::from_millis(10), None)?;
-        drop(backup);
-        drop(dest);
+    let part_path = backup_path.with_extension("migration-backup.part");
+    let _ = fs::remove_file(&part_path);
+    let result = (|| -> rusqlite::Result<()> {
+        {
+            let mut dest = Connection::open(&part_path)?;
+            let backup = rusqlite::backup::Backup::new(db, &mut dest)?;
+            backup.run_to_completion(100, Duration::from_millis(10), None)?;
+            drop(backup);
+            drop(dest);
+        }
+        {
+            let temp = Connection::open(&part_path)?;
+            scrub_session_rows_from_backup(&temp)?;
+            drop(temp);
+        }
+        // Best-effort durability for the copy: closing the destination already flushed its pages, so a failed
+        // fsync must not fail startup when the backup itself is complete.
+        let _ = sync_file(&part_path);
+        fs::rename(&part_path, &backup_path).map_err(|error| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                Some(format!("backup rename failed: {error}")),
+            )
+        })?;
         Ok(())
     })();
-    if let Err(error) = backup_result {
+    if let Err(error) = result {
+        let _ = fs::remove_file(&part_path);
         let _ = fs::remove_file(&backup_path);
         return Err(error);
     }
-    // Best-effort durability for the copy: closing the destination already flushed its pages, so a failed
-    // fsync must not fail startup when the backup itself is complete.
-    let _ = sync_file(&backup_path);
     Ok(())
 }
 
@@ -574,9 +621,10 @@ fn backup_database_before_migration(db: &Connection) -> rusqlite::Result<()> {
 /// Migration (M10): before any schema change, a database whose recorded schema version is older than
 /// `SCHEMA_VERSION` is snapshotted to a sibling `*.migration-backup` file, the column additions run inside
 /// one transaction together with the version stamp, and a genuine `ALTER TABLE` failure aborts startup (via
-/// `RuntimeState::new`'s `fail_to_start`) instead of being silently swallowed. A crash mid-migration therefore
-/// leaves either the old schema (version stamp rolled back, backup next to the database) or the new one, never a
-/// half-migrated mix with no record of how far it got.
+/// `RuntimeState::new`'s `fail_to_start`) instead of being silently swallowed. The backup is scrubbed of
+/// every session credential before it is renamed over the final name, so it keeps the library but never a
+/// secret. A crash mid-migration therefore leaves either the old schema (version stamp rolled back, backup
+/// next to the database) or the new one, never a half-migrated mix with no record of how far it got.
 fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqlite::Result<()> {
     let version = schema_user_version(db)?;
     let needs_migration = version < SCHEMA_VERSION;
@@ -9215,6 +9263,283 @@ mod tests {
             !backup_path.exists(),
             "no backup is taken when nothing migrates"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: the pre-migration backup of a 0.1.8 database holds no plaintext session secret. The fixture is
+    /// the real v0.1.8 shape, with a plaintext cookie, `spotifySpDc`/`spotifySpKey` and `spotifyAccessToken`.
+    /// The backup keeps the library; the live database is still migrated and its secrets still sealed.
+    #[test]
+    fn migration_backup_scrubs_plaintext_session_secrets() {
+        let dir = m6_test_dir("m10-migration-backup-scrub-plaintext");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("v0.1.8 db");
+            old.execute_batch(include_str!("../tests/fixtures/v0.1.8-song-db.sql"))
+                .expect("fixture");
+        }
+        let markers: [&[u8]; 4] = [
+            b"V018PLAINCOOKIE",
+            b"V018PLAINSPDC",
+            b"V018PLAINSPKEY",
+            b"V018PLAINTOKEN",
+        ];
+        let before = fs::read(&path).expect("read fixture db");
+        assert!(
+            markers.iter().all(|marker| contains_bytes(&before, marker)),
+            "premise: v0.1.8 stores secrets in plaintext"
+        );
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        // The live database is migrated and its secrets sealed, not deleted: the session still works.
+        for key in [
+            "cookie",
+            "spotifySpDc",
+            "spotifySpKey",
+            "spotifyAccessToken",
+        ] {
+            let raw = setting_value(&db, key)
+                .expect("raw")
+                .expect("still present");
+            assert!(
+                raw.starts_with("enc1:"),
+                "{key} is sealed on the live database"
+            );
+        }
+        drop(db);
+
+        let backup_path = path.with_extension("migration-backup");
+        assert!(backup_path.exists(), "pre-migration backup exists");
+        let backup_bytes = fs::read(&backup_path).expect("read backup");
+        for marker in markers {
+            assert!(
+                !contains_bytes(&backup_bytes, marker),
+                "backup holds no plaintext {}",
+                String::from_utf8_lossy(marker)
+            );
+        }
+        let backup = Connection::open(&backup_path).expect("open backup");
+        for key in GOOGLE_SESSION_KEYS.iter().chain(SPOTIFY_SESSION_KEYS) {
+            assert_eq!(
+                setting_value(&backup, key).expect("backup setting"),
+                None,
+                "backup has no {key} row"
+            );
+        }
+        assert_eq!(
+            backup
+                .query_row("SELECT COUNT(*) FROM songs", [], |row| row.get::<_, i64>(0))
+                .expect("count"),
+            3,
+            "backup keeps the library"
+        );
+        assert_eq!(
+            backup
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .expect("integrity"),
+            "ok"
+        );
+        drop(backup);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: the same scrub for a 0.2.0–0.4.0 database, where the session rows are already sealed: the
+    /// backup has no cookie or token rows at all, and the sealed ciphertext itself is gone from the file.
+    /// The live database keeps its sealed session untouched.
+    #[test]
+    fn migration_backup_scrubs_sealed_session_rows() {
+        let dir = m6_test_dir("m10-migration-backup-scrub-sealed");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("v0.1.8 db");
+            old.execute_batch(include_str!("../tests/fixtures/v0.1.8-song-db.sql"))
+                .expect("fixture");
+        }
+        // Seal the session first, as a 0.2.0–0.4.0 database already has it: the backup is then taken
+        // from sealed rows, and the scrub must still leave no trace of them.
+        let store = MemKeyStore(Mutex::new(None));
+        let sealed: Vec<String>;
+        {
+            let db = Connection::open(&path).expect("open to seal");
+            secrets::migrate_with(&db, &store).expect("seal");
+            sealed = [
+                "cookie",
+                "spotifySpDc",
+                "spotifySpKey",
+                "spotifyAccessToken",
+            ]
+            .iter()
+            .map(|key| setting_value(&db, key).expect("raw").expect("sealed row"))
+            .collect();
+            for value in &sealed {
+                assert!(value.starts_with("enc1:"), "premise: session is sealed");
+            }
+        }
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        // The live session is untouched by the migration: the same sealed values are still there.
+        for (key, expected) in [
+            "cookie",
+            "spotifySpDc",
+            "spotifySpKey",
+            "spotifyAccessToken",
+        ]
+        .iter()
+        .zip(sealed.iter())
+        {
+            assert_eq!(
+                setting_value(&db, key).expect("raw").as_deref(),
+                Some(expected.as_str()),
+                "{key} is unchanged on the live database"
+            );
+        }
+        drop(db);
+
+        let backup_path = path.with_extension("migration-backup");
+        assert!(backup_path.exists(), "pre-migration backup exists");
+        let backup_bytes = fs::read(&backup_path).expect("read backup");
+        for value in &sealed {
+            assert!(
+                !contains_bytes(&backup_bytes, value.as_bytes()),
+                "backup holds no sealed ciphertext"
+            );
+        }
+        let backup = Connection::open(&backup_path).expect("open backup");
+        for key in GOOGLE_SESSION_KEYS.iter().chain(SPOTIFY_SESSION_KEYS) {
+            assert_eq!(
+                setting_value(&backup, key).expect("backup setting"),
+                None,
+                "backup has no {key} row"
+            );
+        }
+        drop(backup);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: a stale `.part` file left by an interrupted scrub is removed at the start of every backup,
+    /// and the final backup is still written scrubbed.
+    #[test]
+    fn migration_backup_replaces_a_stale_part_file() {
+        let dir = m6_test_dir("m10-migration-backup-stale-part");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("v0.1.8 db");
+            old.execute_batch(include_str!("../tests/fixtures/v0.1.8-song-db.sql"))
+                .expect("fixture");
+        }
+        let part_path = path.with_extension("migration-backup.part");
+        fs::write(
+            &part_path,
+            b"M10STALEPARTMARKER-junk-from-an-interrupted-scrub",
+        )
+        .expect("stale part");
+        let backup_path = path.with_extension("migration-backup");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        drop(db);
+
+        assert!(!part_path.exists(), "stale .part is removed");
+        assert!(backup_path.exists(), "final backup is written");
+        let backup_bytes = fs::read(&backup_path).expect("read backup");
+        assert!(
+            !contains_bytes(&backup_bytes, b"M10STALEPARTMARKER"),
+            "stale junk is not in the backup"
+        );
+        for marker in [
+            b"V018PLAINCOOKIE".as_slice(),
+            b"V018PLAINSPDC",
+            b"V018PLAINSPKEY",
+            b"V018PLAINTOKEN",
+        ] {
+            assert!(!contains_bytes(&backup_bytes, marker), "backup is scrubbed");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: when the scrub itself fails, the migration aborts and neither the temporary file nor the
+    /// final-name file is left behind — including a stale final backup from an earlier run. The sabotage
+    /// replaces `settings` with a view: the scrub sees a `settings` object and tries to delete from it,
+    /// which fails. (A database with no `settings` object at all is skipped cleanly instead; see
+    /// `migration_backup_skips_scrub_when_no_settings_table`.)
+    #[test]
+    fn migration_backup_failure_leaves_no_backup_files() {
+        let dir = m6_test_dir("m10-migration-backup-scrub-failure");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let db = Connection::open(&path).expect("db");
+            db.execute_batch(SCHEMA_SQL).expect("schema");
+            db.execute_batch(
+                "DROP TABLE settings;
+                 CREATE VIEW settings AS SELECT 'cookie' AS key, 'x' AS value;",
+            )
+            .expect("sabotage");
+        }
+        // A stale final backup from an earlier run must be deleted too, not left behind.
+        let backup_path = path.with_extension("migration-backup");
+        fs::write(&backup_path, b"M10STALEFINAL-junk").expect("stale final");
+        let part_path = path.with_extension("migration-backup.part");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        let error =
+            initialize_database(&db, &store).expect_err("scrub failure must abort migration");
+        assert!(
+            format!("{error}").contains("view"),
+            "unexpected error: {error}"
+        );
+        drop(db);
+        assert!(!part_path.exists(), "no .part file is left");
+        assert!(!backup_path.exists(), "no final-name file is left");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: a database with no `settings` object at all is backed up and migrated normally — the scrub
+    /// skips cleanly instead of failing the migration. This locks in the skip behaviour; it passes on
+    /// the unscrubbed code too, because there is nothing to scrub.
+    #[test]
+    fn migration_backup_skips_scrub_when_no_settings_table() {
+        let dir = m6_test_dir("m10-migration-backup-no-settings");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("old db");
+            old.execute_batch(
+                "CREATE TABLE songs (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE playlists (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE playlist_songs (playlist_id TEXT NOT NULL, position INTEGER NOT NULL, song_id TEXT NOT NULL, PRIMARY KEY (playlist_id, position));
+                 CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, song_id TEXT NOT NULL, played_at INTEGER NOT NULL);
+                 CREATE TABLE downloads (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, downloaded_at INTEGER NOT NULL);
+                 CREATE TABLE albums (id TEXT PRIMARY KEY, title TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE podcasts (id TEXT PRIMARY KEY, title TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE player_cache (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, cached_at INTEGER NOT NULL);
+                 INSERT INTO songs (id, title, kind, saved_at) VALUES ('s1', 'Old Song', 'song', 1700000000000);",
+            )
+            .expect("old schema");
+        }
+        let backup_path = path.with_extension("migration-backup");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        drop(db);
+
+        assert!(backup_path.exists(), "pre-migration backup exists");
+        let backup = Connection::open(&backup_path).expect("open backup");
+        let settings_objects: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'settings'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(settings_objects, 0, "backup has no settings object");
+        drop(backup);
         let _ = fs::remove_dir_all(&dir);
     }
     fn current_thread_runtime() -> tokio::runtime::Runtime {
