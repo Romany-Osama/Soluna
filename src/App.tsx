@@ -9,7 +9,7 @@ import "./App.css";
 import { WindowControls } from "./components/WindowControls";
 import { AppSidebar } from "./components/AppSidebar";
 import { parseAudioQuality, streamRequest } from "./lib/audioQuality";
-import { appendNewPlayable, removeAt } from "./lib/queue";
+import { appendNewPlayable, mergeFailedPlayQueue, removeAt } from "./lib/queue";
 import { playbackEffectKey, resumeStartPosition, shouldAutoplay, startOccurrence } from "./lib/playbackSession";
 import { clearPersistedPlayback, restoreQueue, restoreSession } from "./lib/persistentPlayback";
 import { errorMessage, shuffled } from "./lib/util";
@@ -404,6 +404,17 @@ function App() {
   const taskbarPreviousRef = useRef<() => void>(() => undefined);
   const taskbarToggleRef = useRef<() => void>(() => undefined);
   const taskbarNextRef = useRef<() => void>(() => undefined);
+  // M4 rework: playItem's closure only sees the queue from its render, but a failed play must
+  // honour edits made while it was in flight. This mirror always holds the queue as last
+  // rendered, so the failure rollback can merge the flight edits in instead of clobbering them.
+  const queueLiveRef = useRef({
+    items: queueItems,
+    continuation: queueContinuation,
+    kind: queueContinuationKind,
+  });
+  useEffect(() => {
+    queueLiveRef.current = { items: queueItems, continuation: queueContinuation, kind: queueContinuationKind };
+  }, [queueItems, queueContinuation, queueContinuationKind]);
   const persistentQueueLoadedRef = useRef(false);
   const persistentQueueSkipWriteRef = useRef(false);
   const persistentSessionLoadedRef = useRef(false);
@@ -1776,6 +1787,20 @@ function App() {
     }
     setNotice("");
     const keepInlineLyrics = playerExpanded;
+    // M4 rework: snapshot the pre-play state BEFORE anything below mutates it. If ytm_player
+    // fails, the <audio> element keeps the previous song (it is only re-sourced from `player`,
+    // which is only set on success), so the queue, lyrics and shuffle must be rolled back to
+    // the song that is actually playing. The queue snapshot is the render-time queue; the
+    // rollback merges in-flight edits on top of it (see the catch) instead of restoring it
+    // wholesale, which used to clobber adds, play-next inserts, removals and continuation
+    // appends made while the play was resolving.
+    const previousQueueItems = queueItems;
+    const previousQueueIndex = queueIndex;
+    const previousQueueContinuation = queueContinuation;
+    const previousQueueContinuationKind = queueContinuationKind;
+    const previousLyrics = lyrics;
+    const previousLyricsAutoScrollEnabled = lyricsAutoScrollEnabled;
+    const previousShuffleEnabled = shuffleEnabled;
     // `requestId` (above) ignores this request if the user started another track while it was still resolving (last click wins).
     setLyrics(null);
     setLyricsAutoScrollEnabled(true);
@@ -1838,6 +1863,46 @@ function App() {
       if (keepInlineLyrics) void openLyrics(item);
       void beginPlaytime(item);
     } catch (error) {
+      // Roll the queue back to the song that is still playing. Guarded by requestId so a
+      // failure superseded by a newer play (or clearQueue) cannot clobber it — those bump
+      // the ref and this block never runs. The rollback merges in the queue edits made
+      // while this play was in flight (add, play-next, remove, continuation append):
+      // the live queue is read from queueLiveRef because this closure only sees the queue
+      // from its render. When the failure lands before that mirror's first render after
+      // the advance, the live queue is still the snapshot, so the advanced queue stands
+      // in for it (no edit could have been applied yet).
+      if (requestId === playRequestIdRef.current) {
+        const live = queueLiveRef.current;
+        const renderedAfterAdvance = live.items !== previousQueueItems || live.items === nextQueue;
+        const currentQueueItems = renderedAfterAdvance ? live.items : nextQueue;
+        const merged = mergeFailedPlayQueue({
+          previous: previousQueueItems,
+          advanced: nextQueue,
+          current: currentQueueItems,
+          previousIndex: previousQueueIndex,
+        });
+        setQueueItems(merged.items);
+        setQueueIndex(merged.index);
+        if (merged.extended) {
+          // The failed play only extended the pre-play queue, so the live continuation
+          // belongs to the merged queue (a continuation append included).
+          setQueueContinuation(renderedAfterAdvance ? live.continuation : nextContinuation);
+          setQueueContinuationKind(renderedAfterAdvance ? live.kind : nextContinuation ? sourceContinuationKind : null);
+        } else {
+          setQueueContinuation(previousQueueContinuation);
+          setQueueContinuationKind(previousQueueContinuationKind);
+        }
+        // Only restore the lyrics if they are still the cleared state this play set
+        // (null): lyrics the user opened for another song while the play was in flight
+        // are theirs to keep, not to be overwritten with the previous song's lyrics.
+        // Same for auto-scroll: only undo this play's reset to true; a value the user
+        // changed mid-flight stays as they left it.
+        setLyrics((current) => (current === null ? previousLyrics : current));
+        setLyricsAutoScrollEnabled((current) => (current ? previousLyricsAutoScrollEnabled : current));
+        // Only undo the shuffle change this play itself made (a new queue resets it);
+        // a shuffle toggle the user made mid-flight is theirs to keep.
+        if (isNewQueue && !effectiveShuffle && previousShuffleEnabled) setShuffleEnabled(previousShuffleEnabled);
+      }
       setNotice(`Playback unavailable: ${errorMessage(error)}`, "error");
     }
   };
