@@ -246,6 +246,134 @@ const SCHEMA_SQL: &str = "PRAGMA foreign_keys = ON;
                 FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE
              );";
 
+/// Schema version stamped into every database by `initialize_database` (M7,
+/// `PRAGMA user_version`). Databases written before stamping carry 0 and are
+/// still accepted when the schema checks pass. A restored database carrying a
+/// higher version was written by a newer Soluna than this build and must not be
+/// trusted: this build cannot know what its schema means.
+const SCHEMA_VERSION: i64 = 1;
+
+/// The tables — and the columns `initialize_database` cannot add — that a restored
+/// database must have (M7). Columns added later by `ALTER TABLE` in
+/// `initialize_database` are deliberately NOT listed here: an older backup that
+/// lacks one is still a valid restore, and the initializer adds the column right
+/// after the swap. Anything listed here the initializer cannot repair, so a
+/// database missing it must be rejected, not migrated — without it the app fails
+/// later with `no such column`. A missing table is rejected for the same reason:
+/// the initializer would recreate it empty, and presenting that data loss as a
+/// successful restore is worse than refusing the restore.
+const EXPECTED_RESTORE_SCHEMA: &[(&str, &[&str])] = &[
+    (
+        "songs",
+        &[
+            "id", "title", "subtitle", "thumbnail", "browse_id", "playlist_id",
+            "video_id", "kind", "saved_at",
+        ],
+    ),
+    (
+        "playlists",
+        &["id", "title", "subtitle", "thumbnail", "kind", "saved_at"],
+    ),
+    ("playlist_songs", &["playlist_id", "position", "song_id"]),
+    ("history", &["id", "song_id", "played_at"]),
+    ("search_history", &["id", "query", "searched_at"]),
+    ("lyrics", &["song_id", "provider", "text", "synced", "fetched_at"]),
+    (
+        "lyrics_variants",
+        &[
+            "song_id",
+            "provider",
+            "text",
+            "synced",
+            "matched_title",
+            "matched_artist",
+            "fetched_at",
+        ],
+    ),
+    ("settings", &["key", "value"]),
+    (
+        "spotify_match",
+        &[
+            "spotify_id",
+            "youtube_id",
+            "title",
+            "artist",
+            "match_score",
+            "cached_at",
+            "is_manual_override",
+        ],
+    ),
+    ("downloads", &["song_id", "path", "bytes", "downloaded_at"]),
+    (
+        "playlist_downloads",
+        &[
+            "playlist_id",
+            "title",
+            "thumbnail",
+            "artwork_path",
+            "state",
+            "total_songs",
+            "completed_songs",
+            "failed_songs",
+            "error",
+            "started_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "playlist_download_songs",
+        &["playlist_id", "song_id", "title", "state", "error"],
+    ),
+    ("player_cache", &["song_id", "path", "bytes", "cached_at"]),
+    (
+        "podcasts",
+        &["id", "title", "author", "thumbnail", "bookmarked_at", "saved_at"],
+    ),
+    (
+        "speed_dial",
+        &[
+            "id",
+            "secondary_id",
+            "title",
+            "subtitle",
+            "thumbnail",
+            "item_type",
+            "explicit",
+            "created_at",
+        ],
+    ),
+    (
+        "albums",
+        &[
+            "id",
+            "playlist_id",
+            "title",
+            "year",
+            "thumbnail",
+            "explicit",
+            "bookmarked_at",
+            "in_library",
+            "uploaded",
+            "saved_at",
+        ],
+    ),
+    (
+        "artists",
+        &[
+            "id",
+            "name",
+            "thumbnail",
+            "channel_id",
+            "bookmarked_at",
+            "podcast_channel",
+            "spotify_id",
+            "saved_at",
+        ],
+    ),
+    ("song_albums", &["song_id", "album_id"]),
+    ("song_artists", &["song_id", "artist_id", "position"]),
+];
+
 static HTTP: OnceLock<Client> = OnceLock::new();
 static MUSIXMATCH_TOKEN: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static DOWNLOAD_CANCELS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
@@ -392,6 +520,9 @@ fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqli
     let _ = db.execute("UPDATE playlist_downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
     // Encrypt any session secret still stored as plaintext by an older version. Failure keeps the session working.
     let _ = secrets::migrate_with(db, store);
+    // Stamp the schema version this build understands (M7). Best-effort: a stamp
+    // failure must not fail startup, and an unstamped database is still usable.
+    let _ = db.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
     Ok(())
 }
 
@@ -532,10 +663,17 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// The same two checks `backup_restore` applies to a staged database before promoting it:
-/// `PRAGMA integrity_check` must be `ok` and the four Soluna tables must exist. Recovery uses
-/// this before promoting a leftover staged file, so a half-written extract can never become live.
-/// Opened read-only, so a candidate is never created or modified by the check itself.
+/// The checks `backup_restore` applies to a staged database before promoting it,
+/// and recovery applies before promoting a leftover staged file (M7). A candidate
+/// used to be trusted after only `PRAGMA integrity_check` plus a count of four
+/// tables, so an old backup missing a table or a column the app queries — or a
+/// hand-crafted file carrying a trigger — was promoted live and failed later with
+/// `no such column`, or executed foreign code inside the app's connection. The
+/// checks now are: integrity must be `ok`; the schema version must not be newer
+/// than this build understands; there must be no triggers (Soluna creates none);
+/// and every table must exist with the columns `initialize_database` cannot add
+/// (see `EXPECTED_RESTORE_SCHEMA`). Opened read-only, so a candidate is never
+/// created or modified by the check itself.
 fn restored_database_is_valid(path: &Path) -> bool {
     let Ok(candidate) =
         Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -550,14 +688,52 @@ fn restored_database_is_valid(path: &Path) -> bool {
     if integrity != "ok" {
         return false;
     }
-    let Ok(required_tables): Result<i64, _> = candidate.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('songs', 'settings', 'history', 'downloads')",
+    // A database written by a newer Soluna than this build may use a schema this
+    // build does not understand. Databases written before version stamping carry 0.
+    let Ok(version): Result<i64, _> =
+        candidate.query_row("PRAGMA user_version", [], |row| row.get(0))
+    else {
+        return false;
+    };
+    if version > SCHEMA_VERSION {
+        return false;
+    }
+    // Soluna never creates triggers: one in a restored database is foreign code
+    // that would execute inside the app's connection on the next write.
+    let Ok(triggers): Result<i64, _> = candidate.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'",
         [],
         |row| row.get(0),
     ) else {
         return false;
     };
-    required_tables == 4
+    if triggers != 0 {
+        return false;
+    }
+    // Every table must exist with the columns the initializer cannot add.
+    // `PRAGMA table_info` returns zero rows for a missing table, so a missing
+    // table fails here the same way a missing column does. Table names come from
+    // our own constant, never from the file being checked.
+    for (table, expected_columns) in EXPECTED_RESTORE_SCHEMA {
+        let Ok(mut statement) = candidate.prepare(&format!("PRAGMA table_info({table})"))
+        else {
+            return false;
+        };
+        let Ok(actual_columns) = statement.query_map([], |row| row.get::<_, String>(1))
+        else {
+            return false;
+        };
+        let Ok(actual_columns) = actual_columns.collect::<Result<HashSet<_>, _>>() else {
+            return false;
+        };
+        if expected_columns
+            .iter()
+            .any(|column| !actual_columns.contains(*column))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Recover from a backup restore interrupted by a crash (M6 / D3-152). Runs before the live
@@ -9209,6 +9385,169 @@ mod tests {
     }
 
     // --- M6: crash-safe backup restore (end) ---
+
+    // --- M7: restore schema validation (begin) ---
+    //
+    // A staged database used to be trusted after only `PRAGMA integrity_check` plus a
+    // count of four tables (songs, settings, history, downloads). A hand-crafted or very
+    // old file missing any of the other 15 tables — or with a wrongly-defined table, e.g.
+    // songs without its `kind` column — passed that check and was promoted live.
+
+    /// Full schema minus one table: what an old backup (or a hand-crafted file) looks like.
+    fn m7_seed_missing_table(path: &Path, table: &str) {
+        let db = Connection::open(path).expect("seed db");
+        db.execute_batch(SCHEMA_SQL).expect("schema");
+        db.execute_batch(&format!("DROP TABLE {table};"))
+            .expect("drop table");
+        db.execute(
+            "INSERT INTO songs (id, title, kind, saved_at) VALUES ('s1', 'M7 Song', 'song', 0)",
+            [],
+        )
+        .expect("seed song");
+    }
+
+    /// Only the four tables the old check counted, with `songs` wrongly defined: no `kind`,
+    /// no `saved_at`, none of the other columns the app queries.
+    fn m7_seed_wrong_definition(path: &Path) {
+        let db = Connection::open(path).expect("seed db");
+        db.execute_batch(
+            "CREATE TABLE songs (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, song_id TEXT NOT NULL, played_at INTEGER NOT NULL);
+             CREATE TABLE downloads (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, downloaded_at INTEGER NOT NULL);",
+        )
+        .expect("schema");
+        db.execute(
+            "INSERT INTO songs (id, title) VALUES ('s1', 'Wrong Definition Song')",
+            [],
+        )
+        .expect("seed song");
+    }
+
+    #[test]
+    fn restore_validation_rejects_staged_database_missing_a_table() {
+        let dir = m6_test_dir("m7-missing-table");
+        let staged = dir.join("staged.sqlite3");
+        m7_seed_missing_table(&staged, "playlists");
+        assert!(
+            !restored_database_is_valid(&staged),
+            "a staged database missing the playlists table must not validate"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_validation_rejects_staged_database_with_wrong_table_definition() {
+        let dir = m6_test_dir("m7-wrong-definition");
+        let staged = dir.join("staged.sqlite3");
+        m7_seed_wrong_definition(&staged);
+        assert!(
+            !restored_database_is_valid(&staged),
+            "a staged database whose songs table lacks kind/saved_at must not validate"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_recovery_falls_back_to_previous_when_staged_has_wrong_definition() {
+        let dir = m6_test_dir("m7-recovery-wrong-definition");
+        let live = dir.join("soluna.sqlite3");
+        let staged = restore_staged_path(&live);
+        let previous = restore_previous_path(&live);
+        m7_seed_wrong_definition(&staged);
+        m6_seed_db(&previous, "Old Library Song");
+        fs::write(restore_journal_path(&live), "restore in progress").expect("journal");
+        assert!(!live.exists());
+        recover_interrupted_restore(&live);
+        assert_eq!(
+            m6_titles(&live),
+            vec!["Old Library Song"],
+            "a wrongly-defined staged database must fall back to the previous library"
+        );
+        assert!(!staged.exists(), "invalid staged leftover must not linger");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_validation_accepts_a_complete_database() {
+        let dir = m6_test_dir("m7-complete");
+        let staged = dir.join("staged.sqlite3");
+        m6_seed_db(&staged, "M7 Song");
+        assert!(
+            restored_database_is_valid(&staged),
+            "a database with the full current schema must validate"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_validation_rejects_a_database_with_a_trigger() {
+        let dir = m6_test_dir("m7-trigger");
+        let staged = dir.join("staged.sqlite3");
+        m6_seed_db(&staged, "M7 Song");
+        let db = Connection::open(&staged).expect("seed db");
+        db.execute_batch(
+            "CREATE TRIGGER m7_trigger AFTER INSERT ON songs BEGIN SELECT 1; END;",
+        )
+        .expect("trigger");
+        drop(db);
+        assert!(
+            !restored_database_is_valid(&staged),
+            "a staged database carrying a trigger must not validate: Soluna creates none"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_validation_rejects_a_database_from_a_newer_schema_version() {
+        let dir = m6_test_dir("m7-newer-version");
+        let staged = dir.join("staged.sqlite3");
+        m6_seed_db(&staged, "M7 Song");
+        let db = Connection::open(&staged).expect("seed db");
+        db.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
+            .expect("version");
+        drop(db);
+        assert!(
+            !restored_database_is_valid(&staged),
+            "a staged database stamped by a newer Soluna must not validate"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An older backup missing a column the initializer adds (here
+    /// `downloads.state`) is still a valid restore: the initializer migrates it
+    /// after the swap instead of the restore being refused.
+    #[test]
+    fn restore_validation_accepts_an_older_database_the_initializer_can_migrate() {
+        let dir = m6_test_dir("m7-migratable");
+        let staged = dir.join("staged.sqlite3");
+        m6_seed_db(&staged, "M7 Song");
+        let db = Connection::open(&staged).expect("seed db");
+        db.execute_batch("ALTER TABLE downloads DROP COLUMN state;")
+            .expect("drop column");
+        drop(db);
+        assert!(
+            restored_database_is_valid(&staged),
+            "a database missing only an initializer-added column must validate"
+        );
+        let db = Connection::open(&staged).expect("reopen db");
+        initialize_database(&db, &secrets::KeyringStore).expect("initialize");
+        let columns: Vec<String> = db
+            .prepare("PRAGMA table_info(downloads)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect();
+        assert!(
+            columns.iter().any(|column| column == "state"),
+            "the initializer must add the missing downloads.state column"
+        );
+        drop(db);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- M7: restore schema validation (end) ---
 
     // --- regression tests for the review fixes (end) ---
 }

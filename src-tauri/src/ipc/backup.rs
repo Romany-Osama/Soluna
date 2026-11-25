@@ -186,6 +186,17 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
             )));
         }
     };
+    // Full restore validation (M7): integrity, schema version, no triggers, and
+    // every table with the columns the initializer cannot add. The old inline
+    // check here — integrity plus a count of four tables — accepted an old backup
+    // missing a table or a column, and a hand-crafted file carrying a trigger.
+    if !restored_database_is_valid(&temp_db) {
+        let _ = fs::remove_file(&temp_db);
+        return Err(IpcError::from(
+            "backup database failed validation: integrity, schema, version or triggers"
+                .to_owned(),
+        ));
+    }
     let candidate = match Connection::open(&temp_db) {
         Ok(connection) => connection,
         Err(error) => {
@@ -195,34 +206,6 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
             )));
         }
     };
-    let integrity: String =
-        match candidate.query_row("PRAGMA integrity_check", [], |row| row.get(0)) {
-            Ok(value) => value,
-            Err(error) => {
-                drop(candidate);
-                let _ = fs::remove_file(&temp_db);
-                return Err(IpcError::from(format!(
-                    "backup database integrity check failed: {error}"
-                )));
-            }
-        };
-    if integrity != "ok" {
-        drop(candidate);
-        let _ = fs::remove_file(&temp_db);
-        return Err(IpcError::from(format!(
-            "backup database integrity check failed: {integrity}"
-        )));
-    }
-    let required_tables: i64 = match candidate.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('songs', 'settings', 'history', 'downloads')", [], |row| row.get(0)) {
-        Ok(value) => value,
-        Err(error) => { drop(candidate); let _ = fs::remove_file(&temp_db); return Err(IpcError::from(format!("backup database schema validation failed: {error}"))); }
-    };
-    if required_tables != 4 {
-        let _ = fs::remove_file(&temp_db);
-        return Err(IpcError::from(
-            "backup database is missing required Soluna tables".to_owned(),
-        ));
-    }
     candidate
         .execute("DELETE FROM settings", [])
         .map_err(|error| format!("restored settings clear failed: {error}"))?;
@@ -262,6 +245,22 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
     }
     match Connection::open(&db_path) {
         Ok(restored) => {
+            // The initializer never ran after a restore (M7): an older backup can
+            // lack columns added since it was written, and the app would fail later
+            // with `no such column` in this very session. Migrate the restored
+            // database in place before it is used; a migration failure rolls the
+            // swap back to the previous database like a reopen failure.
+            if let Err(error) = initialize_database(&restored, &secrets::KeyringStore) {
+                drop(restored);
+                let _ = fs::remove_file(&db_path);
+                let _ = fs::rename(&previous_path, &db_path);
+                if let Some(old_connection) = reopen_live_after_failed_swap(&db_path) {
+                    *db = old_connection;
+                }
+                return Err(IpcError::from(format!(
+                    "restored database schema migration failed: {error}"
+                )));
+            }
             *db = restored;
             // The previous database is deliberately kept: it is the fallback until the next
             // successful launch (D3-144 / S5-051), which retires it.
