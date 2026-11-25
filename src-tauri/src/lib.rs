@@ -9562,5 +9562,824 @@ mod tests {
 
     // --- M7: restore schema validation (end) ---
 
+    // --- M7 follow-up: migration-failure rollback (begin) ---
+
+    /// A staged database that validates but whose migration fails: full
+    /// schema with the unique index on `search_history(query)` dropped and
+    /// two rows sharing a query, so `initialize_database` fails at the
+    /// CREATE UNIQUE INDEX step. Validation does not check indexes or data,
+    /// so this database passes `restored_database_is_valid`.
+    fn m7_seed_migration_failing_db(path: &Path) {
+        m6_seed_db(path, "Staged Song");
+        let db = Connection::open(path).expect("seed staged db");
+        db.execute_batch("DROP INDEX idx_search_history_query;")
+            .expect("drop unique index");
+        db.execute(
+            "INSERT INTO search_history (query, searched_at) VALUES ('dup', 1)",
+            [],
+        )
+        .expect("first duplicate query");
+        db.execute(
+            "INSERT INTO search_history (query, searched_at) VALUES ('dup', 2)",
+            [],
+        )
+        .expect("second duplicate query");
+    }
+
+    /// Case A: a staged database that validates but whose migration fails must
+    /// roll the swap back to the original live database, and the live connection
+    /// must point at it — not at the in-memory placeholder.
+    ///
+    /// The failure is forced without touching the migrator: `initialize_database`
+    /// only propagates an error from `SCHEMA_SQL`, and `SCHEMA_SQL` creates the
+    /// unique index `idx_search_history_query` on `search_history(query)`.
+    /// Validation does not check indexes or data, so a staged database with the
+    /// index dropped and two `search_history` rows sharing a query validates
+    /// but fails the migration at the CREATE UNIQUE INDEX step.
+    #[test]
+    fn restore_migration_failure_rolls_back_to_original_live_database() {
+        let dir = m6_test_dir("m7-migration-failure");
+        let live = dir.join("soluna.sqlite3");
+        let staged = dir.join("staged.sqlite3");
+        m6_seed_db(&live, "Original Library Song");
+        m7_seed_migration_failing_db(&staged);
+        assert!(
+            restored_database_is_valid(&staged),
+            "the staged database must validate: validation does not check indexes or data"
+        );
+        let mut db = Connection::open(&live).expect("open live db");
+        let result =
+            crate::ipc::backup::swap_and_activate_restored_database(&live, &staged, &mut db);
+        assert!(result.is_err(), "the migration must fail, got {result:?}");
+        let failure = result.unwrap_err();
+        assert!(
+            failure
+                .message
+                .contains("restored database schema migration failed"),
+            "unexpected error: {}",
+            failure.message
+        );
+        assert!(
+            failure.outcome.contains("restore did not become active"),
+            "the outcome must say the restore did not become active: {}",
+            failure.outcome
+        );
+        assert!(
+            failure.outcome.contains("unchanged and still in use"),
+            "the outcome must say the library is unchanged and still in use: {}",
+            failure.outcome
+        );
+        assert!(
+            failure.outcome.contains("no restart"),
+            "the outcome must say no restart is required when the rollback reconnected: {}",
+            failure.outcome
+        );
+        // (b) The original live file is preserved.
+        assert_eq!(
+            m6_titles(&live),
+            vec!["Original Library Song"],
+            "the original live database must be preserved after the failed migration"
+        );
+        // (c) The live connection points at the original file, not the placeholder.
+        let titles: Vec<String> = db
+            .prepare("SELECT title FROM songs ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["Original Library Song"],
+            "the rolled-back connection must read the original live library"
+        );
+        let file: String = db
+            .query_row("PRAGMA database_list", [], |row| row.get(2))
+            .expect("database_list");
+        assert_eq!(
+            PathBuf::from(file),
+            live,
+            "the rolled-back connection must be backed by the live file, not :memory:"
+        );
+        // (d) A write through that connection persists to the live file.
+        db.execute(
+            "INSERT INTO songs (id, title, kind, saved_at) VALUES ('s2', 'Written After Rollback', 'song', 0)",
+            [],
+        )
+        .expect("write through rolled-back connection");
+        drop(db);
+        assert_eq!(
+            m6_titles(&live),
+            vec!["Original Library Song", "Written After Rollback"],
+            "a write through the rolled-back connection must persist to the live file"
+        );
+        // (e) The staged file is gone (consumed by the swap, then removed on rollback).
+        assert!(!staged.exists(), "the staged file must not linger");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Case B: with no live database before the restore there is no previous
+    /// library to roll back to, so a migration failure leaves the session on
+    /// the bare in-memory placeholder. The error must say so, require a
+    /// restart, and offer the retry from the unchanged backup; nothing the
+    /// user saves afterwards may be reported as persistent.
+    #[test]
+    fn restore_migration_failure_with_no_previous_leaves_placeholder_and_requires_restart() {
+        let dir = m6_test_dir("m7-migration-failure-no-previous");
+        let live = dir.join("soluna.sqlite3");
+        let staged = dir.join("staged.sqlite3");
+        let previous = restore_previous_path(&live);
+        // No live database is seeded: this is a restore onto a fresh install
+        // (or a live file deleted mid-session).
+        assert!(!live.exists(), "no live file before the restore");
+        m7_seed_migration_failing_db(&staged);
+        assert!(
+            restored_database_is_valid(&staged),
+            "the staged database must validate: validation does not check indexes or data"
+        );
+        let mut db = Connection::open_in_memory().expect("placeholder connection");
+        let result =
+            crate::ipc::backup::swap_and_activate_restored_database(&live, &staged, &mut db);
+        assert!(result.is_err(), "the migration must fail, got {result:?}");
+        let failure = result.unwrap_err();
+        assert!(
+            failure
+                .message
+                .contains("restored database schema migration failed"),
+            "unexpected error: {}",
+            failure.message
+        );
+        assert!(
+            failure.outcome.contains("restore did not become active"),
+            "the outcome must say the restore did not become active: {}",
+            failure.outcome
+        );
+        assert!(
+            failure.outcome.contains("no previous library"),
+            "the outcome must say there was no previous library to keep: {}",
+            failure.outcome
+        );
+        assert!(
+            failure
+                .outcome
+                .contains("Nothing you save now will be kept"),
+            "the outcome must say nothing saved now will be kept: {}",
+            failure.outcome
+        );
+        assert!(
+            failure.outcome.contains("Restart Soluna"),
+            "the outcome must require a restart: {}",
+            failure.outcome
+        );
+        assert!(
+            failure.outcome.contains("Retry from backup"),
+            "the outcome must offer the retry from the unchanged backup: {}",
+            failure.outcome
+        );
+        // No original file was deleted or overwritten: there was none, and
+        // none appeared.
+        assert!(
+            !live.exists(),
+            "no live file must appear after the failed restore"
+        );
+        assert!(
+            !previous.exists(),
+            "no previous file must appear after the failed restore"
+        );
+        assert!(!staged.exists(), "the staged file must not linger");
+        // The active connection is the bare in-memory placeholder.
+        let file: String = db
+            .query_row("PRAGMA database_list", [], |row| row.get(2))
+            .expect("database_list");
+        assert!(
+            file.is_empty(),
+            "the connection after a no-previous failure must be the in-memory placeholder, got {file:?}"
+        );
+        let write_error = db
+            .execute(
+                "INSERT INTO songs (id, title, kind, saved_at) VALUES ('s1', 'Lost Song', 'song', 0)",
+                [],
+            )
+            .expect_err("a write to the placeholder must fail");
+        assert!(
+            write_error.to_string().contains("no such table"),
+            "the placeholder has no schema, so the write must fail with no such table: {write_error}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The outcome wording behind the failed-restore errors: each rollback
+    /// result must select a message that says whether the restore became
+    /// active and whether the previous library is usable and in use, and
+    /// front-loads the restart or retry action where one is needed.
+    ///
+    /// Coverage, labelled honestly:
+    /// - REAL: this helper over all six reachable combinations of
+    ///   `(reconnected, had_previous, renamed_back)` (pure logic, runs
+    ///   everywhere including Windows CI). The two missing combinations,
+    ///   `(true, false, true)` and `(false, false, true)`, are unreachable:
+    ///   a rename-back can only succeed when a previous database existed.
+    /// - REAL: Case A / Case B filesystem behaviour through the migration
+    ///   branch (real renames, real SQLite, executed on Linux here and on
+    ///   Windows in CI).
+    /// - SIMULATED (by identity, not execution): the reopen branch's own
+    ///   `Err(error) =>` arm is never executed in any test. It is covered
+    ///   only because it shares `rollback_failed_restore` with the migration
+    ///   branch — the same code Case A and Case B execute — plus this helper
+    ///   test. Do not present that as execution coverage.
+    /// - SIMULATED (by identity, not execution): the swap double fault's
+    ///   execution path — the staged→live rename fails AND the rename-back
+    ///   fails — is never executed in any test either (the swap test forces
+    ///   only the early failure, before anything is moved). Its wording for
+    ///   all three sub-cases is pinned by this helper test, and the
+    ///   no-`remove_file(db_path)` guarantee is verified by code reading
+    ///   plus the swap test. Same class of unreachability as the reopen arm.
+    /// - REAL WINDOWS BEHAVIOUR: none for the reopen arm's fault conditions.
+    ///   CI runs the suite on Windows but cannot produce the fault that would
+    ///   execute the arm; a live Windows fault (antivirus lock, etc.) remains
+    ///   unproven. What Windows CI does prove is the migration-branch
+    ///   rollback (rename / remove semantics) on Windows.
+    /// - REAL: the injected rollback test
+    ///   (`restore_rollback_remove_and_rename_failures_use_unknown_outcome`)
+    ///   executes `rollback_failed_restore` with the remove and the
+    ///   rename-back both failing and asserts the honest unknown outcome
+    ///   (see that test and `inject_rollback_failures` for why the failures
+    ///   are staged by a seam, not by the OS).
+    /// - SIMULATED (pure logic): `restore_failure_outcomes_select_unknown_when_rollback_cannot_prove_original`
+    ///   drives `rollback_failure_outcome` over the file-operation results
+    ///   as inputs; it does not execute the failing remove or rename.
+    #[test]
+    fn restore_failure_error_outcomes_cover_every_rollback_result() {
+        // (reconnected, had_previous, renamed_back, label, intactness claim)
+        let cases: [(bool, bool, bool, &str, &str); 6] = [
+            (
+                true,
+                true,
+                true,
+                "reconnected rollback",
+                "unchanged and still in use",
+            ),
+            (
+                true,
+                true,
+                false,
+                "reconnected rollback, rename-back not needed",
+                "unchanged and still in use",
+            ),
+            (
+                true,
+                false,
+                false,
+                "reconnected rollback, no previous",
+                "unchanged and still in use",
+            ),
+            (
+                false,
+                false,
+                false,
+                "no-previous rollback",
+                "library is empty",
+            ),
+            (
+                false,
+                true,
+                true,
+                "kept-but-unreachable rollback",
+                "at the live location",
+            ),
+            (
+                false,
+                true,
+                false,
+                "not-put-back rollback",
+                "previous database kept",
+            ),
+        ];
+        for (reconnected, had_previous, renamed_back, label, intactness) in cases {
+            let outcome =
+                crate::ipc::backup::failed_restore_outcome(reconnected, had_previous, renamed_back);
+            assert!(
+                outcome.contains("restore did not become active"),
+                "{label}: every outcome must say the restore did not become active: {outcome}"
+            );
+            assert!(
+                outcome.contains(intactness),
+                "{label}: the outcome must state the library's state: {outcome}"
+            );
+            // No outcome may be longer than the sanitize cap: `with_detail`
+            // truncates at 200 characters, so a longer wording would reach
+            // the user cut mid-sentence.
+            assert!(
+                outcome.chars().count() <= 200,
+                "{label}: the outcome must fit the 200-character detail cap, got {} chars: {outcome}",
+                outcome.chars().count()
+            );
+        }
+        // Per-variant restart / retry guidance.
+        let kept_and_in_use = crate::ipc::backup::failed_restore_outcome(true, true, true);
+        assert!(
+            kept_and_in_use.contains("no restart"),
+            "a reconnected rollback must not require a restart: {kept_and_in_use}"
+        );
+        let no_previous = crate::ipc::backup::failed_restore_outcome(false, false, false);
+        assert!(
+            no_previous.contains("Restart Soluna"),
+            "a no-previous rollback must require a restart: {no_previous}"
+        );
+        assert!(
+            no_previous.contains("Nothing you save now will be kept"),
+            "a no-previous rollback must say nothing saved now will be kept: {no_previous}"
+        );
+        assert!(
+            no_previous.contains("Retry from backup"),
+            "a no-previous rollback must offer the retry: {no_previous}"
+        );
+        let kept_but_unreachable = crate::ipc::backup::failed_restore_outcome(false, true, true);
+        assert!(
+            kept_but_unreachable.contains("not reconnected"),
+            "kept-but-unreachable rollback: {kept_but_unreachable}"
+        );
+        assert!(
+            kept_but_unreachable.contains("Restart Soluna"),
+            "a kept-but-unreachable rollback must require a restart: {kept_but_unreachable}"
+        );
+        let not_put_back = crate::ipc::backup::failed_restore_outcome(false, true, false);
+        assert!(
+            not_put_back.contains("not put back"),
+            "not-put-back rollback: {not_put_back}"
+        );
+        assert!(
+            not_put_back.contains("Restart Soluna"),
+            "a not-put-back rollback must require a restart: {not_put_back}"
+        );
+    }
+
+    /// Shared assertions for the IPC boundary: the `IpcError` built the way
+    /// `backup_restore` builds it must carry the short summary as the message
+    /// (the raw underlying error is logged, never shown) and the exact outcome
+    /// wording as the detail — after `sanitize` and `with_detail`, i.e. the
+    /// final string the user sees. The detail must contain no private file
+    /// paths and no secret values.
+    fn assert_ipc_error_carries_outcome(
+        failure: crate::ipc::backup::RestoreFailure,
+        expected_summary: &str,
+        expected_detail: &str,
+    ) {
+        assert_eq!(
+            failure.outcome, expected_detail,
+            "the seam must select the expected outcome"
+        );
+        let error = failure.into_ipc_error();
+        assert_eq!(
+            error.message, expected_summary,
+            "the UI must see only the short summary, not the raw underlying error"
+        );
+        let detail = error.detail.clone().expect("detail must be set");
+        assert_eq!(
+            detail, expected_detail,
+            "the detail must be the exact outcome wording after sanitize"
+        );
+        // Serialized form, as actually sent over the IPC boundary.
+        let value = serde_json::to_value(&error).expect("serialize IpcError");
+        assert_eq!(value["message"], expected_summary);
+        assert_eq!(value["detail"], expected_detail);
+        // No private file paths or secret values in what the user sees.
+        assert!(
+            !detail.contains('/'),
+            "the detail must not contain a file path: {detail}"
+        );
+        assert!(
+            !detail.contains('\\'),
+            "the detail must not contain a Windows path: {detail}"
+        );
+        assert!(
+            !detail.contains(".sqlite3"),
+            "the detail must not contain a database path: {detail}"
+        );
+        assert!(
+            !detail.contains(".backup"),
+            "the detail must not contain a backup path: {detail}"
+        );
+        let lowered = detail.to_lowercase();
+        assert!(
+            !lowered.contains("cookie"),
+            "the detail must not contain a secret: {detail}"
+        );
+        assert!(
+            !lowered.contains("token"),
+            "the detail must not contain a secret: {detail}"
+        );
+        assert!(
+            !lowered.contains("secret"),
+            "the detail must not contain a secret: {detail}"
+        );
+    }
+
+    /// Boundary regression: the error as it is actually sent over IPC.
+    ///
+    /// For each recovery outcome, the `IpcError` built the way `backup_restore`
+    /// builds it must carry the short summary as the message and the exact
+    /// outcome wording as the detail (see `assert_ipc_error_carries_outcome`).
+    /// Variants 1 and 2 are driven through the seam (Case A / Case B setups),
+    /// so the message, the outcome and the conversion are all exercised end to
+    /// end; variants 3 and 4 are built from the reopen branch's message,
+    /// because that branch itself cannot be driven deterministically — the
+    /// conversion is the same code either way, and the wording is pinned by
+    /// the outcome test. Variant 5 (the unknown outcome) is built the same
+    /// way, from the reopen branch's message and the rollback facts; the
+    /// outcome selection itself is executed for real by the injected
+    /// rollback test.
+    #[test]
+    fn restore_failure_ipc_error_carries_outcome_as_detail() {
+        let dir = m6_test_dir("m7-ipc-error-boundary");
+        let live = dir.join("soluna.sqlite3");
+        let staged = dir.join("staged.sqlite3");
+        // Variant 1: migration failure with a previous library (Case A setup).
+        m6_seed_db(&live, "Original Library Song");
+        m7_seed_migration_failing_db(&staged);
+        let mut db = Connection::open(&live).expect("open live db");
+        let failure =
+            crate::ipc::backup::swap_and_activate_restored_database(&live, &staged, &mut db)
+                .expect_err("the migration must fail");
+        assert_ipc_error_carries_outcome(
+            failure,
+            "restored database schema migration failed",
+            "The restore did not become active. Library unchanged and still in use. Retry from the backup; no restart. The backup file was not changed.",
+        );
+        drop(db);
+        // Variant 2: migration failure with no previous library (Case B setup).
+        let _ = fs::remove_file(&live);
+        let _ = fs::remove_file(restore_previous_path(&live));
+        m7_seed_migration_failing_db(&staged);
+        let mut db = Connection::open_in_memory().expect("placeholder connection");
+        let failure =
+            crate::ipc::backup::swap_and_activate_restored_database(&live, &staged, &mut db)
+                .expect_err("the migration must fail");
+        assert_ipc_error_carries_outcome(
+            failure,
+            "restored database schema migration failed",
+            "Restart Soluna: restore did not become active; no previous library; library is empty. Retry from backup. Nothing you save now will be kept. The backup file was not changed.",
+        );
+        drop(db);
+        // Variants 3 and 4: the reopen branch's message. That branch cannot be
+        // driven deterministically (see the coverage note on the outcome test),
+        // so these are built from its message and the helper wording; the
+        // conversion under test is identical.
+        for (reconnected, had_previous, renamed_back, summary, detail) in [
+            (
+                false,
+                true,
+                true,
+                "restored database reopen failed",
+                "Restart Soluna: restore did not become active; at the live location; not reconnected. Retry from backup. If it does not load, retry from the backup. The backup file was not changed.",
+            ),
+            (
+                false,
+                true,
+                false,
+                "restored database reopen failed",
+                "Restart Soluna: restore did not become active; previous database kept; not put back. Retry from backup. Soluna could not reconnect. If it does not load, retry from the backup.",
+            ),
+        ] {
+            let failure = crate::ipc::backup::RestoreFailure {
+                message: format!("{summary}: permission denied"),
+                outcome: crate::ipc::backup::failed_restore_outcome(
+                    reconnected,
+                    had_previous,
+                    renamed_back,
+                ),
+            };
+            assert_ipc_error_carries_outcome(failure, summary, detail);
+        }
+        // Variant 5: the rollback reconnected but cannot prove the original
+        // library (remove and rename-back both failed). It cannot be driven
+        // through the seam — the fault would have to be staged between the
+        // swap and the rollback, which only the rollback seam can do — so
+        // this is built from the reopen branch's message and the rollback
+        // facts, like variants 3 and 4; the conversion under test is
+        // identical, and the outcome selection itself is executed for real
+        // by the injected rollback test.
+        let unknown_facts = crate::ipc::backup::RollbackFacts {
+            reconnected: true,
+            had_previous: true,
+            renamed_back: false,
+            removed_staged: false,
+        };
+        let failure = crate::ipc::backup::RestoreFailure {
+            message: "restored database reopen failed: permission denied".to_owned(),
+            outcome: crate::ipc::backup::rollback_failure_outcome(&unknown_facts),
+        };
+        assert_ipc_error_carries_outcome(
+            failure,
+            "restored database reopen failed",
+            "Restart Soluna: restore did not become active; the library in use is unconfirmed. Retry from backup. The backup file was not changed.",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Swap-failure branch: when the swap itself fails (here forced by a
+    /// missing staged file, so `sync_file` fails before anything is moved),
+    /// the original library must be kept and the session reconnected to it,
+    /// with the same restart guidance as the other branches — and the swap
+    /// branch must never remove the live file (it may hold the original).
+    /// This covers only the early failure. The swap double fault's execution
+    /// path (the staged→live rename fails AND the rename-back fails) is
+    /// SIMULATED, not executed: its wording is pinned by the outcome test
+    /// (see the coverage note there), not by this test.
+    #[test]
+    fn restore_swap_failure_keeps_original_and_requires_no_restart() {
+        let dir = m6_test_dir("m7-swap-failure");
+        let live = dir.join("soluna.sqlite3");
+        let staged = dir.join("staged.sqlite3");
+        m6_seed_db(&live, "Original Library Song");
+        // The staged file is deliberately NOT created: `sync_file` fails and
+        // the swap aborts before moving anything.
+        assert!(
+            !staged.exists(),
+            "no staged file: the swap must fail at sync"
+        );
+        let mut db = Connection::open(&live).expect("open live db");
+        let failure =
+            crate::ipc::backup::swap_and_activate_restored_database(&live, &staged, &mut db)
+                .expect_err("the swap must fail");
+        assert!(
+            failure.message.contains("database restore swap failed"),
+            "unexpected error: {}",
+            failure.message
+        );
+        assert!(
+            failure.outcome.contains("restore did not become active"),
+            "the outcome must say the restore did not become active: {}",
+            failure.outcome
+        );
+        assert!(
+            failure.outcome.contains("unchanged and still in use"),
+            "the outcome must say the library is unchanged and still in use: {}",
+            failure.outcome
+        );
+        assert!(
+            failure.outcome.contains("no restart"),
+            "the outcome must say no restart is required: {}",
+            failure.outcome
+        );
+        // The original live file is preserved (never removed by the swap branch),
+        // and no previous file appears (the swap failed before moving anything).
+        assert_eq!(
+            m6_titles(&live),
+            vec!["Original Library Song"],
+            "the original live database must be preserved after a failed swap"
+        );
+        assert!(
+            !restore_previous_path(&live).exists(),
+            "no previous file must appear when the swap fails before moving anything"
+        );
+        // The connection points at the original file.
+        let file: String = db
+            .query_row("PRAGMA database_list", [], |row| row.get(2))
+            .expect("database_list");
+        assert_eq!(
+            PathBuf::from(file),
+            live,
+            "the connection must be backed by the live file"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Remove-fails PLUS rename-fails: the rollback must NOT report the
+    /// library as unchanged and still in use.
+    ///
+    /// REAL execution, staged fault: the rollback and the reopen run for
+    /// real, on real files, with the remove and the rename-back both
+    /// failing (staged by the test-only seam — see
+    /// `inject_rollback_failures` for why the OS cannot stage this fault
+    /// here: root bypasses directory permissions, `chattr +i` is not
+    /// permitted on this filesystem, and on Windows a read-only directory
+    /// does not block deletion). The live path then still holds the staged
+    /// (restored, un-migrated) database, the reopen succeeds, and the old
+    /// code reported V1 ("Library unchanged and still in use. No
+    /// restart.") — false: the library in use is the restored database,
+    /// not the original. The fix selects the honest unknown outcome
+    /// instead (restart + retry). The previous database is preserved on
+    /// every path: it is only ever renamed, never deleted.
+    #[test]
+    fn restore_rollback_remove_and_rename_failures_use_unknown_outcome() {
+        let dir = m6_test_dir("m7-rollback-remove-rename-fail");
+        let live = dir.join("soluna.sqlite3");
+        let previous = restore_previous_path(&live);
+        // The live file holds the STAGED (restored, un-migrated) database;
+        // the previous file holds the original library.
+        m6_seed_db(&live, "Staged Song");
+        m6_seed_db(&previous, "Original Library Song");
+        crate::ipc::backup::inject_rollback_failures(true, true);
+        let mut db = Connection::open_in_memory().expect("placeholder connection");
+        let facts = crate::ipc::backup::rollback_failed_restore(&live, &previous, &mut db);
+        crate::ipc::backup::inject_rollback_failures(false, false);
+        // The rollback's own facts must record both failures — and the
+        // reopen must still have succeeded (the live file is still there
+        // and opens).
+        assert!(
+            facts.reconnected,
+            "the reopen must succeed: the live file is still there and opens"
+        );
+        assert!(
+            facts.had_previous,
+            "a previous database existed before the rollback"
+        );
+        assert!(
+            !facts.renamed_back,
+            "the rename-back must have failed (injected)"
+        );
+        assert!(
+            !facts.removed_staged,
+            "the remove must have failed (injected)"
+        );
+        // The outcome must be the honest unknown one — NOT V1's false
+        // "unchanged and still in use / no restart".
+        let outcome = crate::ipc::backup::rollback_failure_outcome(&facts);
+        assert!(
+            outcome.contains("restore did not become active"),
+            "the outcome must say the restore did not become active: {outcome}"
+        );
+        assert!(
+            outcome.contains("the library in use is unconfirmed"),
+            "the outcome must say the library in use is unconfirmed: {outcome}"
+        );
+        assert!(
+            outcome.contains("Restart Soluna"),
+            "the outcome must require a restart: {outcome}"
+        );
+        assert!(
+            outcome.contains("Retry from backup"),
+            "the outcome must offer the retry from the unchanged backup: {outcome}"
+        );
+        assert!(
+            !outcome.contains("unchanged and still in use"),
+            "the outcome must NOT claim the original library is in use: {outcome}"
+        );
+        assert!(
+            !outcome.contains("no restart"),
+            "the outcome must NOT say no restart is needed: {outcome}"
+        );
+        assert!(
+            outcome.chars().count() <= 200,
+            "the outcome must fit the 200-character detail cap, got {} chars: {outcome}",
+            outcome.chars().count()
+        );
+        // The live file still holds the staged database (the remove
+        // failed), the previous database is untouched, and the session
+        // connection reads the staged database — not the original library.
+        assert_eq!(
+            m6_titles(&live),
+            vec!["Staged Song"],
+            "the live file must still hold the staged database: the remove failed"
+        );
+        assert_eq!(
+            m6_titles(&previous),
+            vec!["Original Library Song"],
+            "the previous database must be preserved, never deleted"
+        );
+        let titles: Vec<String> = db
+            .prepare("SELECT title FROM songs ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["Staged Song"],
+            "the rolled-back connection reads the staged database, not the original library"
+        );
+        let file: String = db
+            .query_row("PRAGMA database_list", [], |row| row.get(2))
+            .expect("database_list");
+        assert_eq!(
+            PathBuf::from(file),
+            live,
+            "the connection must be backed by the live file, not :memory:"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Outcome-level selection for the unknown outcome: `rollback_failure_outcome`
+    /// over the file-operation results as inputs.
+    ///
+    /// SIMULATED (pure logic, not execution): this drives the selector
+    /// directly with the facts as inputs — it does not execute the failing
+    /// remove or rename. The real execution is the injected test above,
+    /// which runs the rollback with both failures staged and asserts the
+    /// same outcome. What this pins is the selection over the reachable
+    /// combinations of the fourth fact: a reconnected rollback selects the
+    /// unknown outcome exactly when the remove failed AND the rename-back
+    /// failed, and the original-library wording exactly when either one
+    /// succeeded (remove succeeded means the reopen could only have
+    /// succeeded via the helper's retry rename of the previous database;
+    /// rename-back succeeded means the previous database is at the live
+    /// path — on Linux the rename overwrites the staged content, on
+    /// Windows it succeeds only when the destination is absent).
+    #[test]
+    fn restore_failure_outcomes_select_unknown_when_rollback_cannot_prove_original() {
+        use crate::ipc::backup::RollbackFacts;
+        // (facts, label, selects the unknown outcome, intactness claim when it does not)
+        let cases: [(RollbackFacts, &str, bool, &str); 5] = [
+            (
+                RollbackFacts {
+                    reconnected: true,
+                    had_previous: true,
+                    renamed_back: false,
+                    removed_staged: false,
+                },
+                "reconnected rollback, remove and rename-back both failed",
+                true,
+                "",
+            ),
+            (
+                RollbackFacts {
+                    reconnected: true,
+                    had_previous: false,
+                    renamed_back: false,
+                    removed_staged: false,
+                },
+                "reconnected rollback, no previous, remove and rename-back both failed",
+                true,
+                "",
+            ),
+            (
+                RollbackFacts {
+                    reconnected: true,
+                    had_previous: true,
+                    renamed_back: false,
+                    removed_staged: true,
+                },
+                "reconnected rollback, remove succeeded",
+                false,
+                "unchanged and still in use",
+            ),
+            (
+                RollbackFacts {
+                    reconnected: true,
+                    had_previous: true,
+                    renamed_back: true,
+                    removed_staged: false,
+                },
+                "reconnected rollback, rename-back succeeded",
+                false,
+                "unchanged and still in use",
+            ),
+            (
+                RollbackFacts {
+                    reconnected: false,
+                    had_previous: true,
+                    renamed_back: false,
+                    removed_staged: false,
+                },
+                "not-reconnected rollback, remove and rename-back both failed",
+                false,
+                "previous database kept",
+            ),
+        ];
+        for (facts, label, expect_unknown, intactness) in cases {
+            let outcome = crate::ipc::backup::rollback_failure_outcome(&facts);
+            assert!(
+                outcome.contains("restore did not become active"),
+                "{label}: every outcome must say the restore did not become active: {outcome}"
+            );
+            assert!(
+                outcome.chars().count() <= 200,
+                "{label}: the outcome must fit the 200-character detail cap, got {} chars: {outcome}",
+                outcome.chars().count()
+            );
+            if expect_unknown {
+                assert!(
+                    outcome.contains("the library in use is unconfirmed"),
+                    "{label}: the outcome must say the library in use is unconfirmed: {outcome}"
+                );
+                assert!(
+                    outcome.contains("Restart Soluna"),
+                    "{label}: the unknown outcome must require a restart: {outcome}"
+                );
+                assert!(
+                    outcome.contains("Retry from backup"),
+                    "{label}: the unknown outcome must offer the retry: {outcome}"
+                );
+                assert!(
+                    !outcome.contains("unchanged and still in use"),
+                    "{label}: the outcome must NOT claim the original library is in use: {outcome}"
+                );
+                assert!(
+                    !outcome.contains("no restart"),
+                    "{label}: the outcome must NOT say no restart is needed: {outcome}"
+                );
+            } else {
+                assert!(
+                    outcome.contains(intactness),
+                    "{label}: the outcome must state the library's state: {outcome}"
+                );
+            }
+        }
+    }
+
+    // --- M7 follow-up: migration-failure rollback (end) ---
+
     // --- regression tests for the review fixes (end) ---
 }
