@@ -244,3 +244,82 @@ export function mergeFailedPlayQueue<T extends Keyed>({
   });
   return { items: merged, index: indexOfCurrent(merged), extended: false };
 }
+
+/** The queue as last rendered, with its continuation: what the live mirror holds. */
+export type QueueState<T> = {
+  items: T[];
+  continuation: string | null;
+  kind: "next" | "playlist" | null;
+};
+
+/**
+ * The pre-play state a failed playItem rolls back to (M4): the render-time queue with
+ * its index/continuation/kind, and whether shuffle was on. Captured before the play
+ * advances anything — when ytm_player fails, the <audio> element keeps the previous
+ * song (it is only re-sourced from `player`, which is only set on success), so the
+ * queue must roll back to the song actually playing.
+ */
+export type FailedPlaySnapshot<T> = QueueState<T> & {
+  index: number;
+  shuffle: boolean;
+};
+
+/** Capture the pre-play state for a failed-play rollback. */
+export function snapshotFailedPlay<T>(
+  items: T[],
+  index: number,
+  continuation: string | null,
+  kind: "next" | "playlist" | null,
+  shuffle: boolean,
+): FailedPlaySnapshot<T> {
+  return { items, index, continuation, kind, shuffle };
+}
+
+export type FailedPlayRollbackDecision<T> = QueueState<T> & { index: number };
+
+/**
+ * Decide the queue, index, continuation and kind a failed playItem rolls back to (M4).
+ *
+ * `previous` is the pre-play snapshot, `advanced` the queue the failed play set before
+ * resolving (with its continuation/kind), and `live` the queue as last rendered. The
+ * caller applies the decision and must guard it with the play requestId: a failure
+ * superseded by a newer play (or clearQueue) must never clobber it.
+ *
+ * When the failed play only extended the pre-play queue, the live continuation belongs
+ * to the merged queue (a continuation append included); otherwise the pre-play
+ * continuation is restored. The live queue is read from the render mirror because
+ * playItem's closure only sees the queue from its render. When the failure lands
+ * before that mirror's first render after the advance, the live queue is still the
+ * snapshot, so the advanced queue stands in for it (no edit could have been applied yet).
+ */
+export function resolveFailedPlayRollback<T extends Keyed>({
+  previous,
+  advanced,
+  advancedContinuation,
+  advancedKind,
+  live,
+}: {
+  previous: FailedPlaySnapshot<T>;
+  advanced: T[];
+  advancedContinuation: string | null;
+  advancedKind: "next" | "playlist" | null;
+  live: QueueState<T>;
+}): FailedPlayRollbackDecision<T> {
+  const renderedAfterAdvance = live.items !== previous.items || live.items === advanced;
+  const current = renderedAfterAdvance ? live.items : advanced;
+  const merged = mergeFailedPlayQueue({
+    previous: previous.items,
+    advanced,
+    current,
+    previousIndex: previous.index,
+  });
+  if (merged.extended) {
+    return {
+      items: merged.items,
+      index: merged.index,
+      continuation: renderedAfterAdvance ? live.continuation : advancedContinuation,
+      kind: renderedAfterAdvance ? live.kind : advancedKind,
+    };
+  }
+  return { items: merged.items, index: merged.index, continuation: previous.continuation, kind: previous.kind };
+}

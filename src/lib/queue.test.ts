@@ -5,8 +5,10 @@ import {
   mergeFailedPlayQueue,
   moveItem,
   removeAt,
+  resolveFailedPlayRollback,
   shuffleAfterCurrent,
   shuffleInPlace,
+  snapshotFailedPlay,
 } from "./queue";
 
 const songs = (...ids: string[]) => ids.map((id) => ({ id, videoId: `v-${id}` }));
@@ -212,5 +214,164 @@ describe("mergeFailedPlayQueue (M4 rework)", () => {
   it("playing song removed from the live queue leaves no active song after a replaced queue", () => {
     // The advance replaced the queue with [a]; the flight then removed `a` itself.
     check(["a", "b"], ["a"], [], 0, ["b"], -1, false);
+  });
+});
+
+describe("resolveFailedPlayRollback (M4 size cap)", () => {
+  // `previous` is the pre-play snapshot, `advanced` the queue the failed play set,
+  // `live` the render mirror. Identity matters: the mirror holds the SAME array as
+  // the snapshot until a render after the advance replaces it, so cases that depend
+  // on that share one array reference. Every case asserts the exact decision: the
+  // queue, the index, and which continuation/kind survives.
+  const decide = ({
+    previous,
+    previousIndex,
+    previousContinuation,
+    previousKind,
+    advanced,
+    advancedContinuation,
+    advancedKind,
+    live,
+    liveContinuation,
+    liveKind,
+  }: {
+    previous: { id: string; videoId: string }[];
+    previousIndex: number;
+    previousContinuation: string | null;
+    previousKind: "next" | "playlist" | null;
+    advanced: { id: string; videoId: string }[];
+    advancedContinuation: string | null;
+    advancedKind: "next" | "playlist" | null;
+    live: { id: string; videoId: string }[];
+    liveContinuation: string | null;
+    liveKind: "next" | "playlist" | null;
+  }) =>
+    resolveFailedPlayRollback({
+      previous: snapshotFailedPlay(previous, previousIndex, previousContinuation, previousKind, false),
+      advanced,
+      advancedContinuation,
+      advancedKind,
+      live: { items: live, continuation: liveContinuation, kind: liveKind },
+    });
+
+  it("uses the live queue and continuation once the mirror rendered after the advance", () => {
+    const result = decide({
+      previous: songs("a", "b"),
+      previousIndex: 0,
+      previousContinuation: "prev-cont",
+      previousKind: "playlist",
+      advanced: songs("a", "b"),
+      advancedContinuation: "adv-cont",
+      advancedKind: "next",
+      live: songs("a", "b", "c"),
+      liveContinuation: "live-cont",
+      liveKind: "next",
+    });
+    expect(ids(result.items)).toEqual(["a", "b", "c"]);
+    expect(result.index).toBe(0);
+    expect(result.continuation).toBe("live-cont");
+    expect(result.kind).toBe("next");
+  });
+
+  it("falls back to the advanced queue when the mirror still holds the snapshot", () => {
+    // The failure landed before the mirror's first render after the advance, so
+    // the live queue IS the snapshot (same array) — the advanced queue stands in.
+    const snapshot = songs("a", "b");
+    const result = decide({
+      previous: snapshot,
+      previousIndex: 0,
+      previousContinuation: "prev-cont",
+      previousKind: "playlist",
+      advanced: songs("x", "y"),
+      advancedContinuation: "adv-cont",
+      advancedKind: "next",
+      live: snapshot,
+      liveContinuation: "prev-cont",
+      liveKind: "playlist",
+    });
+    expect(ids(result.items)).toEqual(["a", "b"]);
+    expect(result.index).toBe(0);
+    expect(result.continuation).toBe("prev-cont");
+    expect(result.kind).toBe("playlist");
+  });
+
+  it("keeps the live continuation when the failed play only extended the queue", () => {
+    const result = decide({
+      previous: songs("a", "b", "c"),
+      previousIndex: 1,
+      previousContinuation: "prev-cont",
+      previousKind: "next",
+      advanced: songs("a", "b", "c"),
+      advancedContinuation: "adv-cont",
+      advancedKind: "next",
+      live: songs("a", "b"),
+      liveContinuation: "live-cont",
+      liveKind: "next",
+    });
+    expect(ids(result.items)).toEqual(["a", "b"]);
+    expect(result.index).toBe(1);
+    expect(result.continuation).toBe("live-cont");
+    expect(result.kind).toBe("next");
+  });
+
+  it("restores the previous continuation when the failed play replaced the queue", () => {
+    const result = decide({
+      previous: songs("a", "b"),
+      previousIndex: 0,
+      previousContinuation: "prev-cont",
+      previousKind: "playlist",
+      advanced: songs("x", "y"),
+      advancedContinuation: "adv-cont",
+      advancedKind: "next",
+      live: songs("x", "y", "c"),
+      liveContinuation: "live-cont",
+      liveKind: "next",
+    });
+    expect(ids(result.items)).toEqual(["a", "b", "c"]);
+    expect(result.index).toBe(0);
+    expect(result.continuation).toBe("prev-cont");
+    expect(result.kind).toBe("playlist");
+  });
+
+  it("leaves no active song when the playing song was removed mid-flight", () => {
+    const result = decide({
+      previous: songs("a", "b"),
+      previousIndex: 0,
+      previousContinuation: "prev-cont",
+      previousKind: "playlist",
+      advanced: songs("a", "b"),
+      advancedContinuation: "adv-cont",
+      advancedKind: "next",
+      live: songs("b"),
+      liveContinuation: "live-cont",
+      liveKind: "next",
+    });
+    expect(ids(result.items)).toEqual(["b"]);
+    expect(result.index).toBe(-1);
+    expect(result.continuation).toBe("live-cont");
+    expect(result.kind).toBe("next");
+  });
+
+  it("same-queue play where the mirror never changed identity keeps the live continuation", () => {
+    // The advance did not replace the queue array (same reference throughout), so
+    // the mirror still holds the snapshot array — but its continuation already
+    // reflects the advance, and that is the continuation to keep.
+    const queue = songs("a", "b");
+    const result = decide({
+      previous: queue,
+      previousIndex: 0,
+      previousContinuation: "prev-cont",
+      previousKind: "playlist",
+      advanced: queue,
+      advancedContinuation: "adv-cont",
+      advancedKind: "next",
+      live: queue,
+      liveContinuation: "adv-cont",
+      liveKind: "next",
+    });
+    expect(ids(result.items)).toEqual(["a", "b"]);
+    expect(result.index).toBe(0);
+    expect(result.continuation).toBe("adv-cont");
+    expect(result.kind).toBe("next");
   });
 });
