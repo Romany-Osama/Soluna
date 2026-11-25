@@ -266,8 +266,15 @@ const EXPECTED_RESTORE_SCHEMA: &[(&str, &[&str])] = &[
     (
         "songs",
         &[
-            "id", "title", "subtitle", "thumbnail", "browse_id", "playlist_id",
-            "video_id", "kind", "saved_at",
+            "id",
+            "title",
+            "subtitle",
+            "thumbnail",
+            "browse_id",
+            "playlist_id",
+            "video_id",
+            "kind",
+            "saved_at",
         ],
     ),
     (
@@ -277,7 +284,10 @@ const EXPECTED_RESTORE_SCHEMA: &[(&str, &[&str])] = &[
     ("playlist_songs", &["playlist_id", "position", "song_id"]),
     ("history", &["id", "song_id", "played_at"]),
     ("search_history", &["id", "query", "searched_at"]),
-    ("lyrics", &["song_id", "provider", "text", "synced", "fetched_at"]),
+    (
+        "lyrics",
+        &["song_id", "provider", "text", "synced", "fetched_at"],
+    ),
     (
         "lyrics_variants",
         &[
@@ -327,7 +337,14 @@ const EXPECTED_RESTORE_SCHEMA: &[(&str, &[&str])] = &[
     ("player_cache", &["song_id", "path", "bytes", "cached_at"]),
     (
         "podcasts",
-        &["id", "title", "author", "thumbnail", "bookmarked_at", "saved_at"],
+        &[
+            "id",
+            "title",
+            "author",
+            "thumbnail",
+            "bookmarked_at",
+            "saved_at",
+        ],
     ),
     (
         "speed_dial",
@@ -715,12 +732,10 @@ fn restored_database_is_valid(path: &Path) -> bool {
     // table fails here the same way a missing column does. Table names come from
     // our own constant, never from the file being checked.
     for (table, expected_columns) in EXPECTED_RESTORE_SCHEMA {
-        let Ok(mut statement) = candidate.prepare(&format!("PRAGMA table_info({table})"))
-        else {
+        let Ok(mut statement) = candidate.prepare(&format!("PRAGMA table_info({table})")) else {
             return false;
         };
-        let Ok(actual_columns) = statement.query_map([], |row| row.get::<_, String>(1))
-        else {
+        let Ok(actual_columns) = statement.query_map([], |row| row.get::<_, String>(1)) else {
             return false;
         };
         let Ok(actual_columns) = actual_columns.collect::<Result<HashSet<_>, _>>() else {
@@ -9486,10 +9501,8 @@ mod tests {
         let staged = dir.join("staged.sqlite3");
         m6_seed_db(&staged, "M7 Song");
         let db = Connection::open(&staged).expect("seed db");
-        db.execute_batch(
-            "CREATE TRIGGER m7_trigger AFTER INSERT ON songs BEGIN SELECT 1; END;",
-        )
-        .expect("trigger");
+        db.execute_batch("CREATE TRIGGER m7_trigger AFTER INSERT ON songs BEGIN SELECT 1; END;")
+            .expect("trigger");
         drop(db);
         assert!(
             !restored_database_is_valid(&staged),

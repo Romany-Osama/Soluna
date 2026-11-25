@@ -193,8 +193,7 @@ pub fn backup_restore(state: tauri::State<'_, RuntimeState>) -> IpcResult<String
     if !restored_database_is_valid(&temp_db) {
         let _ = fs::remove_file(&temp_db);
         return Err(IpcError::from(
-            "backup database failed validation: integrity, schema, version or triggers"
-                .to_owned(),
+            "backup database failed validation: integrity, schema, version or triggers".to_owned(),
         ));
     }
     let candidate = match Connection::open(&temp_db) {
