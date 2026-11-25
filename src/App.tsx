@@ -2809,7 +2809,7 @@ function App() {
                 selectionMode={selectionMode}
                 setLibraryMixSort={setLibraryMixSort}
                 setLibraryMixSortDescending={setLibraryMixSortDescending}
-                setLibraryMode={setLibraryMode}
+                openLibraryMode={openRoute}
                 setLibrarySearch={setLibrarySearch}
                 setLibrarySort={setLibrarySort}
                 setLibrarySortDescending={setLibrarySortDescending}

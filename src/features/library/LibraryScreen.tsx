@@ -1,4 +1,5 @@
 import { Dispatch, SetStateAction } from "react";
+import type { LibraryMode, Route } from "../../app/routes";
 import { InlineLikeButton } from "../../components/InlineLikeButton";
 import { ItemCard } from "../../components/ItemCard";
 import { SpotifyLibraryBlock } from "../../components/SpotifyLibraryBlock";
@@ -71,22 +72,7 @@ export type LibraryScreenProps = {
   selectionMode: boolean;
   setLibraryMixSort: Dispatch<SetStateAction<"created" | "name">>;
   setLibraryMixSortDescending: Dispatch<SetStateAction<boolean>>;
-  setLibraryMode: Dispatch<
-    SetStateAction<
-      | "liked"
-      | "uploaded"
-      | "top"
-      | "mix"
-      | "local"
-      | "songs"
-      | "downloads"
-      | "cache"
-      | "playlists"
-      | "albums"
-      | "artists"
-      | "podcasts"
-    >
-  >;
+  openLibraryMode: (route: Route) => Promise<boolean>;
   setLibrarySearch: Dispatch<SetStateAction<string>>;
   setLibrarySort: Dispatch<SetStateAction<LibrarySort>>;
   setLibrarySortDescending: Dispatch<SetStateAction<boolean>>;
@@ -151,7 +137,7 @@ export function LibraryScreen({
   selectionMode,
   setLibraryMixSort,
   setLibraryMixSortDescending,
-  setLibraryMode,
+  openLibraryMode,
   setLibrarySearch,
   setLibrarySort,
   setLibrarySortDescending,
@@ -174,6 +160,10 @@ export function LibraryScreen({
   topPeriod,
   visiblePlaylists,
 }: LibraryScreenProps) {
+  const setLibraryMode: Dispatch<SetStateAction<LibraryMode>> = (action) => {
+    const mode = typeof action === "function" ? action(libraryMode) : action;
+    void openLibraryMode({ name: "library", mode });
+  };
   return (
     <>
       {
