@@ -13,7 +13,8 @@ use std::sync::Mutex;
 
 const PREFIX: &str = "enc1:";
 const SERVICE: &str = "Soluna";
-/// The credential-store name Meld Desktop used before the rename. A key saved there is adopted, never deleted.
+/// The credential-store name Meld Desktop used before the rename. A key saved there is adopted, never deleted
+/// by the adoption itself; it is only removed by a full sign-out once no sealed session remains (M9).
 const LEGACY_SERVICE: &str = "Meld Desktop";
 const KEY_USER: &str = "session-encryption-key";
 const NONCE_LEN: usize = 12;
@@ -33,6 +34,8 @@ const REMOVED_KEYS: [&str; 0] = [];
 pub trait KeyStore {
     fn load(&self) -> Result<Option<Vec<u8>>, String>;
     fn store(&self, key: &[u8]) -> Result<(), String>;
+    /// Destroys the key. Absent is success (idempotent); the in-memory cache, if any, must go too.
+    fn delete(&self) -> Result<(), String>;
 }
 
 static KEY_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
@@ -63,6 +66,14 @@ impl KeyStore for ServiceKey {
         self.entry()?
             .set_password(&BASE64.encode(key))
             .map_err(|error| format!("secure storage write failed: {error}"))
+    }
+
+    fn delete(&self) -> Result<(), String> {
+        match self.entry()?.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("secure storage delete failed: {error}")),
+        }
     }
 }
 
@@ -110,6 +121,18 @@ impl KeyStore for KeyringStore {
             .lock()
             .map_err(|_| "key cache poisoned".to_owned())? = Some(key.to_vec());
         Ok(())
+    }
+
+    fn delete(&self) -> Result<(), String> {
+        // The in-memory copy must go too: load() would otherwise keep returning (and re-sealing with) a
+        // key that no longer exists in the credential store. Clearing it first is safe even if the
+        // OS delete below fails: the next load re-reads the store and finds the key still there.
+        *KEY_CACHE
+            .lock()
+            .map_err(|_| "key cache poisoned".to_owned())? = None;
+        ServiceKey(SERVICE).delete()?;
+        // Once no sealed row remains the legacy key protects nothing either, so it is removed as well (M9).
+        ServiceKey(LEGACY_SERVICE).delete()
     }
 }
 
@@ -269,6 +292,10 @@ mod tests {
             *self.0.lock().unwrap() = Some(key.to_vec());
             Ok(())
         }
+        fn delete(&self) -> Result<(), String> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
     }
     struct BrokenStore;
     impl KeyStore for BrokenStore {
@@ -276,6 +303,9 @@ mod tests {
             Err("secure storage unavailable".to_owned())
         }
         fn store(&self, _key: &[u8]) -> Result<(), String> {
+            Err("secure storage unavailable".to_owned())
+        }
+        fn delete(&self) -> Result<(), String> {
             Err("secure storage unavailable".to_owned())
         }
     }
@@ -470,6 +500,74 @@ mod tests {
         assert_eq!(KeyringStore.load().unwrap(), Some(vec![7u8; 32]));
     }
 
+    /// Windows-only regression test for M9: `ServiceKey::delete` must remove the
+    /// entry from the real Windows Credential Manager, not just from an in-memory
+    /// stand-in. It runs in the normal `cargo test --lib` on Windows CI.
+    ///
+    /// The loud-failure check up front is the whole point of the test. Keyring
+    /// 3.6.3 selects its backend at compile time (`keyring-3.6.3/src/lib.rs`:
+    /// on Windows, `windows-native` -> `windows` module, otherwise -> `mock`
+    /// module), and `Entry::get_credential` (`lib.rs:511`) exposes the concrete
+    /// credential as `&dyn Any` precisely so it can be downcast. If the entry
+    /// downcasts to `MockCredential`, the real store is not in play and the
+    /// test fails instead of passing vacuously. On Windows there are only the
+    /// two defaults, so "not the mock" is "the real `WinCredential`", whose
+    /// `delete_credential` calls `CredDeleteW` (`windows.rs:155-166`).
+    #[cfg(windows)]
+    #[test]
+    fn service_key_delete_removes_the_real_credential_manager_entry() {
+        // Unique throwaway service name per run; never the production names.
+        // `ServiceKey` takes a `&'static str`, so the formatted name is leaked
+        // for the life of the test process — acceptable in a test.
+        let service: &'static str =
+            Box::leak(format!("SolunaM9Test-{}", std::process::id()).into_boxed_str());
+        assert_ne!(service, SERVICE, "must not touch the real Soluna entry");
+        assert_ne!(
+            service, LEGACY_SERVICE,
+            "must not touch the real Meld Desktop entry"
+        );
+        let key = ServiceKey(service);
+        // Guard: removes the throwaway entry when the test ends, even if an
+        // assert below panics, so a failed run cannot leave a credential behind.
+        struct DeleteOnDrop<'a>(&'a ServiceKey);
+        impl Drop for DeleteOnDrop<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.delete();
+            }
+        }
+        let _guard = DeleteOnDrop(&key);
+        // Fail loudly if keyring resolved to its in-memory mock instead of the
+        // real Windows Credential Manager (e.g. the `windows-native` feature
+        // was dropped). A mock would make every assert below pass vacuously.
+        let entry = key.entry().expect("secure storage unavailable");
+        assert!(
+            entry
+                .get_credential()
+                .downcast_ref::<keyring::mock::MockCredential>()
+                .is_none(),
+            "refusing to test against keyring's in-memory mock backend: the real Windows Credential Manager is not in play (is the `windows-native` feature enabled?)"
+        );
+        // Delete of an absent entry is Ok — and clears any stale entry a
+        // crashed earlier run left behind under this name.
+        key.delete()
+            .expect("delete of an absent entry must succeed");
+        let stored = [0x5a_u8; 32];
+        key.store(&stored).expect("store must succeed");
+        assert_eq!(
+            key.load().expect("load must succeed"),
+            Some(stored.to_vec()),
+            "stored key must round-trip through the real store"
+        );
+        key.delete().expect("delete must succeed");
+        assert_eq!(
+            key.load().expect("load must succeed"),
+            None,
+            "the entry must be gone from the real store after delete"
+        );
+        key.delete()
+            .expect("delete of an absent entry must succeed");
+    }
+
     /// A store whose key can be read but not written, like a locked credential store.
     struct ReadOnlyStore(Option<Vec<u8>>);
     impl KeyStore for ReadOnlyStore {
@@ -478,6 +576,9 @@ mod tests {
         }
         fn store(&self, _key: &[u8]) -> Result<(), String> {
             Err("secure storage write failed".to_owned())
+        }
+        fn delete(&self) -> Result<(), String> {
+            Err("secure storage delete failed".to_owned())
         }
     }
 
@@ -489,6 +590,9 @@ mod tests {
         }
         fn store(&self, key: &[u8]) -> Result<(), String> {
             self.0.store(key)
+        }
+        fn delete(&self) -> Result<(), String> {
+            self.0.delete()
         }
     }
 

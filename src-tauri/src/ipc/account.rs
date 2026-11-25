@@ -222,7 +222,8 @@ pub fn spotify_logout(
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<()> {
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
-    forget_spotify_session(&db).map_err(|e| format!("Spotify logout failed: {e}"))?;
+    forget_spotify_session(&db, &secrets::KeyringStore)
+        .map_err(|e| format!("Spotify logout failed: {e}"))?;
     // Without this, the Spotify login window's WebView2 cookies survive logout, so reopening the login page
     // silently reuses the old session instead of asking to sign in again. Best-effort: the account is already
     // disconnected locally either way, so a failure here does not fail the whole logout.
@@ -278,7 +279,8 @@ pub fn account_logout(
         .lock()
         .map_err(|_| "visitor state poisoned")? = None;
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
-    forget_google_session(&db).map_err(|e| format!("account logout failed: {e}"))?;
+    forget_google_session(&db, &secrets::KeyringStore)
+        .map_err(|e| format!("account logout failed: {e}"))?;
     if let Ok(mut health) = client_health().lock() {
         health.clear();
     }

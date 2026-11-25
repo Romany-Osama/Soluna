@@ -7044,14 +7044,50 @@ fn delete_settings(db: &Connection, keys: &[&str]) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn forget_google_session(db: &Connection) -> rusqlite::Result<()> {
-    delete_settings(db, GOOGLE_SESSION_KEYS)
+/// Removes one service's session rows and rebuilds the database file so the sealed secrets leave no
+/// residue in SQLite's free pages (M9): a plain DELETE leaves the ciphertext in the file, and the key
+/// that decrypts it was left in the credential store too, so the exposure was real even though the
+/// residue itself is sealed. Once no sealed row remains for either service, the shared encryption key
+/// is destroyed as well; while the other service is still signed in the key is retained, because its
+/// sealed rows still need it. A failure at any step reports an error instead of claiming the sign-out
+/// is complete, and the key is only destroyed after the scrub succeeds, so a failed logout never
+/// destroys the key while the other service's sealed rows are still present.
+fn forget_session(
+    db: &Connection,
+    store: &dyn secrets::KeyStore,
+    keys: &[&str],
+) -> Result<(), String> {
+    delete_settings(db, keys).map_err(|error| format!("session forget failed: {error}"))?;
+    db.execute_batch("PRAGMA secure_delete = ON; VACUUM;")
+        .map_err(|error| format!("session scrub failed: {error}"))?;
+    let mut sealed_remaining = false;
+    for key in secrets::SEALED_KEYS {
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",
+                params![key],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("sealed session check failed: {error}"))?;
+        if exists {
+            sealed_remaining = true;
+            break;
+        }
+    }
+    if !sealed_remaining {
+        store.delete()?;
+    }
+    Ok(())
 }
 
-fn forget_spotify_session(db: &Connection) -> rusqlite::Result<()> {
-    delete_settings(db, SPOTIFY_SESSION_KEYS)?;
-    db.execute("DELETE FROM spotify_match", [])?;
-    Ok(())
+fn forget_google_session(db: &Connection, store: &dyn secrets::KeyStore) -> Result<(), String> {
+    forget_session(db, store, GOOGLE_SESSION_KEYS)
+}
+
+fn forget_spotify_session(db: &Connection, store: &dyn secrets::KeyStore) -> Result<(), String> {
+    db.execute("DELETE FROM spotify_match", [])
+        .map_err(|error| format!("Spotify logout failed: {error}"))?;
+    forget_session(db, store, SPOTIFY_SESSION_KEYS)
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -7334,6 +7370,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::KeyStore;
 
     /// End-to-end against YouTube: `MELD_LIVE_TESTS=1 cargo test live_ -- --ignored --nocapture`.
     #[test]
@@ -8782,6 +8819,10 @@ mod tests {
             *self.0.lock().expect("key store") = Some(key.to_vec());
             Ok(())
         }
+        fn delete(&self) -> Result<(), String> {
+            *self.0.lock().expect("key store") = None;
+            Ok(())
+        }
     }
 
     #[test]
@@ -9088,10 +9129,10 @@ mod tests {
                 })
                 .count()
         };
-        forget_google_session(&db).expect("google logout");
+        forget_google_session(&db, &store).expect("google logout");
         assert_eq!(remaining(GOOGLE_SESSION_KEYS), 0);
         assert_eq!(remaining(SPOTIFY_SESSION_KEYS), SPOTIFY_SESSION_KEYS.len());
-        forget_spotify_session(&db).expect("spotify logout");
+        forget_spotify_session(&db, &store).expect("spotify logout");
         assert_eq!(remaining(SPOTIFY_SESSION_KEYS), 0);
         assert_eq!(remaining(&["volume"]), 1);
         for key in secrets::SEALED_KEYS {
@@ -9100,6 +9141,117 @@ mod tests {
                 "sealed secret {key} is not removed by any sign-out"
             );
         }
+    }
+
+    /// M9: signing out must scrub the sealed secrets from the database *file*, not just delete their rows,
+    /// and must destroy the shared encryption key once no sealed session remains for either service — while
+    /// keeping the key while the other service is still signed in (the key is shared by both services).
+    #[test]
+    fn signing_out_scrubs_sealed_secrets_from_the_file_and_destroys_the_key_when_no_session_remains(
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "soluna-logout-scrub-test-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("song.db");
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("db");
+        initialize_database(&db, &store).expect("schema");
+        // Filler rows so the sealed values span pages and a plain DELETE would leave them in free pages.
+        for index in 0..200 {
+            db.execute(
+                "INSERT INTO songs (id, title, kind, saved_at) VALUES (?1, ?2, 'song', 0)",
+                params![
+                    format!("s{index}"),
+                    format!("Song number {index} with some padding text")
+                ],
+            )
+            .expect("song");
+        }
+        for (key, value) in [
+            ("cookie", "TOPSECRETCOOKIE0123456789"),
+            ("spotifySpDc", "TOPSECRETSPDC1122334455"),
+            ("spotifySpKey", "TOPSECRETSPKEY6677889900"),
+            ("spotifyAccessToken", "TOPSECRETTOKEN5566778899"),
+        ] {
+            secrets::set_with(&db, &store, key, value).expect("seal");
+        }
+        db.execute(
+            "INSERT INTO settings(key, value) VALUES ('accountName', 'Somebody'), ('volume', '0.5')",
+            [],
+        )
+        .expect("other settings");
+        // The sealed blobs as stored: the file must contain them before logout (premise) and not after.
+        let sealed_blob = |key: &str| {
+            db.query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("sealed blob")
+        };
+        let blobs: Vec<(String, String)> = secrets::SEALED_KEYS
+            .iter()
+            .map(|key| (key.to_string(), sealed_blob(key)))
+            .collect();
+        assert!(
+            store.load().expect("key load").is_some(),
+            "premise: sealing a session creates the encryption key"
+        );
+        let file_contains = |needle: &str| {
+            let bytes = fs::read(&path).expect("read db file");
+            contains_bytes(&bytes, needle.as_bytes())
+        };
+        for (key, blob) in &blobs {
+            assert!(
+                file_contains(blob),
+                "premise: sealed {key} is present in the file before logout"
+            );
+        }
+        // Google signs out: its sealed cookie must be gone from the file, Spotify's must survive untouched,
+        // and the shared key must be retained while the Spotify session still exists.
+        forget_google_session(&db, &store).expect("google logout");
+        assert!(
+            !file_contains(&blobs[0].1),
+            "sealed cookie must not remain anywhere in the file after Google sign-out"
+        );
+        for (key, blob) in blobs.iter().skip(1) {
+            assert!(
+                file_contains(blob),
+                "sealed {key} must survive a Google-only sign-out"
+            );
+        }
+        assert!(
+            store.load().expect("key load").is_some(),
+            "the shared key must be retained while the Spotify session still has sealed rows"
+        );
+        // Spotify signs out too: no sealed session remains for either service, so the key must be destroyed.
+        forget_spotify_session(&db, &store).expect("spotify logout");
+        for (key, blob) in &blobs {
+            assert!(
+                !file_contains(blob),
+                "sealed {key} must not remain anywhere in the file after full sign-out"
+            );
+        }
+        assert!(
+            store.load().expect("key load").is_none(),
+            "the encryption key must be deleted once no sealed session remains"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM settings WHERE key = 'volume'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("volume"),
+            "0.5",
+            "ordinary settings are untouched"
+        );
+        drop(db);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
