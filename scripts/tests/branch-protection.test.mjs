@@ -43,9 +43,18 @@ test("required checks cover lint, format, tests, clippy, fmt, audits and the rel
     "cargo test --locked",
     "npm audit --omit=dev",
     "cargo audit",
-    "npx tauri build --no-bundle",
+    // M11: the CI windows job must build the NSIS bundle on every PR — the
+    // release dry run only runs when release-pipeline paths change, so a
+    // --no-bundle build left bundle breakage from app-code PRs untested.
+    // Updater signing is disabled there (no TAURI_SIGNING_PRIVATE_KEY on PR
+    // builds); the release job signs the updater artifacts. The overlay is a
+    // config file, not inline JSON, so the command carries no quotes for
+    // pwsh / the npx .cmd shim to mangle (see reviews/m11-fix-quoting-trace.md).
+    "npx tauri build --config src-tauri/tauri.ci.conf.json",
   ])
     assert.ok(ci.includes(step), `ci.yml must run ${step}`);
+  assert.ok(!ci.includes("--no-bundle"), "ci.yml must not skip bundling (M11)");
+  assert.ok(ci.includes("Tauri bundle build (NSIS)"), "ci.yml must name the bundle step");
 });
 
 test("every required check is reported on every pull request, so none can block merges forever", () => {
