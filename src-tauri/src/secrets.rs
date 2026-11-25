@@ -500,6 +500,74 @@ mod tests {
         assert_eq!(KeyringStore.load().unwrap(), Some(vec![7u8; 32]));
     }
 
+    /// Windows-only regression test for M9: `ServiceKey::delete` must remove the
+    /// entry from the real Windows Credential Manager, not just from an in-memory
+    /// stand-in. It runs in the normal `cargo test --lib` on Windows CI.
+    ///
+    /// The loud-failure check up front is the whole point of the test. Keyring
+    /// 3.6.3 selects its backend at compile time (`keyring-3.6.3/src/lib.rs`:
+    /// on Windows, `windows-native` -> `windows` module, otherwise -> `mock`
+    /// module), and `Entry::get_credential` (`lib.rs:511`) exposes the concrete
+    /// credential as `&dyn Any` precisely so it can be downcast. If the entry
+    /// downcasts to `MockCredential`, the real store is not in play and the
+    /// test fails instead of passing vacuously. On Windows there are only the
+    /// two defaults, so "not the mock" is "the real `WinCredential`", whose
+    /// `delete_credential` calls `CredDeleteW` (`windows.rs:155-166`).
+    #[cfg(windows)]
+    #[test]
+    fn service_key_delete_removes_the_real_credential_manager_entry() {
+        // Unique throwaway service name per run; never the production names.
+        // `ServiceKey` takes a `&'static str`, so the formatted name is leaked
+        // for the life of the test process — acceptable in a test.
+        let service: &'static str =
+            Box::leak(format!("SolunaM9Test-{}", std::process::id()).into_boxed_str());
+        assert_ne!(service, SERVICE, "must not touch the real Soluna entry");
+        assert_ne!(
+            service, LEGACY_SERVICE,
+            "must not touch the real Meld Desktop entry"
+        );
+        let key = ServiceKey(service);
+        // Guard: removes the throwaway entry when the test ends, even if an
+        // assert below panics, so a failed run cannot leave a credential behind.
+        struct DeleteOnDrop<'a>(&'a ServiceKey);
+        impl Drop for DeleteOnDrop<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.delete();
+            }
+        }
+        let _guard = DeleteOnDrop(&key);
+        // Fail loudly if keyring resolved to its in-memory mock instead of the
+        // real Windows Credential Manager (e.g. the `windows-native` feature
+        // was dropped). A mock would make every assert below pass vacuously.
+        let entry = key.entry().expect("secure storage unavailable");
+        assert!(
+            entry
+                .get_credential()
+                .downcast_ref::<keyring::mock::MockCredential>()
+                .is_none(),
+            "refusing to test against keyring's in-memory mock backend: the real Windows Credential Manager is not in play (is the `windows-native` feature enabled?)"
+        );
+        // Delete of an absent entry is Ok — and clears any stale entry a
+        // crashed earlier run left behind under this name.
+        key.delete()
+            .expect("delete of an absent entry must succeed");
+        let stored = [0x5a_u8; 32];
+        key.store(&stored).expect("store must succeed");
+        assert_eq!(
+            key.load().expect("load must succeed"),
+            Some(stored.to_vec()),
+            "stored key must round-trip through the real store"
+        );
+        key.delete().expect("delete must succeed");
+        assert_eq!(
+            key.load().expect("load must succeed"),
+            None,
+            "the entry must be gone from the real store after delete"
+        );
+        key.delete()
+            .expect("delete of an absent entry must succeed");
+    }
+
     /// A store whose key can be read but not written, like a locked credential store.
     struct ReadOnlyStore(Option<Vec<u8>>);
     impl KeyStore for ReadOnlyStore {
