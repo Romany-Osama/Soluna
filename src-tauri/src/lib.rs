@@ -569,9 +569,13 @@ fn scrub_session_rows_from_backup(db: &Connection) -> rusqlite::Result<()> {
 /// to a temporary `*.migration-backup.part` sibling: the copy holds the live database's session rows (plaintext
 /// on a 0.1.8-or-older database, sealed on a 0.2.0–0.4.0 one) until the scrub deletes them, so a secret-bearing
 /// backup never exists under the final name. Only after the scrub succeeds is the temporary file renamed over
-/// the final name. A failure at any step — backup, scrub, or rename — deletes the temporary file and the
-/// stale final file and returns the error, so the migration aborts (and therefore startup) exactly as a backup
-/// failure does today. (The durability sync of the temporary file stays best-effort, as before: closing the
+/// the final name. A failure at any step — backup, scrub, or rename — deletes the temporary file and returns
+/// the error, so the migration aborts (and therefore startup) exactly as a backup failure does today; an
+/// existing final backup is kept — the live database is untouched when the backup step fails, so it is still a
+/// valid rollback target, and no released build ever wrote an unscrubbed final backup. On Windows the rename
+/// replaces an existing final file (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`); if another process holds
+/// the target open the rename fails, the migration aborts, the temporary file is removed, and the old final
+/// backup is kept. (The durability sync of the temporary file stays best-effort, as before: closing the
 /// destination already flushed its pages, so a failed fsync must not fail startup when the backup itself is
 /// complete.) A stale `.part` file left by an interrupted scrub is removed at the start of every
 /// backup, so the next start cleans it up. Crash safety of this path is by design (temporary file + rename,
@@ -607,8 +611,11 @@ fn backup_database_before_migration(db: &Connection) -> rusqlite::Result<()> {
         Ok(())
     })();
     if let Err(error) = result {
+        // Only the temporary file is removed: the live database is untouched when the backup step
+        // fails, and an existing final backup is a valid rollback target — deleting it could destroy
+        // the only recoverable copy. (No released build ever wrote an unscrubbed final backup, so
+        // keeping it cannot resurrect one.)
         let _ = fs::remove_file(&part_path);
-        let _ = fs::remove_file(&backup_path);
         return Err(error);
     }
     Ok(())
@@ -9268,7 +9275,9 @@ mod tests {
 
     /// M10: the pre-migration backup of a 0.1.8 database holds no plaintext session secret. The fixture is
     /// the real v0.1.8 shape, with a plaintext cookie, `spotifySpDc`/`spotifySpKey` and `spotifyAccessToken`.
-    /// The backup keeps the library; the live database is still migrated and its secrets still sealed.
+    /// The backup keeps the library; the live database is still migrated and its secrets still sealed. The
+    /// backup also keeps the non-session `settings` rows and the `spotify_match` row intact — only the
+    /// session rows are deleted.
     #[test]
     fn migration_backup_scrubs_plaintext_session_secrets() {
         let dir = m6_test_dir("m10-migration-backup-scrub-plaintext");
@@ -9277,6 +9286,12 @@ mod tests {
             let old = Connection::open(&path).expect("v0.1.8 db");
             old.execute_batch(include_str!("../tests/fixtures/v0.1.8-song-db.sql"))
                 .expect("fixture");
+            // The fixture creates `spotify_match` (the real `SCHEMA_SQL` definition) with no rows:
+            // one match row proves the backup keeps it. The song id is the fixture song s1.
+            old.execute_batch(
+                "INSERT INTO spotify_match (spotify_id, youtube_id, title, artist, match_score, cached_at, is_manual_override) VALUES ('spotify:track:4uLU6hMCjMI75M1A2tKUQC', 'v1', 'Blinding Lights', 'The Weeknd', 0.95, 1700000000000, 0);",
+            )
+            .expect("spotify_match row");
         }
         let markers: [&[u8]; 4] = [
             b"V018PLAINCOOKIE",
@@ -9329,6 +9344,47 @@ mod tests {
                 "backup has no {key} row"
             );
         }
+        // The backup keeps everything that is not a session row: the non-session `settings` rows
+        // with the same values, and the `spotify_match` row intact.
+        for (key, value) in [
+            ("audioQuality", "high"),
+            ("playerVolume", "0.6"),
+            ("persistentQueue", "true"),
+            ("varispeed", "false"),
+            ("hideExplicit", "false"),
+        ] {
+            assert_eq!(
+                setting_value(&backup, key)
+                    .expect("backup setting")
+                    .as_deref(),
+                Some(value),
+                "backup keeps non-session setting {key}"
+            );
+        }
+        let (spotify_id, youtube_id, title, artist, match_score, cached_at, manual) = backup
+            .query_row(
+                "SELECT spotify_id, youtube_id, title, artist, match_score, cached_at, is_manual_override FROM spotify_match",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .expect("spotify_match row in backup");
+        assert_eq!(spotify_id, "spotify:track:4uLU6hMCjMI75M1A2tKUQC");
+        assert_eq!(youtube_id, "v1");
+        assert_eq!(title, "Blinding Lights");
+        assert_eq!(artist, "The Weeknd");
+        assert_eq!(match_score, 0.95);
+        assert_eq!(cached_at, 1700000000000);
+        assert_eq!(manual, 0);
         assert_eq!(
             backup
                 .query_row("SELECT COUNT(*) FROM songs", [], |row| row.get::<_, i64>(0))
@@ -9421,9 +9477,10 @@ mod tests {
     }
 
     /// M10: a stale `.part` file left by an interrupted scrub is removed at the start of every backup,
-    /// and the final backup is still written scrubbed.
+    /// and a stale final-name file is replaced by the scrubbed backup — the rename replaces an existing
+    /// final file (on Windows `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`).
     #[test]
-    fn migration_backup_replaces_a_stale_part_file() {
+    fn migration_backup_replaces_stale_part_and_final_files() {
         let dir = m6_test_dir("m10-migration-backup-stale-part");
         let path = dir.join("soluna.sqlite3");
         {
@@ -9438,6 +9495,11 @@ mod tests {
         )
         .expect("stale part");
         let backup_path = path.with_extension("migration-backup");
+        fs::write(
+            &backup_path,
+            b"M10STALEFINALMARKER-junk-from-an-earlier-backup",
+        )
+        .expect("stale final");
 
         let store = MemKeyStore(Mutex::new(None));
         let db = Connection::open(&path).expect("open for migration");
@@ -9451,6 +9513,10 @@ mod tests {
             !contains_bytes(&backup_bytes, b"M10STALEPARTMARKER"),
             "stale junk is not in the backup"
         );
+        assert!(
+            !contains_bytes(&backup_bytes, b"M10STALEFINALMARKER"),
+            "the stale final file is replaced, not kept"
+        );
         for marker in [
             b"V018PLAINCOOKIE".as_slice(),
             b"V018PLAINSPDC",
@@ -9462,13 +9528,14 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// M10: when the scrub itself fails, the migration aborts and neither the temporary file nor the
-    /// final-name file is left behind — including a stale final backup from an earlier run. The sabotage
-    /// replaces `settings` with a view: the scrub sees a `settings` object and tries to delete from it,
-    /// which fails. (A database with no `settings` object at all is skipped cleanly instead; see
+    /// M10: when the scrub itself fails, the migration aborts — but the old final backup is kept: the
+    /// live database is untouched when the backup step fails, so an existing final backup is still a valid
+    /// rollback target, and deleting it could destroy the only recoverable copy. The sabotage replaces
+    /// `settings` with a view: the scrub sees a `settings` object and tries to delete from it, which fails.
+    /// (A database with no `settings` object at all is skipped cleanly instead; see
     /// `migration_backup_skips_scrub_when_no_settings_table`.)
     #[test]
-    fn migration_backup_failure_leaves_no_backup_files() {
+    fn migration_backup_failure_keeps_the_old_final_backup() {
         let dir = m6_test_dir("m10-migration-backup-scrub-failure");
         let path = dir.join("soluna.sqlite3");
         {
@@ -9480,9 +9547,11 @@ mod tests {
             )
             .expect("sabotage");
         }
-        // A stale final backup from an earlier run must be deleted too, not left behind.
+        // A stale final backup from an earlier run is a valid rollback target and must survive a
+        // failed backup: the live database was not touched.
         let backup_path = path.with_extension("migration-backup");
-        fs::write(&backup_path, b"M10STALEFINAL-junk").expect("stale final");
+        let stale_final = b"M10STALEFINAL-junk";
+        fs::write(&backup_path, stale_final).expect("stale final");
         let part_path = path.with_extension("migration-backup.part");
 
         let store = MemKeyStore(Mutex::new(None));
@@ -9495,7 +9564,11 @@ mod tests {
         );
         drop(db);
         assert!(!part_path.exists(), "no .part file is left");
-        assert!(!backup_path.exists(), "no final-name file is left");
+        assert_eq!(
+            fs::read(&backup_path).expect("old final backup is kept"),
+            stale_final,
+            "the old final backup survives a failed backup, byte for byte"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
