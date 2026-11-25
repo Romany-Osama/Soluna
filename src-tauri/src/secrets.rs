@@ -13,7 +13,8 @@ use std::sync::Mutex;
 
 const PREFIX: &str = "enc1:";
 const SERVICE: &str = "Soluna";
-/// The credential-store name Meld Desktop used before the rename. A key saved there is adopted, never deleted.
+/// The credential-store name Meld Desktop used before the rename. A key saved there is adopted, never deleted
+/// by the adoption itself; it is only removed by a full sign-out once no sealed session remains (M9).
 const LEGACY_SERVICE: &str = "Meld Desktop";
 const KEY_USER: &str = "session-encryption-key";
 const NONCE_LEN: usize = 12;
@@ -33,6 +34,8 @@ const REMOVED_KEYS: [&str; 0] = [];
 pub trait KeyStore {
     fn load(&self) -> Result<Option<Vec<u8>>, String>;
     fn store(&self, key: &[u8]) -> Result<(), String>;
+    /// Destroys the key. Absent is success (idempotent); the in-memory cache, if any, must go too.
+    fn delete(&self) -> Result<(), String>;
 }
 
 static KEY_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
@@ -63,6 +66,14 @@ impl KeyStore for ServiceKey {
         self.entry()?
             .set_password(&BASE64.encode(key))
             .map_err(|error| format!("secure storage write failed: {error}"))
+    }
+
+    fn delete(&self) -> Result<(), String> {
+        match self.entry()?.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("secure storage delete failed: {error}")),
+        }
     }
 }
 
@@ -110,6 +121,18 @@ impl KeyStore for KeyringStore {
             .lock()
             .map_err(|_| "key cache poisoned".to_owned())? = Some(key.to_vec());
         Ok(())
+    }
+
+    fn delete(&self) -> Result<(), String> {
+        // The in-memory copy must go too: load() would otherwise keep returning (and re-sealing with) a
+        // key that no longer exists in the credential store. Clearing it first is safe even if the
+        // OS delete below fails: the next load re-reads the store and finds the key still there.
+        *KEY_CACHE
+            .lock()
+            .map_err(|_| "key cache poisoned".to_owned())? = None;
+        ServiceKey(SERVICE).delete()?;
+        // Once no sealed row remains the legacy key protects nothing either, so it is removed as well (M9).
+        ServiceKey(LEGACY_SERVICE).delete()
     }
 }
 
@@ -269,6 +292,10 @@ mod tests {
             *self.0.lock().unwrap() = Some(key.to_vec());
             Ok(())
         }
+        fn delete(&self) -> Result<(), String> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
     }
     struct BrokenStore;
     impl KeyStore for BrokenStore {
@@ -276,6 +303,9 @@ mod tests {
             Err("secure storage unavailable".to_owned())
         }
         fn store(&self, _key: &[u8]) -> Result<(), String> {
+            Err("secure storage unavailable".to_owned())
+        }
+        fn delete(&self) -> Result<(), String> {
             Err("secure storage unavailable".to_owned())
         }
     }
@@ -479,6 +509,9 @@ mod tests {
         fn store(&self, _key: &[u8]) -> Result<(), String> {
             Err("secure storage write failed".to_owned())
         }
+        fn delete(&self) -> Result<(), String> {
+            Err("secure storage delete failed".to_owned())
+        }
     }
 
     /// The Soluna entry, falling back to the Meld Desktop one, as `KeyringStore` does.
@@ -489,6 +522,9 @@ mod tests {
         }
         fn store(&self, key: &[u8]) -> Result<(), String> {
             self.0.store(key)
+        }
+        fn delete(&self) -> Result<(), String> {
+            self.0.delete()
         }
     }
 
