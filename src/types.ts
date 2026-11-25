@@ -82,7 +82,13 @@ export type SpotifyPlaylistItem = {
   owner?: string | null;
 };
 export type SpotifyFolderItem = { uri: string; name: string; totalChildren: number };
-export type SpotifyLibraryNode = { folders: SpotifyFolderItem[]; playlists: SpotifyPlaylistItem[]; totalCount: number };
+export type SpotifyLibraryNode = {
+  folders: SpotifyFolderItem[];
+  playlists: SpotifyPlaylistItem[];
+  totalCount: number;
+  offset: number;
+  limit: number;
+};
 export type SpotifyTrackItem = {
   id: string;
   uri: string;
@@ -93,7 +99,26 @@ export type SpotifyTrackItem = {
   image?: string | null;
   durationMs: number;
 };
-export type SpotifyLikedTracksPayload = { tracks: SpotifyTrackItem[]; totalCount: number };
+export type SpotifyLikedTracksPayload = {
+  tracks: SpotifyTrackItem[];
+  totalCount: number;
+  offset: number;
+  limit: number;
+};
+export type SpotifyPlaylistPage = {
+  playlists: SpotifyPlaylistItem[];
+  totalCount: number;
+  offset: number;
+  limit: number;
+};
+// One "load more" pair: the function that fetches the next page plus the flag
+// that guards it while a page is in flight. The three Spotify lists (library,
+// liked songs, playlist tracks) each carry one; App.tsx threads them through
+// as a single grouped object so the shell stays under its line cap.
+export type SpotifyLoadMoreState = {
+  loadMore: () => Promise<void>;
+  loading: boolean;
+};
 export type SpotifyTrackPage = { tracks: SpotifyTrackItem[]; totalCount: number; offset: number; limit: number };
 export type SpotifyTrackMatch = { id: string; uri: string; name: string; artist: string; durationMs: number };
 export type LibraryItemState = {
@@ -179,7 +204,7 @@ export type YouTubeSyncResult = {
   playlists: number;
 };
 export type PlayerCacheUsage = { bytes: number; songs: number; limitMb: number };
-export type SpotifyLikedTracks = { tracks: SpotifyTrackItem[]; totalCount: number };
+export type SpotifyLikedTracks = { tracks: SpotifyTrackItem[]; totalCount: number; offset: number; limit: number };
 export type UpdateSummary = {
   version: string;
   currentVersion: string;

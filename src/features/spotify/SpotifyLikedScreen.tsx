@@ -1,9 +1,10 @@
 import { Dispatch, SetStateAction } from "react";
-import { SpotifyTrackItem, LoadState, SpotifyLikedTracksPayload } from "../../types";
+import { SpotifyTrackItem, LoadState, SpotifyLikedTracksPayload, SpotifyLoadMoreState } from "../../types";
 import { withOccurrencesBy } from "../../lib/identity";
 
 export type SpotifyLikedScreenProps = {
   loadSpotifyLikedTracks: () => Promise<void>;
+  spotifyLikedMore: SpotifyLoadMoreState;
   playSpotifyTrack: (track: SpotifyTrackItem) => Promise<void>;
   setSpotifyLikedOpen: Dispatch<SetStateAction<boolean>>;
   spotifyLikedOpen: boolean;
@@ -12,6 +13,7 @@ export type SpotifyLikedScreenProps = {
 
 export function SpotifyLikedScreen({
   loadSpotifyLikedTracks,
+  spotifyLikedMore,
   playSpotifyTrack,
   setSpotifyLikedOpen,
   spotifyLikedOpen,
@@ -77,6 +79,16 @@ export function SpotifyLikedScreen({
                 )}
               </div>
             )}
+            {spotifyLikedTracks.status === "ready" &&
+              spotifyLikedTracks.data.tracks.length < spotifyLikedTracks.data.totalCount && (
+                <button
+                  className="secondary-button"
+                  onClick={() => void spotifyLikedMore.loadMore()}
+                  disabled={spotifyLikedMore.loading}
+                >
+                  {spotifyLikedMore.loading ? "Loading…" : "Load more"}
+                </button>
+              )}
           </div>
         </div>
       )}

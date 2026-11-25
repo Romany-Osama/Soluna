@@ -1,10 +1,16 @@
 import { Dispatch, SetStateAction } from "react";
-import { SpotifyTrackItem, SpotifyPlaylistItem, LoadState, SpotifyTrackPage, SpotifyProfile } from "../../types";
+import {
+  SpotifyTrackItem,
+  SpotifyPlaylistItem,
+  LoadState,
+  SpotifyTrackPage,
+  SpotifyProfile,
+  SpotifyLoadMoreState,
+} from "../../types";
 import { withOccurrencesBy } from "../../lib/identity";
 
 export type SpotifyPlaylistScreenProps = {
   downloadSpotifyPlaylist: () => Promise<void>;
-  loadMoreSpotifyPlaylistTracks: () => Promise<void>;
   moveSpotifyTrack: (track: SpotifyTrackItem, direction: "up" | "down") => Promise<void>;
   openSpotifyPlaylist: (playlistItem: SpotifyPlaylistItem) => Promise<void>;
   playSpotifyTrack: (track: SpotifyTrackItem) => Promise<void>;
@@ -20,7 +26,7 @@ export type SpotifyPlaylistScreenProps = {
   spotifyDetailSort: "original" | "name" | "artist" | "duration";
   spotifyDetailSortDescending: boolean;
   spotifyOpenPlaylist: SpotifyPlaylistItem | null;
-  spotifyPlaylistLoadingMore: boolean;
+  spotifyPlaylistMore: SpotifyLoadMoreState;
   spotifyPlaylistTracks: LoadState<SpotifyTrackPage>;
   spotifyProfile: SpotifyProfile | null;
   spotifyRenameName: string;
@@ -30,7 +36,6 @@ export type SpotifyPlaylistScreenProps = {
 
 export function SpotifyPlaylistScreen({
   downloadSpotifyPlaylist,
-  loadMoreSpotifyPlaylistTracks,
   moveSpotifyTrack,
   openSpotifyPlaylist,
   playSpotifyTrack,
@@ -46,7 +51,7 @@ export function SpotifyPlaylistScreen({
   spotifyDetailSort,
   spotifyDetailSortDescending,
   spotifyOpenPlaylist,
-  spotifyPlaylistLoadingMore,
+  spotifyPlaylistMore,
   spotifyPlaylistTracks,
   spotifyProfile,
   spotifyRenameName,
@@ -212,10 +217,10 @@ export function SpotifyPlaylistScreen({
             {spotifyPlaylistTracks.data.tracks.length < spotifyPlaylistTracks.data.totalCount && (
               <button
                 className="secondary-button"
-                onClick={() => void loadMoreSpotifyPlaylistTracks()}
-                disabled={spotifyPlaylistLoadingMore}
+                onClick={() => void spotifyPlaylistMore.loadMore()}
+                disabled={spotifyPlaylistMore.loading}
               >
-                {spotifyPlaylistLoadingMore ? "Loading…" : "Load more"}
+                {spotifyPlaylistMore.loading ? "Loading…" : "Load more"}
               </button>
             )}
           </div>
