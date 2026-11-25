@@ -139,6 +139,44 @@ it("returns from a Library playlist card to the Library overview with Back", asy
   expect(route()).toBe("/library/mix");
 });
 
+it("returns to the Library overview with Back from a Cache tile, a × chip and a Library tab (M5)", async () => {
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const route = () => container.querySelector("main")?.getAttribute("data-route");
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const back = screen.getByRole("button", { name: "Back" });
+  const forward = screen.getByRole("button", { name: "Forward" });
+  await click(screen.getByRole("button", { name: /Library/ }));
+  expect(route()).toBe("/library/mix");
+  // Cache tile: a history entry is pushed, so Back returns to the overview, not Home.
+  await click(screen.getByRole("button", { name: /Cached/ }));
+  expect(route()).toBe("/library/cache");
+  await click(back);
+  expect(route()).toBe("/library/mix");
+  // … and Forward returns to the cached view, proving the entry was recorded.
+  await click(forward);
+  expect(route()).toBe("/library/cache");
+  // "Cache ×" chip: returns to the overview as its own history entry.
+  await click(screen.getByRole("button", { name: "Return to Library" }));
+  expect(route()).toBe("/library/mix");
+  await click(back);
+  expect(route()).toBe("/library/cache");
+  await click(forward);
+  expect(route()).toBe("/library/mix");
+  // Library tab: Albums is a history entry too, and tapping the active tab
+  // still toggles back to the overview.
+  await click(screen.getByRole("button", { name: "Albums" }));
+  expect(route()).toBe("/library/albums");
+  await click(back);
+  expect(route()).toBe("/library/mix");
+  await click(screen.getByRole("button", { name: "Albums" }));
+  expect(route()).toBe("/library/albums");
+  await click(screen.getByRole("button", { name: "Albums" }));
+  expect(route()).toBe("/library/mix");
+  await click(back);
+  expect(route()).toBe("/library/albums");
+});
+
 it("returns to a detail page that was open when the user navigated away (U4-004)", async () => {
   const { default: App } = await import("./App");
   const { container } = await act(async () => render(<App />));
