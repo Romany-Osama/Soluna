@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // U4-002: App.tsx composes the feature hooks in an order that works at runtime (no use-before-declaration),
 // and the start-up loads still go out.
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 // Minimal answers for the commands App sends while starting up; anything else answers null.
@@ -380,6 +380,219 @@ it("asks before a permanent removal and reports the result in the notification c
   expect(invoke).toHaveBeenCalledWith("history_clear", undefined);
   expect(screen.getByText("Soluna playback history cleared.")).toBeTruthy();
   expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("restores the persistent queue when the setting is on (M3 guard)", async () => {
+  const { default: App } = await import("./App");
+  invoke.mockClear();
+  const songs = [
+    { id: "vid_one", kind: "song", title: "First restored song", subtitle: "Artist", artists: [], videoId: "vid_one" },
+    { id: "vid_two", kind: "song", title: "Second restored song", subtitle: "Artist", artists: [], videoId: "vid_two" },
+  ];
+  localStorage.setItem(
+    "soluna:persistentQueue",
+    JSON.stringify({ items: songs, index: 0, continuation: null, continuationKind: null }),
+  );
+  localStorage.setItem(
+    "soluna:persistentPlayback",
+    JSON.stringify({
+      items: songs,
+      index: 0,
+      continuation: null,
+      continuationKind: null,
+      item: songs[0],
+      position: 12,
+      playing: true,
+      kind: "next",
+    }),
+  );
+  overrides.settings_get = async () => [{ key: "persistentQueue", value: "true" }];
+  overrides.ytm_player = async () => ({
+    videoId: "vid_one",
+    title: "First restored song",
+    artist: "Artist",
+    streamUrl: "https://example.test/stream",
+    mimeType: "audio/webm",
+    bitrate: 128,
+    expiresInSeconds: 3600,
+    duration: 200,
+  });
+  await act(async () => {
+    render(<App />);
+  });
+  // The restore runs once the stored setting has loaded: the saved session resumes.
+  await waitFor(() => expect(screen.getByText("First restored song")).toBeTruthy());
+  expect(invoke).toHaveBeenCalledWith("ytm_player", expect.anything());
+});
+
+it("does not restore the persistent queue when the setting is off (M3)", async () => {
+  const { default: App } = await import("./App");
+  invoke.mockClear();
+  const songs = [
+    { id: "vid_one", kind: "song", title: "First restored song", subtitle: "Artist", artists: [], videoId: "vid_one" },
+    { id: "vid_two", kind: "song", title: "Second restored song", subtitle: "Artist", artists: [], videoId: "vid_two" },
+  ];
+  localStorage.setItem(
+    "soluna:persistentQueue",
+    JSON.stringify({ items: songs, index: 0, continuation: null, continuationKind: null }),
+  );
+  localStorage.setItem(
+    "soluna:persistentPlayback",
+    JSON.stringify({
+      items: songs,
+      index: 0,
+      continuation: null,
+      continuationKind: null,
+      item: songs[0],
+      position: 12,
+      playing: true,
+      kind: "next",
+    }),
+  );
+  // The stored setting is off, but it only arrives after the async settings load —
+  // the mount render still sees the in-code default `persistentQueue: true`.
+  overrides.settings_get = async () => [{ key: "persistentQueue", value: "false" }];
+  overrides.ytm_player = async () => ({
+    videoId: "vid_one",
+    title: "First restored song",
+    artist: "Artist",
+    streamUrl: "https://example.test/stream",
+    mimeType: "audio/webm",
+    bitrate: 128,
+    expiresInSeconds: 3600,
+    duration: 200,
+  });
+  await act(async () => {
+    render(<App />);
+  });
+  // Wait until the stored settings have loaded and the disabled path has run: the seeded
+  // queue key is cleared by that path, with or without the fix.
+  await waitFor(() => expect(localStorage.getItem("soluna:persistentQueue")).toBeNull());
+  // The restore must never have fired: no stream was requested and nothing is playing.
+  expect(invoke).not.toHaveBeenCalledWith("ytm_player", expect.anything());
+  expect(screen.queryByText("First restored song")).toBeNull();
+});
+
+it("leaves the current queue and playback alone when the setting is switched off mid-session (M3 rework)", async () => {
+  const { default: App } = await import("./App");
+  invoke.mockClear();
+  const songs = [
+    { id: "vid_one", kind: "song", title: "First restored song", subtitle: "Artist", artists: [], videoId: "vid_one" },
+    { id: "vid_two", kind: "song", title: "Second restored song", subtitle: "Artist", artists: [], videoId: "vid_two" },
+  ];
+  localStorage.setItem(
+    "soluna:persistentQueue",
+    JSON.stringify({ items: songs, index: 0, continuation: null, continuationKind: null }),
+  );
+  localStorage.setItem(
+    "soluna:persistentPlayback",
+    JSON.stringify({
+      items: songs,
+      index: 0,
+      continuation: null,
+      continuationKind: null,
+      item: songs[0],
+      position: 12,
+      playing: true,
+      kind: "next",
+    }),
+  );
+  overrides.settings_get = async () => [{ key: "persistentQueue", value: "true" }];
+  overrides.ytm_player = async () => ({
+    videoId: "vid_one",
+    title: "First restored song",
+    artist: "Artist",
+    streamUrl: "https://example.test/stream",
+    mimeType: "audio/webm",
+    bitrate: 128,
+    expiresInSeconds: 3600,
+    duration: 200,
+  });
+  await act(async () => {
+    render(<App />);
+  });
+  // The saved session resumes first: the queue is restored and playback starts.
+  await waitFor(() => expect(screen.getByText("First restored song")).toBeTruthy());
+  expect(invoke).toHaveBeenCalledWith("ytm_player", expect.anything());
+  const ytmCallsBefore = invoke.mock.calls.filter(([command]) => command === "ytm_player").length;
+  // Switch the setting off from the settings screen (Player and audio page).
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /Player and audio/ }));
+  });
+  const persistentQueueToggle = await waitFor(() => screen.getByRole("checkbox", { name: /Persistent queue/ }));
+  await act(async () => {
+    fireEvent.click(persistentQueueToggle);
+  });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("settings_set", { key: "persistentQueue", value: "false" }));
+  expect((persistentQueueToggle as HTMLInputElement).checked).toBe(false);
+  // The restored queue and player are untouched: the song is still the current player item,
+  // no new stream was requested, and the queue panel still lists both restored songs.
+  expect(screen.getByText("First restored song")).toBeTruthy();
+  expect(invoke.mock.calls.filter(([command]) => command === "ytm_player").length).toBe(ytmCallsBefore);
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Open queue" }));
+  });
+  await waitFor(() => expect(screen.getByText("2 songs")).toBeTruthy());
+  expect(screen.getByText("Second restored song")).toBeTruthy();
+});
+
+it("does not restore the persistent queue when the settings load fails (M3 rework)", async () => {
+  const { default: App } = await import("./App");
+  invoke.mockClear();
+  const songs = [
+    { id: "vid_one", kind: "song", title: "First restored song", subtitle: "Artist", artists: [], videoId: "vid_one" },
+    { id: "vid_two", kind: "song", title: "Second restored song", subtitle: "Artist", artists: [], videoId: "vid_two" },
+  ];
+  localStorage.setItem(
+    "soluna:persistentQueue",
+    JSON.stringify({ items: songs, index: 0, continuation: null, continuationKind: null }),
+  );
+  localStorage.setItem(
+    "soluna:persistentPlayback",
+    JSON.stringify({
+      items: songs,
+      index: 0,
+      continuation: null,
+      continuationKind: null,
+      item: songs[0],
+      position: 12,
+      playing: true,
+      kind: "next",
+    }),
+  );
+  // The stored settings never arrive: the load throws, so the in-code default
+  // `persistentQueue: true` must not be treated as a confirmed "on".
+  overrides.settings_get = async () => {
+    throw new Error("settings store unavailable");
+  };
+  overrides.ytm_player = async () => ({
+    videoId: "vid_one",
+    title: "First restored song",
+    artist: "Artist",
+    streamUrl: "https://example.test/stream",
+    mimeType: "audio/webm",
+    bitrate: 128,
+    expiresInSeconds: 3600,
+    duration: 200,
+  });
+  await act(async () => {
+    render(<App />);
+  });
+  // Wait until the failed load has been reported: the load attempt is over, so the
+  // gate has had its chance to open (wrongly, before the fix).
+  await waitFor(() => expect(screen.getByText(/Settings could not be loaded/)).toBeTruthy());
+  // Give a restore the gate wrongly allowed time to start its stream request.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+  // The restore must never have fired, and the saved queue must not have been
+  // overwritten by the empty default queue either.
+  expect(invoke).not.toHaveBeenCalledWith("ytm_player", expect.anything());
+  expect(screen.queryByText("First restored song")).toBeNull();
+  expect(localStorage.getItem("soluna:persistentQueue")).not.toBeNull();
 });
 
 it("keeps the shell working when a page fails to render (U4-014)", async () => {
