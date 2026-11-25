@@ -526,9 +526,7 @@ it("leaves the current queue and playback alone when the setting is switched off
   await act(async () => {
     fireEvent.click(persistentQueueToggle);
   });
-  await waitFor(() =>
-    expect(invoke).toHaveBeenCalledWith("settings_set", { key: "persistentQueue", value: "false" }),
-  );
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("settings_set", { key: "persistentQueue", value: "false" }));
   expect((persistentQueueToggle as HTMLInputElement).checked).toBe(false);
   // The restored queue and player are untouched: the song is still the current player item,
   // no new stream was requested, and the queue panel still lists both restored songs.
