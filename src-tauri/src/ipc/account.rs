@@ -111,9 +111,14 @@ pub async fn open_google_login(app: tauri::AppHandle) -> IpcResult<()> {
 }
 
 #[tauri::command]
-pub fn spotify_session_status(
+pub async fn spotify_session_status(
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<SpotifySessionStatus> {
+    // Best-effort silent refresh: at startup the frontend only reads this status, so without
+    // this an expired token would report signed-out until the first Spotify command ran. A
+    // failed refresh is ignored here and the stored status below is reported instead, so a
+    // signed-out user (or dead cookies) sees exactly what they saw before.
+    let _ = spotify_token(&state).await;
     let db = state.db.lock().map_err(|_| "database state poisoned")?;
     let token = secrets::get(&db, "spotifyAccessToken").ok().flatten();
     let expiry =
