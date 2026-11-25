@@ -9,7 +9,7 @@ import "./App.css";
 import { WindowControls } from "./components/WindowControls";
 import { AppSidebar } from "./components/AppSidebar";
 import { parseAudioQuality, streamRequest } from "./lib/audioQuality";
-import { appendNewPlayable, removeAt } from "./lib/queue";
+import { appendNewPlayable, removeAt, snapshotFailedPlay } from "./lib/queue";
 import { playbackEffectKey, resumeStartPosition, shouldAutoplay, startOccurrence } from "./lib/playbackSession";
 import { clearPersistedPlayback, restoreQueue, restoreSession } from "./lib/persistentPlayback";
 import { errorMessage, shuffled } from "./lib/util";
@@ -400,6 +400,7 @@ function App() {
     shuffleQueueAfterCurrent,
     moveQueueItem,
     loadAutomixItems,
+    rollbackFailedPlay,
   } = useQueue({ setNotice, settings });
   const taskbarPreviousRef = useRef<() => void>(() => undefined);
   const taskbarToggleRef = useRef<() => void>(() => undefined);
@@ -1776,6 +1777,7 @@ function App() {
     }
     setNotice("");
     const keepInlineLyrics = playerExpanded;
+    const prev = snapshotFailedPlay(queueItems, queueIndex, queueContinuation, queueContinuationKind, shuffleEnabled);
     // `requestId` (above) ignores this request if the user started another track while it was still resolving (last click wins).
     setLyrics(null);
     setLyricsAutoScrollEnabled(true);
@@ -1838,6 +1840,13 @@ function App() {
       if (keepInlineLyrics) void openLyrics(item);
       void beginPlaytime(item);
     } catch (error) {
+      // M4: roll back to the song still playing; a superseded failure must not clobber a newer play.
+      if (requestId === playRequestIdRef.current) {
+        rollbackFailedPlay(prev, nextQueue, nextContinuation, sourceContinuationKind, isNewQueue, effectiveShuffle);
+        // Restore only what this play cleared; lyrics opened mid-flight stay.
+        setLyrics((current) => (current === null ? lyrics : current));
+        setLyricsAutoScrollEnabled((current) => (current ? lyricsAutoScrollEnabled : current));
+      }
       setNotice(`Playback unavailable: ${errorMessage(error)}`, "error");
     }
   };

@@ -1,6 +1,7 @@
 import { invokeApp as invoke } from "../../ipc/bindings";
-import { useState, useRef } from "react";
-import { arrangeQueue, shuffleAfterCurrent, moveItem } from "../../lib/queue";
+import { useEffect, useState, useRef } from "react";
+import { arrangeQueue, moveItem, resolveFailedPlayRollback, shuffleAfterCurrent } from "../../lib/queue";
+import type { FailedPlaySnapshot, QueueState } from "../../lib/queue";
 import { errorMessage } from "../../lib/util";
 import { YtItem, QueuePage } from "../../types";
 import type { SetNotice } from "../../app/notifications";
@@ -20,6 +21,16 @@ export function useQueue({ setNotice, settings }: QueueDeps) {
   const [queueIndex, setQueueIndex] = useState(-1);
   const automixLoadingRef = useRef(false);
   const autoMixEnabledRef = useRef(false);
+  // Live mirror of the rendered queue, so a failed play can merge the flight edits
+  // instead of clobbering them (M4). The rollback reads this, not a stale closure.
+  const queueLiveRef = useRef<QueueState<YtItem>>({
+    items: queueItems,
+    continuation: queueContinuation,
+    kind: queueContinuationKind,
+  });
+  useEffect(() => {
+    queueLiveRef.current = { items: queueItems, continuation: queueContinuation, kind: queueContinuationKind };
+  }, [queueItems, queueContinuation, queueContinuationKind]);
 
   const toggleShuffle = async () => {
     const next = !shuffleEnabled;
@@ -62,6 +73,36 @@ export function useQueue({ setNotice, settings }: QueueDeps) {
     if (!moved) return;
     setQueueItems(moved.items);
     setQueueIndex(moved.index);
+  };
+
+  /**
+   * Roll the queue back to the song still playing after a failed playItem (M4).
+   * `previous` is the pre-play snapshot, `advanced` the queue the failed play set
+   * before resolving (with its continuation). The caller must guard this with the
+   * play requestId: a failure superseded by a newer play (or clearQueue) must never
+   * run it. Also undoes the shuffle change this play itself made (a new queue resets
+   * it); a shuffle toggle the user made mid-flight is theirs to keep.
+   */
+  const rollbackFailedPlay = (
+    previous: FailedPlaySnapshot<YtItem>,
+    advanced: YtItem[],
+    advancedContinuation: string | null,
+    sourceContinuationKind: "next" | "playlist",
+    isNewQueue: boolean,
+    effectiveShuffle: boolean,
+  ) => {
+    const rollback = resolveFailedPlayRollback({
+      previous,
+      advanced,
+      advancedContinuation,
+      advancedKind: advancedContinuation ? sourceContinuationKind : null,
+      live: queueLiveRef.current,
+    });
+    setQueueItems(rollback.items);
+    setQueueIndex(rollback.index);
+    setQueueContinuation(rollback.continuation);
+    setQueueContinuationKind(rollback.kind);
+    if (isNewQueue && !effectiveShuffle && previous.shuffle) setShuffleEnabled(previous.shuffle);
   };
 
   const loadAutomixItems = async (current: YtItem, existing: YtItem[]) => {
@@ -128,5 +169,6 @@ export function useQueue({ setNotice, settings }: QueueDeps) {
     shuffleQueueAfterCurrent,
     moveQueueItem,
     loadAutomixItems,
+    rollbackFailedPlay,
   };
 }

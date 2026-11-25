@@ -616,3 +616,770 @@ it("keeps the shell working when a page fails to render (U4-014)", async () => {
   await click(screen.getByRole("button", { name: /Library/ }));
   expect(container.querySelector("main")?.getAttribute("data-route")).toBe("/library/mix");
 });
+
+it("restores the previous queue when the next song fails to resolve (M4)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") throw new Error("stream gone");
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+  const activeQueueItem = () => container.querySelector(".queue-item.active")?.textContent ?? "";
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song: queue is [First, Second], index 0, player is First.
+  await click(playButtons()[0]);
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(2);
+  expect(activeQueueItem()).toContain("First song");
+  await click(container.querySelector<HTMLButtonElement>(".queue-panel .close-button")!);
+
+  // The second song fails to resolve. The queue must roll back to the song
+  // that is still playing instead of pointing at the failed track.
+  await click(playButtons()[1]);
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(2);
+  expect(activeQueueItem()).toContain("First song");
+  expect(activeQueueItem()).not.toContain("Second song");
+  // The player still shows the song that is actually playing.
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+});
+
+it("keeps an add-to-queue edit made while the next song fails to resolve (M4 rework)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_search = async () => ({ items: [song("vid_third", "Third song")], continuation: null });
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+  const activeQueueItem = () => container.querySelector(".queue-item.active")?.textContent ?? "";
+  const queuePanelTitles = () =>
+    [...container.querySelectorAll(".queue-item")].map((element) => element.textContent ?? "");
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song: queue is [First, Second], index 0, player is First.
+  await click(playButtons()[0]);
+
+  // The second song fails to resolve, slowly: the play stays in flight while the
+  // user finds a third song (not yet queued) in search and adds it to the queue.
+  await click(playButtons()[1]);
+  const input = container.querySelector<HTMLInputElement>(".search-form input")!;
+  await act(async () => {
+    fireEvent.change(input, { target: { value: "third" } });
+    fireEvent.submit(input.closest("form")!);
+  });
+  await screen.findByText("Third song");
+  await click(screen.getByTitle("More options for Third song"));
+  await click(await screen.findByRole("button", { name: "Add to queue" }));
+  expect(screen.getByText("Added “Third song” to the Soluna queue.")).toBeTruthy();
+  await act(async () => secondPlay.resolve(undefined));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(3);
+  expect(activeQueueItem()).toContain("First song");
+  // The add survives the rollback, in place at the end: an exact-order assertion,
+  // so a merge that misplaces or duplicates a song while keeping the length would fail.
+  expect(
+    queuePanelTitles().map(
+      (text) => ["First song", "Second song", "Third song"].find((title) => text.includes(title)) ?? text,
+    ),
+  ).toEqual(["First song", "Second song", "Third song"]);
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+});
+
+it("keeps a play-next edit made while the next song fails to resolve (M4 rework)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_search = async () => ({ items: [song("vid_third", "Third song")], continuation: null });
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+  const activeQueueItem = () => container.querySelector(".queue-item.active")?.textContent ?? "";
+  const queuePanelTitles = () =>
+    [...container.querySelectorAll(".queue-item")].map((element) => element.textContent ?? "");
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song: queue is [First, Second], index 0, player is First.
+  await click(playButtons()[0]);
+
+  // The second song fails to resolve, slowly: the play stays in flight while the
+  // user finds a third song (not yet queued) in search and queues it to play next.
+  await click(playButtons()[1]);
+  const input = container.querySelector<HTMLInputElement>(".search-form input")!;
+  await act(async () => {
+    fireEvent.change(input, { target: { value: "third" } });
+    fireEvent.submit(input.closest("form")!);
+  });
+  await screen.findByText("Third song");
+  await click(screen.getByTitle("More options for Third song"));
+  await click(await screen.findByRole("button", { name: "Play next" }));
+  expect(screen.getByText("“Third song” will play next.")).toBeTruthy();
+  await act(async () => secondPlay.resolve(undefined));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(3);
+  expect(activeQueueItem()).toContain("First song");
+  // The play-next insert survives the rollback: it lands after the song the failed
+  // play was starting (Second, queue index 1 while the play was in flight), so the
+  // exact order is [First, Second, Third]. An exact-order assertion, so a merge
+  // that misplaces or duplicates a song while keeping the length would fail.
+  expect(
+    queuePanelTitles().map(
+      (text) => ["First song", "Second song", "Third song"].find((title) => text.includes(title)) ?? text,
+    ),
+  ).toEqual(["First song", "Second song", "Third song"]);
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+});
+
+it("honours a remove-from-queue edit made while the next song fails to resolve (M4 rework)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [
+    song("vid_first", "First song"),
+    song("vid_second", "Second song"),
+    song("vid_third", "Third song"),
+  ];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+  const activeQueueItem = () => container.querySelector(".queue-item.active")?.textContent ?? "";
+  const queuePanelText = () => container.querySelector(".queue-panel")?.textContent ?? "";
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(3);
+
+  // Play the first song: queue is [First, Second, Third], index 0, player is First.
+  await click(playButtons()[0]);
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(3);
+  expect(activeQueueItem()).toContain("First song");
+  await click(container.querySelector<HTMLButtonElement>(".queue-panel .close-button")!);
+
+  // The second song fails to resolve, slowly: the play stays in flight while the
+  // user removes the third song from the queue.
+  await click(playButtons()[1]);
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(3);
+  await click(screen.getByRole("button", { name: "Remove Third song from queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(2);
+  await act(async () => secondPlay.resolve(undefined));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  // The removal survives the rollback: the third song is not resurrected, and the
+  // queue still points at the song that is actually playing.
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(2);
+  expect(activeQueueItem()).toContain("First song");
+  expect(queuePanelText()).not.toContain("Third song");
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+});
+
+it("keeps a continuation append loaded by the next-song play before it fails to resolve (M4 rework)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const first = song("vid_first", "First song");
+  localStorage.setItem(
+    "soluna:persistentQueue",
+    JSON.stringify({ items: [first], index: 0, continuation: "cont-1", continuationKind: "next" }),
+  );
+  localStorage.setItem(
+    "soluna:persistentPlayback",
+    JSON.stringify({
+      items: [first],
+      index: 0,
+      continuation: "cont-1",
+      continuationKind: "next",
+      item: first,
+      position: 0,
+      playing: true,
+      kind: "next",
+    }),
+  );
+  overrides.settings_get = async () => [{ key: "persistentQueue", value: "true" }];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") throw new Error("stream gone");
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.ytm_queue_continuation = async () => ({
+    items: [song("vid_second", "Second song"), song("vid_third", "Third song")],
+    continuation: null,
+  });
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const activeQueueItem = () => container.querySelector(".queue-item.active")?.textContent ?? "";
+  const queuePanelTitles = () =>
+    [...container.querySelectorAll(".queue-item")].map((element) => element.textContent ?? "");
+
+  // The saved session resumes first: the queue is [First] with a continuation, playing First.
+  await waitFor(() => expect(screen.getByText("First song")).toBeTruthy());
+  expect(invoke).toHaveBeenCalledWith("ytm_player", expect.anything());
+
+  // Next loads the continuation page ([Second, Third] appended) and starts the second
+  // song, which fails to resolve. The rollback must keep the appended songs: they were
+  // already queued before the failed play, not conjured by it. (The append itself
+  // happens inside playQueueIndex before playItem is invoked, so this test proves the
+  // extended case keeps a just-loaded append — not an append landing mid-flight.)
+  await click(screen.getByTitle("Next"));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(3);
+  expect(activeQueueItem()).toContain("First song");
+  expect(
+    queuePanelTitles().map(
+      (text) => ["First song", "Second song", "Third song"].find((title) => text.includes(title)) ?? text,
+    ),
+  ).toEqual(["First song", "Second song", "Third song"]);
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+  // The rollback keeps the live continuation: the append consumed "cont-1", so the
+  // persisted queue after the rollback still has no continuation left.
+  await waitFor(() => {
+    const persisted = JSON.parse(localStorage.getItem("soluna:persistentQueue") ?? "null") as {
+      items: { id: string }[];
+      index: number;
+      continuation: string | null;
+    } | null;
+    expect(persisted?.continuation).toBeNull();
+    expect(persisted?.items.map((item) => item.id)).toEqual(["vid_first", "vid_second", "vid_third"]);
+    expect(persisted?.index).toBe(0);
+  });
+});
+
+it("restores the lyrics of the song that is still playing after the next song fails to resolve (M4 rework)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.fetch_lyrics = async () => ({
+    provider: "Test",
+    text: "First song lyric line",
+    synced: false,
+    matchedTitle: "First song",
+    matchedArtist: "Artist",
+    lines: [],
+  });
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song and open its lyrics in the full player. (Closing the
+  // full player would clear the lyrics too, so it stays open.)
+  await click(playButtons()[0]);
+  await click(screen.getByRole("button", { name: "Open synchronized lyrics" }));
+  await screen.findByText("First song lyric line");
+
+  // The second song fails to resolve, slowly. The failed play clears the lyrics first...
+  await click(playButtons()[1]);
+  expect(screen.queryByText("First song lyric line")).toBeNull();
+  await act(async () => secondPlay.resolve(undefined));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  // ...and the rollback brings the first song's lyrics back.
+  expect(screen.getByText("First song lyric line")).toBeTruthy();
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+});
+
+it("restores shuffle after the next song fails to resolve (M4 rework)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song, then turn shuffle on.
+  await click(playButtons()[0]);
+  await click(screen.getByRole("button", { name: "Turn shuffle on" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Turn shuffle off" })).toBeTruthy());
+
+  // The second song fails to resolve, slowly. Playing a new queue switches shuffle off...
+  await click(playButtons()[1]);
+  expect(screen.getByRole("button", { name: "Turn shuffle on" })).toBeTruthy();
+  await act(async () => secondPlay.resolve(undefined));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  // ...and the rollback switches it back on.
+  expect(screen.getByRole("button", { name: "Turn shuffle off" })).toBeTruthy();
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+});
+
+it("keeps a play-next edit made while a shuffled same-queue song fails to resolve, without duplicating songs (M4 rework)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [
+    song("vid_first", "First song"),
+    song("vid_second", "Second song"),
+    song("vid_third", "Third song"),
+  ];
+  overrides.ytm_search = async () => ({ items: [song("vid_fourth", "Fourth song")], continuation: null });
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  // Pin every shuffle to the identity permutation, so the failed play's reorder
+  // ([Second, First, Third]) and the play-next tail shuffle are deterministic:
+  // without this the merged order would depend on Math.random, not on the code.
+  const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.999);
+  try {
+    const { default: App } = await import("./App");
+    const { container } = await act(async () => render(<App />));
+    const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+    const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+    const activeQueueItem = () => container.querySelector(".queue-item.active")?.textContent ?? "";
+    const queuePanelTitles = () =>
+      [...container.querySelectorAll(".queue-item")].map((element) => element.textContent ?? "");
+    const queueTitlesInOrder = () =>
+      queuePanelTitles().map(
+        (text) =>
+          ["First song", "Second song", "Third song", "Fourth song"].find((title) => text.includes(title)) ?? text,
+      );
+
+    await click(screen.getByRole("button", { name: /Library/ }));
+    await click(screen.getByRole("button", { name: /Liked Songs/ }));
+    await screen.findByText("First song");
+    expect(playButtons()).toHaveLength(3);
+
+    // Play the first song, then turn shuffle on: queue is [First, Second, Third], index 0.
+    await click(playButtons()[0]);
+    await click(screen.getByRole("button", { name: "Turn shuffle on" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Turn shuffle off" })).toBeTruthy());
+
+    // Play the second song from the queue panel: a same-queue play, so shuffle
+    // reorders the queue to [Second, First, Third] before the slow resolve.
+    await click(screen.getByRole("button", { name: "Open queue" }));
+    expect(container.querySelectorAll(".queue-item")).toHaveLength(3);
+    await click(container.querySelectorAll<HTMLButtonElement>(".queue-item-play")[1]);
+
+    // While the second song fails to resolve, slowly, the user finds a fourth
+    // song in search and queues it to play next.
+    const input = container.querySelector<HTMLInputElement>(".search-form input")!;
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "fourth" } });
+      fireEvent.submit(input.closest("form")!);
+    });
+    await screen.findByText("Fourth song");
+    await click(screen.getByTitle("More options for Fourth song"));
+    await click(await screen.findByRole("button", { name: "Play next" }));
+    expect(screen.getByText("“Fourth song” will play next.")).toBeTruthy();
+    await act(async () => secondPlay.resolve(undefined));
+    expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Open queue" }));
+    // The rollback restores the pre-play order with the play-next insert kept
+    // after the second song: exactly [First, Second, Fourth, Third] — no
+    // resurrected songs, no duplicates, still playing the first song.
+    expect(container.querySelectorAll(".queue-item")).toHaveLength(4);
+    expect(queueTitlesInOrder()).toEqual(["First song", "Second song", "Fourth song", "Third song"]);
+    expect(activeQueueItem()).toContain("First song");
+    expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+  } finally {
+    randomSpy.mockRestore();
+  }
+});
+
+it("keeps the second copy of a duplicated song active when the next song fails to resolve (M4 correction)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [
+    song("vid_dup", "Same song"),
+    song("vid_dup", "Same song"),
+    song("vid_second", "Second song"),
+  ];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "Same song",
+      artist: "Artist",
+      streamUrl: "https://example.test/dup.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+  const queueItems = () => [...container.querySelectorAll(".queue-item")];
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("Second song");
+  expect(playButtons()).toHaveLength(3);
+
+  // Play the SECOND copy of the duplicated song: queue is [Same, Same, Second],
+  // index 1, player is the second copy. The setup assertion pins the second row
+  // active — if the app ever resolved the click to the first copy, this fails here,
+  // not in the rollback assertion below.
+  await click(playButtons()[1]);
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(queueItems()).toHaveLength(3);
+  expect(queueItems()[1].classList.contains("active")).toBe(true);
+  expect(queueItems()[0].classList.contains("active")).toBe(false);
+  await click(container.querySelector<HTMLButtonElement>(".queue-panel .close-button")!);
+
+  // The next song fails to resolve, slowly. The rollback must keep the second copy
+  // active: the old first-occurrence lookup moved the highlight to the first copy.
+  await click(playButtons()[2]);
+  await act(async () => secondPlay.resolve(undefined));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(queueItems()).toHaveLength(3);
+  expect(queueItems()[1].classList.contains("active")).toBe(true);
+  expect(queueItems()[0].classList.contains("active")).toBe(false);
+  expect(container.querySelector(".player-dock")?.textContent).toContain("Same song");
+});
+
+it("leaves no song active when the playing song is removed while the next song fails to resolve (M4 correction)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [
+    song("vid_first", "First song"),
+    song("vid_second", "Second song"),
+    song("vid_third", "Third song"),
+  ];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(3);
+
+  // Play the first song, then start the second song, which fails to resolve slowly.
+  await click(playButtons()[0]);
+  await click(playButtons()[1]);
+
+  // While the play is in flight, remove the song that is still playing from the queue.
+  await click(screen.getByRole("button", { name: "Open queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(3);
+  await click(screen.getByRole("button", { name: "Remove First song from queue" }));
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(2);
+  await act(async () => secondPlay.resolve(undefined));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  // The playing song is gone from the queue: no row is highlighted, instead of the
+  // old fallback pointing at the first remaining song. The player still shows it.
+  expect(container.querySelectorAll(".queue-item")).toHaveLength(2);
+  expect(container.querySelector(".queue-item.active")).toBeNull();
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+});
+
+it("keeps lyrics opened for another song while the next song fails to resolve (M4 correction)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const secondPlay = deferred<unknown>();
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_search = async () => ({ items: [song("vid_third", "Third song")], continuation: null });
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    if (videoId === "vid_second") {
+      await secondPlay.promise;
+      throw new Error("stream gone");
+    }
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.fetch_lyrics = async (args) => {
+    const title = (args as { title?: string } | null)?.title ?? "";
+    const line = title === "Third song" ? "Third song lyric line" : "First song lyric line";
+    return {
+      provider: "Test",
+      text: line,
+      synced: false,
+      matchedTitle: title,
+      matchedArtist: "Artist",
+      lines: [],
+    };
+  };
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song and open its lyrics in the full player.
+  await click(playButtons()[0]);
+  await click(screen.getByRole("button", { name: "Open synchronized lyrics" }));
+  await screen.findByText("First song lyric line");
+
+  // The second song fails to resolve, slowly. The failed play clears the lyrics first...
+  await click(playButtons()[1]);
+  expect(screen.queryByText("First song lyric line")).toBeNull();
+
+  // ...and while it is in flight the user opens the lyrics of a third song from search.
+  const input = container.querySelector<HTMLInputElement>(".search-form input")!;
+  await act(async () => {
+    fireEvent.change(input, { target: { value: "third" } });
+    fireEvent.submit(input.closest("form")!);
+  });
+  await screen.findByText("Third song");
+  await click(screen.getByRole("button", { name: "Lyrics" }));
+  await screen.findByText("Third song lyric line");
+
+  await act(async () => secondPlay.resolve(undefined));
+  expect(screen.getByText("Playback unavailable: stream gone")).toBeTruthy();
+  // The rollback must not overwrite the third song's lyrics with the first song's.
+  expect(screen.getByText("Third song lyric line")).toBeTruthy();
+  expect(screen.queryByText("First song lyric line")).toBeNull();
+  expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
+});
