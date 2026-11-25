@@ -40,6 +40,15 @@ pub trait KeyStore {
 
 static KEY_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
+/// Test-only: pins the process-global encryption key to the single fixed test value, in
+/// memory only. It never touches the OS credential store — `KeyringStore::store` would write
+/// the production `Soluna` entry, which a unit test must never do. It takes no key argument
+/// and always pins the same value, so parallel tests cannot disagree on the key.
+#[cfg(test)]
+pub(crate) fn pin_test_key() {
+    *KEY_CACHE.lock().expect("key cache poisoned") = Some(vec![7u8; 32]);
+}
+
 /// The encryption key as stored in the OS credential store under one service name.
 struct ServiceKey(&'static str);
 
@@ -494,9 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn keyring_store_remembers_the_key_it_was_given() {
-        // Non-Windows builds use keyring's in-memory mock backend; the process cache makes store -> load work either way.
-        KeyringStore.store(&[7u8; 32]).unwrap();
+    fn keyring_store_load_returns_the_pinned_test_key() {
+        // The key is pinned in memory only: this test must never write the production
+        // `Soluna` credential-store entry. `load()` reads the process cache first, so
+        // pinning through the helper is enough for the round-trip this test checks.
+        pin_test_key();
         assert_eq!(KeyringStore.load().unwrap(), Some(vec![7u8; 32]));
     }
 

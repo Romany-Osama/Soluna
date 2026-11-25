@@ -14,7 +14,7 @@ pub async fn spotify_playlist_tracks(
     if playlist_id.is_empty() {
         return Err(IpcError::from("Spotify playlist id is required".to_owned()));
     }
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let offset = clamp_spotify_offset(offset);
     let limit = 100_i64;
     let variables = json!({ "uri": format!("spotify:playlist:{playlist_id}"), "offset": offset, "limit": limit, "enableWatchFeedEntrypoint": false });
@@ -46,7 +46,7 @@ pub async fn spotify_remove_from_playlist(
             "Spotify playlist or track uid is empty".to_owned(),
         ));
     }
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let variables =
         json!({ "playlistUri": format!("spotify:playlist:{playlist_id}"), "uids": [uid] });
     spotify_graphql_post("removeFromPlaylist", variables, &token).await?;
@@ -77,7 +77,7 @@ pub async fn spotify_move_in_playlist(
             "Spotify playlist id and item uid are required".to_owned(),
         ));
     }
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let variables = json!({ "playlistUri": format!("spotify:playlist:{playlist_id}"), "uids": uids, "newPosition": { "moveType": if before_uid.is_some() { "BEFORE_UID" } else { "BOTTOM_OF_PLAYLIST" }, "fromUid": before_uid } });
     spotify_graphql_post("moveItemsInPlaylist", variables, &token).await?;
     Ok(())
@@ -98,7 +98,7 @@ pub async fn spotify_rename_playlist(
             "Spotify playlist id and name are required".to_owned(),
         ));
     }
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let variables =
         json!({ "playlistUri": format!("spotify:playlist:{playlist_id}"), "newName": new_name });
     spotify_graphql_post("editPlaylistAttributes", variables, &token).await?;
@@ -109,7 +109,7 @@ pub async fn spotify_rename_playlist(
 pub async fn spotify_liked_tracks(
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<SpotifyLikedTracks> {
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let response = spotify_graphql_post(
         "fetchLibraryTracks",
         json!({ "offset": 0, "limit": 100 }),
@@ -125,7 +125,7 @@ pub async fn spotify_library_node(
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<SpotifyLibraryNode> {
     let folder_uri = folder_uri.into_string();
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let variables = json!({ "filters": ["Playlists"], "order": Value::Null, "textFilter": "", "features": ["LIKED_SONGS", "YOUR_EPISODES_V2", "PRERELEASES", "EVENTS"], "limit": 100, "offset": 0, "flatten": false, "expandedFolders": [], "folderUri": folder_uri, "includeFoldersWhenFlattening": true });
     let response = spotify_graphql_post("libraryV3", variables, &token).await?;
     Ok(parse_spotify_library_node(&response))
@@ -135,7 +135,7 @@ pub async fn spotify_library_node(
 pub async fn spotify_playlists(
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<Vec<SpotifyPlaylistItem>> {
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let variables = json!({ "filters": ["Playlists"], "order": Value::Null, "textFilter": "", "features": ["LIKED_SONGS", "YOUR_EPISODES_V2", "PRERELEASES", "EVENTS"], "limit": 50, "offset": 0, "flatten": true, "expandedFolders": [], "folderUri": Value::Null, "includeFoldersWhenFlattening": false });
     let response = spotify_graphql_post("libraryV3", variables, &token).await?;
     Ok(spotify_playlist_items(&response))
@@ -210,7 +210,7 @@ pub async fn spotify_resolve_youtube(
             return Ok(Some(cached));
         }
     }
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let query = if artist.trim().is_empty() {
         title.trim().to_owned()
     } else {
@@ -281,7 +281,7 @@ pub async fn spotify_add_to_playlist(
             "Spotify playlist or track URI is empty".to_owned(),
         ));
     }
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let variables = json!({ "playlistUri": format!("spotify:playlist:{playlist_id}"), "playlistItemUris": [track_uri], "newPosition": { "moveType": "BOTTOM_OF_PLAYLIST", "fromUid": Value::Null } });
     spotify_graphql_post("addToPlaylist", variables, &token).await?;
     Ok(())
@@ -289,7 +289,7 @@ pub async fn spotify_add_to_playlist(
 
 #[tauri::command]
 pub async fn spotify_profile(state: tauri::State<'_, RuntimeState>) -> IpcResult<SpotifyProfile> {
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     let response = spotify_graphql_post("profileAttributes", json!({}), &token).await?;
     let profile = response
         .pointer("/data/me/profile")

@@ -6552,20 +6552,68 @@ struct SpotifyProfile {
     avatar: Option<String>,
 }
 
-fn spotify_token(state: &tauri::State<'_, RuntimeState>) -> Result<String, String> {
+/// A stored Spotify token is refreshed while it still has this much life left, so a token that
+/// expires mid-request does not fail the command that is about to use it.
+const SPOTIFY_TOKEN_REFRESH_SKEW_MS: i64 = 60_000;
+
+/// Returned when no usable Spotify token exists and no silent refresh is possible; the
+/// frontend maps it to `Unauthenticated` and the only remedy is a manual re-login.
+const SPOTIFY_TOKEN_EXPIRED: &str = "Spotify account is not authenticated or its token expired";
+
+async fn spotify_token(state: &RuntimeState) -> Result<String, String> {
+    spotify_token_with_fetch(state, spotify_fetch_access_token).await
+}
+
+async fn spotify_token_with_fetch<F, Fut>(state: &RuntimeState, fetch: F) -> Result<String, String>
+where
+    // The fetch takes owned cookies: a future borrowing `&str` arguments could not be
+    // returned from the closure, so `Fn(&str, &str) -> Fut` cannot express the real
+    // `spotify_fetch_access_token` (an async fn whose future borrows its arguments).
+    F: Fn(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(String, i64), String>> + Send,
+{
+    let (token, expiry, sp_dc, sp_key) = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "database state poisoned".to_owned())?;
+        let token = secrets::get(&db, "spotifyAccessToken")?.filter(|value| !value.is_empty());
+        let expiry =
+            setting_value(&db, "spotifyTokenExpiry")?.and_then(|value| value.parse::<i64>().ok());
+        let sp_dc = secrets::get(&db, "spotifySpDc")?.filter(|value| !value.is_empty());
+        let sp_key = secrets::get(&db, "spotifySpKey")?.unwrap_or_default();
+        (token, expiry, sp_dc, sp_key)
+    };
+    // The DB lock is dropped before any await below: the refresh path locks it again to persist
+    // the new token, and holding a std Mutex across the network call would deadlock that.
+    if let (Some(token), Some(expiry)) = (token.as_deref(), expiry) {
+        if expiry > now_millis() + SPOTIFY_TOKEN_REFRESH_SKEW_MS {
+            return Ok(token.to_owned());
+        }
+    }
+    // Expired (or about to expire), or no token at all: silently refresh from the sealed
+    // sp_dc/sp_key cookies (D-003 / S5-031) instead of forcing a new login. If the cookies are
+    // gone (signed out) or dead (the refresh itself fails), fall back to the previous error.
+    let Some(sp_dc) = sp_dc else {
+        return Err(if token.is_some() {
+            SPOTIFY_TOKEN_EXPIRED.to_owned()
+        } else {
+            "Spotify account is not authenticated".to_owned()
+        });
+    };
+    if save_spotify_session_with_fetch(sp_dc, sp_key, state, fetch)
+        .await
+        .is_err()
+    {
+        return Err(SPOTIFY_TOKEN_EXPIRED.to_owned());
+    }
     let db = state
         .db
         .lock()
         .map_err(|_| "database state poisoned".to_owned())?;
-    let token = secrets::get(&db, "spotifyAccessToken")?
+    secrets::get(&db, "spotifyAccessToken")?
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Spotify account is not authenticated".to_owned())?;
-    let expiry =
-        setting_value(&db, "spotifyTokenExpiry")?.and_then(|value| value.parse::<i64>().ok());
-    if expiry.is_none_or(|value| value <= now_millis()) {
-        return Err("Spotify account is not authenticated or its token expired".to_owned());
-    }
-    Ok(token)
+        .ok_or_else(|| SPOTIFY_TOKEN_EXPIRED.to_owned())
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -6929,7 +6977,7 @@ async fn spotify_search_tracks(
     if query.is_empty() {
         return Ok(Vec::new());
     }
-    let token = spotify_token(&state)?;
+    let token = spotify_token(&state).await?;
     spotify_search_track_matches(query, &token).await
 }
 
@@ -7027,7 +7075,10 @@ fn persist_spotify_match(
     Ok(())
 }
 
-async fn spotify_fetch_access_token(sp_dc: &str, sp_key: &str) -> Result<(String, i64), String> {
+async fn spotify_fetch_access_token(
+    sp_dc: String,
+    sp_key: String,
+) -> Result<(String, i64), String> {
     let gist: Value = http()
         .get("https://api.github.com/gists/22ed9c6ba463899e933427f7de1f0eef")
         .header("Accept", "application/vnd.github+json")
@@ -7113,12 +7164,27 @@ async fn save_spotify_session_internal(
     sp_key: String,
     state: &RuntimeState,
 ) -> Result<i64, String> {
+    save_spotify_session_with_fetch(sp_dc, sp_key, state, spotify_fetch_access_token).await
+}
+
+/// Same as `save_spotify_session_internal`, but the network fetch is injected so tests can run
+/// the whole refresh-and-persist path offline with a stubbed token fetch.
+async fn save_spotify_session_with_fetch<F, Fut>(
+    sp_dc: String,
+    sp_key: String,
+    state: &RuntimeState,
+    fetch: F,
+) -> Result<i64, String>
+where
+    F: Fn(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(String, i64), String>> + Send,
+{
     // This chain (gist -> server-time -> token) is a single point of failure for the whole Spotify
     // integration, and every step in it is safe to redo, so a transient failure anywhere in it gets a
     // couple of short-backoff retries instead of failing the whole login/reconnect on one bad network blip.
     let mut attempt = 0u8;
     let (access_token, expiry) = loop {
-        match spotify_fetch_access_token(&sp_dc, &sp_key).await {
+        match fetch(sp_dc.clone(), sp_key.clone()).await {
             Ok(result) => break result,
             Err(_error) if attempt < 2 => {
                 attempt += 1;
@@ -11210,6 +11276,142 @@ mod tests {
     }
 
     // --- M7 follow-up: migration-failure rollback (end) ---
+
+    // --- M16: silent Spotify token refresh (start) ---
+
+    fn spotify_test_state() -> RuntimeState {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA_SQL).unwrap();
+        RuntimeState {
+            visitor_data: Mutex::new(None),
+            db: Mutex::new(db),
+        }
+    }
+
+    /// Seeds a stored Spotify session: an access token (optionally expired) plus sealed cookies.
+    fn seed_spotify_session(state: &RuntimeState, token: &str, expiry: i64) {
+        // Pin the process-global encryption key in memory only: tests run in parallel, and a
+        // different key stored between sealing and opening a value would make the open fail.
+        // The pin never touches the OS credential store, so `cargo test` cannot overwrite the
+        // real session-encryption key. Every test pins the same fixed value, so parallel tests
+        // cannot disagree on the key.
+        crate::secrets::pin_test_key();
+        let db = state.db.lock().unwrap();
+        secrets::set(&db, "spotifyAccessToken", token).unwrap();
+        secrets::set(&db, "spotifySpDc", "test-sp-dc").unwrap();
+        secrets::set(&db, "spotifySpKey", "test-sp-key").unwrap();
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["spotifyTokenExpiry", expiry.to_string()],
+        )
+        .unwrap();
+    }
+
+    fn stored_spotify_token(state: &RuntimeState) -> Option<String> {
+        let db = state.db.lock().unwrap();
+        secrets::get(&db, "spotifyAccessToken").unwrap()
+    }
+
+    fn stored_spotify_expiry(state: &RuntimeState) -> Option<i64> {
+        let db = state.db.lock().unwrap();
+        setting_value(&db, "spotifyTokenExpiry")
+            .unwrap()
+            .and_then(|value| value.parse().ok())
+    }
+
+    /// Regression test for M16: an expired stored token must be refreshed silently from the
+    /// sealed sp_dc/sp_key cookies instead of erroring out to a manual re-login. Only the
+    /// network fetch itself is stubbed; the expiry decision, the refresh call and the
+    /// persistence of the new token all run through the real code.
+    #[test]
+    fn expired_spotify_token_is_silently_refreshed_from_sealed_cookies() {
+        let state = spotify_test_state();
+        seed_spotify_session(&state, "stale-access-token", now_millis() - 1_000);
+        let refreshed = tauri::async_runtime::block_on(spotify_token_with_fetch(
+            &state,
+            |sp_dc: String, sp_key: String| async move {
+                // The refresh must reuse the sealed cookies, not ask for a new login.
+                assert_eq!(sp_dc, "test-sp-dc");
+                assert_eq!(sp_key, "test-sp-key");
+                Ok::<(String, i64), String>((
+                    "fresh-access-token".to_owned(),
+                    now_millis() + 3_600_000,
+                ))
+            },
+        ));
+        assert_eq!(refreshed.as_deref(), Ok("fresh-access-token"));
+        // The new token and its expiry are persisted, so the next command needs no refresh.
+        assert_eq!(
+            stored_spotify_token(&state).as_deref(),
+            Some("fresh-access-token")
+        );
+        assert!(
+            stored_spotify_expiry(&state).is_some_and(|expiry| expiry > now_millis()),
+            "refreshed expiry must be in the future"
+        );
+        // The sealed cookies survive the refresh, so it can happen again at the next expiry.
+        let db = state.db.lock().unwrap();
+        assert_eq!(
+            secrets::get(&db, "spotifySpDc").unwrap().as_deref(),
+            Some("test-sp-dc")
+        );
+        assert_eq!(
+            secrets::get(&db, "spotifySpKey").unwrap().as_deref(),
+            Some("test-sp-key")
+        );
+    }
+
+    #[test]
+    fn valid_spotify_token_is_returned_without_refresh() {
+        let state = spotify_test_state();
+        seed_spotify_session(&state, "live-access-token", now_millis() + 3_600_000);
+        let token =
+            tauri::async_runtime::block_on(spotify_token_with_fetch(&state, |_, _| async {
+                panic!("a valid token must not trigger a refresh")
+            }));
+        assert_eq!(token.as_deref(), Ok("live-access-token"));
+        assert_eq!(
+            stored_spotify_token(&state).as_deref(),
+            Some("live-access-token"),
+            "nothing is rewritten when no refresh happens"
+        );
+    }
+
+    #[test]
+    fn token_about_to_expire_is_refreshed_before_use() {
+        let state = spotify_test_state();
+        seed_spotify_session(&state, "almost-stale-token", now_millis() + 30_000);
+        let token =
+            tauri::async_runtime::block_on(spotify_token_with_fetch(&state, |_, _| async {
+                Ok::<(String, i64), String>((
+                    "fresh-access-token".to_owned(),
+                    now_millis() + 3_600_000,
+                ))
+            }));
+        assert_eq!(token.as_deref(), Ok("fresh-access-token"));
+    }
+
+    #[test]
+    fn expired_spotify_token_with_dead_cookies_still_reports_expired() {
+        let state = spotify_test_state();
+        seed_spotify_session(&state, "stale-access-token", now_millis() - 1_000);
+        let token =
+            tauri::async_runtime::block_on(spotify_token_with_fetch(&state, |_, _| async {
+                Err::<(String, i64), String>("Spotify token rejected: 401".to_owned())
+            }));
+        assert_eq!(
+            token.as_deref().unwrap_err(),
+            "Spotify account is not authenticated or its token expired",
+            "dead cookies fall back to the old error so manual re-login still works"
+        );
+        assert_eq!(
+            stored_spotify_token(&state).as_deref(),
+            Some("stale-access-token"),
+            "a failed refresh must not clobber the stored session"
+        );
+    }
+
+    // --- M16: silent Spotify token refresh (end) ---
 
     // --- regression tests for the review fixes (end) ---
 }
