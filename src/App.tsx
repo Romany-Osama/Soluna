@@ -408,6 +408,12 @@ function App() {
   const persistentQueueSkipWriteRef = useRef(false);
   const persistentSessionLoadedRef = useRef(false);
   const persistentSessionSkipWriteRef = useRef(false);
+  // `settingsLoading` starts false, goes true while the stored settings load, then false again —
+  // and its `finally` clears it even when the load failed. So the queue gate must not be the
+  // loading flag (or having seen it): only a load that actually succeeded proves the stored
+  // `persistentQueue` value is known. Until then the in-code default (`true`) must not restore
+  // — or overwrite — a queue the user may have disabled.
+  const persistentQueueSettingsLoadedRef = useRef(false);
   const resumePositionRef = useRef<number | null>(null);
   const resumePlayingRef = useRef(false);
   const resumePendingRef = useRef(false);
@@ -686,6 +692,10 @@ function App() {
           .filter((value) => (lyricsProviderNames as readonly string[]).includes(value));
         setLyricsProviderOrder([...parsed, ...lyricsProviderNames.filter((provider) => !parsed.includes(provider))]);
       }
+      // The stored settings arrived and were applied: only now is the stored
+      // `persistentQueue` value known. A load that throws never reaches here, so a failed
+      // load leaves the queue gate closed (see restorePersistentPlayback).
+      persistentQueueSettingsLoadedRef.current = true;
     } catch (error) {
       setNotice(`Settings could not be loaded: ${errorMessage(error)}`, "error");
     } finally {
@@ -1884,7 +1894,16 @@ function App() {
   useEffect(() => syncAudioPlayer(), [currentPlaybackEffectKey]);
 
   const restorePersistentPlayback = useEffectEvent(() => {
+    // Only restore once the stored settings have actually loaded: the in-code default
+    // `persistentQueue: true` must not restore (and start playing) a queue the user disabled,
+    // and a failed load must not be treated as a confirmed "on" either — the gate stays
+    // closed until a load succeeds.
+    if (settingsLoading) return;
+    if (!persistentQueueSettingsLoadedRef.current) return;
     if (settings.persistentQueue !== true) {
+      // The setting is off: stop restoring/persisting from now on, but leave the current
+      // in-memory queue and playback alone — switching the setting off mid-session must not
+      // stop what is already playing.
       persistentQueueLoadedRef.current = false;
       persistentQueueSkipWriteRef.current = false;
       persistentSessionLoadedRef.current = false;
@@ -1929,6 +1948,7 @@ function App() {
     restorePersistentPlayback();
   }, [
     settings.persistentQueue,
+    settingsLoading,
     setNotice,
     setQueueContinuation,
     setQueueContinuationKind,
@@ -1937,6 +1957,12 @@ function App() {
   ]);
 
   useEffect(() => {
+    // Do not write until the stored setting is known: on mount the in-code default is
+    // `persistentQueue: true` with an empty queue, which would overwrite the saved queue
+    // before the gated restore above has had a chance to read it — and a failed load must
+    // not let the default overwrite it either.
+    if (settingsLoading) return;
+    if (!persistentQueueSettingsLoadedRef.current) return;
     if (settings.persistentQueue !== true) {
       clearPersistedPlayback();
       return;
@@ -1981,6 +2007,7 @@ function App() {
     }
   }, [
     settings.persistentQueue,
+    settingsLoading,
     queueItems,
     queueIndex,
     queueContinuation,
