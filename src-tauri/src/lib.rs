@@ -251,6 +251,13 @@ const SCHEMA_SQL: &str = "PRAGMA foreign_keys = ON;
 /// still accepted when the schema checks pass. A restored database carrying a
 /// higher version was written by a newer Soluna than this build and must not be
 /// trusted: this build cannot know what its schema means.
+///
+/// 1 is the first versioned schema: every `ALTER TABLE` in
+/// `MIGRATION_ADD_COLUMNS` applied (M10). Bump this when a future migration
+/// adds statements, and gate the new statements on the recorded version (see
+/// `initialize_database`). The stamp is written only inside the migration
+/// transaction, only when migration actually runs — never best-effort, so a
+/// higher version written by a newer build is never downgraded.
 const SCHEMA_VERSION: i64 = 1;
 
 /// The tables — and the columns `initialize_database` cannot add — that a restored
@@ -457,78 +464,203 @@ struct SessionStatus {
     account_avatar: Option<String>,
 }
 
+/// Every column the migration adds, in the order they were introduced. The SQL strings are unchanged from the
+/// original inline `ALTER TABLE` calls; collecting them here keeps the migration loop, and its transaction, in one
+/// place. `SCHEMA_SQL` already defines most of these columns for fresh databases, so on an old database most of
+/// these are no-ops — except `podcasts.detail_json`, which only this list adds.
+const MIGRATION_ADD_COLUMNS: &[&str] = &[
+    "ALTER TABLE songs ADD COLUMN set_video_id TEXT",
+    "ALTER TABLE songs ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN music_video_type TEXT",
+    "ALTER TABLE songs ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN liked_date INTEGER",
+    "ALTER TABLE songs ADD COLUMN in_library INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN is_video INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN uploaded INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN youtube_liked INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN album_id TEXT",
+    "ALTER TABLE songs ADD COLUMN duration INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN is_local INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE songs ADD COLUMN local_path TEXT",
+    "ALTER TABLE songs ADD COLUMN date_modified INTEGER",
+    "ALTER TABLE downloads ADD COLUMN total_bytes INTEGER",
+    "ALTER TABLE downloads ADD COLUMN state TEXT NOT NULL DEFAULT 'completed'",
+    "ALTER TABLE downloads ADD COLUMN error TEXT",
+    "ALTER TABLE downloads ADD COLUMN lyrics_cached INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE downloads ADD COLUMN artwork_path TEXT",
+    "ALTER TABLE albums ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE playlists ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+    "ALTER TABLE podcasts ADD COLUMN detail_json TEXT",
+    "ALTER TABLE history ADD COLUMN play_time_ms INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE player_cache ADD COLUMN quality TEXT NOT NULL DEFAULT 'auto'",
+    "ALTER TABLE player_cache ADD COLUMN artwork_path TEXT",
+];
+
+/// Reads the recorded schema version (`PRAGMA user_version`, 0 when never stamped).
+fn schema_user_version(db: &Connection) -> rusqlite::Result<i64> {
+    db.query_row("PRAGMA user_version", [], |row| row.get(0))
+}
+
+/// Runs one migration `ALTER TABLE ... ADD COLUMN`. The expected re-run case — a previous start already added the
+/// column — fails with "duplicate column name: <table>.<column>" and is swallowed, preserving the migration's
+/// idempotency. Any other failure (a missing table, adding a column to a view, a bad default, ...) is genuine and
+/// is returned so startup fails loudly instead of booting on a half-migrated schema.
+fn add_column_if_missing(db: &Connection, sql: &str) -> rusqlite::Result<()> {
+    match db.execute(sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Path of the pre-migration backup for a file-backed database: a sibling of the live file
+/// (`soluna.sqlite3` -> `soluna.migration-backup`, the same `with_extension` convention as the M6 restore
+/// files). Returns `None` when there is nothing worth snapshotting: an in-memory or temporary database
+/// (`Connection::path` is `""`), or a brand-new, still-empty file (a fresh install has no user data to roll
+/// back to). The backup is deliberately kept after a successful migration — it is the rollback target if the
+/// migrated database ever turns out to be bad, and the next migration overwrites it with a fresh snapshot.
+/// The backup keeps the library and settings but not session credentials: the copy is scrubbed of every
+/// session row before it is renamed over this name (see `backup_database_before_migration`), so rolling
+/// back to it means signing in again. A secret-bearing backup never exists under the final name — the
+/// temporary `.part` file does hold secrets briefly while it is being scrubbed.
+fn migration_backup_path(db: &Connection) -> Option<PathBuf> {
+    let path_str = db.path()?;
+    if path_str.is_empty() || path_str == ":memory:" {
+        return None;
+    }
+    let path = Path::new(path_str);
+    if fs::metadata(path).map_or(0, |metadata| metadata.len()) == 0 {
+        return None;
+    }
+    Some(path.with_extension("migration-backup"))
+}
+
+/// Deletes every session row from a backup copy's `settings` table and rebuilds the file so the
+/// deleted secrets leave no residue in SQLite's free pages. Reuses the M9 logout path's
+/// `delete_settings` and the same `secure_delete` + `VACUUM` statements `forget_session` uses —
+/// but deliberately NOT `forget_session` itself, which would also destroy the shared encryption key
+/// in the credential store; the live database still needs that key. A copy with no `settings` object
+/// at all is left alone; a `settings` object that cannot be written (a view, for example) is a genuine
+/// failure, not a skip — failing loudly is safer than shipping an unscrubbed backup.
+fn scrub_session_rows_from_backup(db: &Connection) -> rusqlite::Result<()> {
+    let has_settings: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'settings')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_settings {
+        return Ok(());
+    }
+    let mut session_keys: Vec<&str> =
+        Vec::with_capacity(GOOGLE_SESSION_KEYS.len() + SPOTIFY_SESSION_KEYS.len());
+    session_keys.extend_from_slice(GOOGLE_SESSION_KEYS);
+    session_keys.extend_from_slice(SPOTIFY_SESSION_KEYS);
+    delete_settings(db, &session_keys)?;
+    db.execute_batch("PRAGMA secure_delete = ON; VACUUM;")?;
+    Ok(())
+}
+
+/// Copies the live database to its `*.migration-backup` sibling with SQLite's online backup API, before any
+/// schema change is applied, then scrubs every session credential out of the copy. The backup is first written
+/// to a temporary `*.migration-backup.part` sibling: the copy holds the live database's session rows (plaintext
+/// on a 0.1.8-or-older database, sealed on a 0.2.0–0.4.0 one) until the scrub deletes them, so a secret-bearing
+/// backup never exists under the final name. Only after the scrub succeeds is the temporary file renamed over
+/// the final name. A failure at any step — backup, scrub, or rename — deletes the temporary file and returns
+/// the error, so the migration aborts (and therefore startup) exactly as a backup failure does today; an
+/// existing final backup is kept — the live database is untouched when the backup step fails, so it is still a
+/// valid rollback target, and no released build ever wrote an unscrubbed final backup. On Windows the rename
+/// replaces an existing final file (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`); if another process holds
+/// the target open the rename fails, the migration aborts, the temporary file is removed, and the old final
+/// backup is kept. (The durability sync of the temporary file stays best-effort, as before: closing the
+/// destination already flushed its pages, so a failed fsync must not fail startup when the backup itself is
+/// complete.) A stale `.part` file left by an interrupted scrub is removed at the start of every
+/// backup, so the next start cleans it up. Crash safety of this path is by design (temporary file + rename,
+/// never a half-scrubbed final file) and is not tested with a real crash.
+fn backup_database_before_migration(db: &Connection) -> rusqlite::Result<()> {
+    let Some(backup_path) = migration_backup_path(db) else {
+        return Ok(());
+    };
+    let part_path = backup_path.with_extension("migration-backup.part");
+    let _ = fs::remove_file(&part_path);
+    let result = (|| -> rusqlite::Result<()> {
+        {
+            let mut dest = Connection::open(&part_path)?;
+            let backup = rusqlite::backup::Backup::new(db, &mut dest)?;
+            backup.run_to_completion(100, Duration::from_millis(10), None)?;
+            drop(backup);
+            drop(dest);
+        }
+        {
+            let temp = Connection::open(&part_path)?;
+            scrub_session_rows_from_backup(&temp)?;
+            drop(temp);
+        }
+        // Best-effort durability for the copy: closing the destination already flushed its pages, so a failed
+        // fsync must not fail startup when the backup itself is complete.
+        let _ = sync_file(&part_path);
+        fs::rename(&part_path, &backup_path).map_err(|error| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                Some(format!("backup rename failed: {error}")),
+            )
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        // Only the temporary file is removed: the live database is untouched when the backup step
+        // fails, and an existing final backup is a valid rollback target — deleting it could destroy
+        // the only recoverable copy. (No released build ever wrote an unscrubbed final backup, so
+        // keeping it cannot resurrect one.)
+        let _ = fs::remove_file(&part_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Creates or upgrades the schema of an existing database (any released version from v0.1.0 to v0.1.8), recovers
 /// interrupted downloads, and seals plaintext session secrets. Separate from `RuntimeState::new` so upgrade tests can
 /// run it against a real older database file with an in-memory key store.
+///
+/// Migration (M10): before any schema change, a database whose recorded schema version is older than
+/// `SCHEMA_VERSION` is snapshotted to a sibling `*.migration-backup` file, the column additions run inside
+/// one transaction together with the version stamp, and a genuine `ALTER TABLE` failure aborts startup (via
+/// `RuntimeState::new`'s `fail_to_start`) instead of being silently swallowed. The backup is scrubbed of
+/// every session credential before it is renamed over the final name, so it keeps the library but never a
+/// secret. A crash mid-migration therefore leaves either the old schema (version stamp rolled back, backup
+/// next to the database) or the new one, never a half-migrated mix with no record of how far it got.
 fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqlite::Result<()> {
+    let version = schema_user_version(db)?;
+    let needs_migration = version < SCHEMA_VERSION;
+    if needs_migration {
+        backup_database_before_migration(db)?;
+    }
     db.execute_batch(SCHEMA_SQL)?;
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN set_video_id TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN music_video_type TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN liked_date INTEGER", []);
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN in_library INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN is_video INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN uploaded INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN youtube_liked INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN album_id TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN duration INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE songs ADD COLUMN is_local INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN local_path TEXT", []);
-    let _ = db.execute("ALTER TABLE songs ADD COLUMN date_modified INTEGER", []);
-    let _ = db.execute("ALTER TABLE downloads ADD COLUMN total_bytes INTEGER", []);
-    let _ = db.execute(
-        "ALTER TABLE downloads ADD COLUMN state TEXT NOT NULL DEFAULT 'completed'",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE downloads ADD COLUMN error TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE downloads ADD COLUMN lyrics_cached INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE downloads ADD COLUMN artwork_path TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE albums ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE playlists ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE podcasts ADD COLUMN detail_json TEXT", []);
-    let _ = db.execute(
-        "ALTER TABLE history ADD COLUMN play_time_ms INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = db.execute(
-        "ALTER TABLE player_cache ADD COLUMN quality TEXT NOT NULL DEFAULT 'auto'",
-        [],
-    );
-    let _ = db.execute("ALTER TABLE player_cache ADD COLUMN artwork_path TEXT", []);
+    if needs_migration {
+        // One transaction for the whole migration, so a crash or a genuine failure cannot leave a partial set of
+        // columns behind. `PRAGMA user_version` is written through the pager, so the stamp commits — or rolls
+        // back — with the ALTERs. SCHEMA_SQL stays outside the transaction on purpose: it starts with
+        // `PRAGMA foreign_keys = ON`, which is a no-op inside a transaction, and its `CREATE TABLE IF NOT
+        // EXISTS` statements never modify existing data.
+        db.execute_batch("BEGIN IMMEDIATE")?;
+        let migrated = (|| -> rusqlite::Result<()> {
+            for sql in MIGRATION_ADD_COLUMNS {
+                add_column_if_missing(db, sql)?;
+            }
+            db.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+            Ok(())
+        })();
+        match migrated {
+            Ok(()) => db.execute_batch("COMMIT")?,
+            Err(error) => {
+                let _ = db.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
+    }
     // A download cannot survive a restart; rows still marked "downloading" are leftovers of a crash or forced quit.
     // Mark them cancelled (not failed) so the retained `.part` file stays resumable (v0.1.8 resume, see DECISIONS D-002).
     let _ = db.execute("UPDATE downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
@@ -537,9 +669,6 @@ fn initialize_database(db: &Connection, store: &dyn secrets::KeyStore) -> rusqli
     let _ = db.execute("UPDATE playlist_downloads SET state = 'cancelled', error = 'download interrupted; retry to resume' WHERE state = 'downloading'", []);
     // Encrypt any session secret still stored as plaintext by an older version. Failure keeps the session working.
     let _ = secrets::migrate_with(db, store);
-    // Stamp the schema version this build understands (M7). Best-effort: a stamp
-    // failure must not fail startup, and an unstamped database is still usable.
-    let _ = db.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
     Ok(())
 }
 
@@ -8935,6 +9064,555 @@ mod tests {
             Some("SAPISID=V018PLAINCOOKIE0123456789; __Secure-3PSID=V018PLAINPSID")
         );
         drop(db);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn has_column(db: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = db
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("table_info");
+        let mut rows = stmt.query([]).expect("query");
+        while let Some(row) = rows.next().expect("row") {
+            let name: String = row.get(1).expect("column name");
+            if name == column {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// M10: migrating a genuinely old database records the schema version and leaves a pre-migration backup.
+    /// The old schema here is the real old shape — tables without the columns the migration adds — not the
+    /// v0.1.8 fixture, whose CREATE TABLEs already contain most of them.
+    #[test]
+    fn migration_records_version_and_keeps_pre_migration_backup() {
+        let dir = m6_test_dir("m10-migration-backup");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("old db");
+            old.execute_batch(
+                "CREATE TABLE songs (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE playlists (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE playlist_songs (playlist_id TEXT NOT NULL, position INTEGER NOT NULL, song_id TEXT NOT NULL, PRIMARY KEY (playlist_id, position));
+                 CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, song_id TEXT NOT NULL, played_at INTEGER NOT NULL);
+                 CREATE TABLE downloads (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, downloaded_at INTEGER NOT NULL);
+                 CREATE TABLE albums (id TEXT PRIMARY KEY, title TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE podcasts (id TEXT PRIMARY KEY, title TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE player_cache (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, cached_at INTEGER NOT NULL);
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO songs (id, title, kind, saved_at) VALUES ('s1', 'Old Song', 'song', 1700000000000);",
+            )
+            .expect("old schema");
+        }
+        let backup_path = path.with_extension("migration-backup");
+        assert!(!backup_path.exists(), "premise: no backup before migration");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        for (table, column) in [
+            ("songs", "liked"),
+            ("songs", "date_modified"),
+            ("downloads", "artwork_path"),
+            ("albums", "liked"),
+            ("playlists", "source"),
+            ("podcasts", "detail_json"),
+            ("history", "play_time_ms"),
+            ("player_cache", "artwork_path"),
+        ] {
+            assert!(
+                has_column(&db, table, column),
+                "{table}.{column} added by migration"
+            );
+        }
+        drop(db);
+
+        // The backup is the database as it was before the migration: same song, old schema, version 0.
+        assert!(backup_path.exists(), "pre-migration backup exists");
+        let backup = Connection::open(&backup_path).expect("open backup");
+        assert_eq!(schema_user_version(&backup).expect("backup version"), 0);
+        assert!(
+            !has_column(&backup, "songs", "liked"),
+            "backup predates the migration"
+        );
+        assert!(!has_column(&backup, "podcasts", "detail_json"));
+        assert_eq!(
+            backup
+                .query_row("SELECT COUNT(*) FROM songs", [], |row| row.get::<_, i64>(0))
+                .expect("count"),
+            1,
+            "backup keeps the library"
+        );
+        assert_eq!(
+            backup
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .expect("integrity"),
+            "ok"
+        );
+        drop(backup);
+        let backup_bytes = fs::read(&backup_path).expect("read backup");
+
+        // A second start is still a no-op: the version is already current, so no new backup is taken and
+        // the old one is left untouched.
+        let db = Connection::open(&path).expect("reopen");
+        initialize_database(&db, &store).expect("second start is a no-op");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        drop(db);
+        assert_eq!(
+            fs::read(&backup_path).expect("reread backup"),
+            backup_bytes,
+            "second start leaves the backup untouched"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: the expected duplicate-column re-run is swallowed; a genuine ALTER failure is not.
+    #[test]
+    fn migration_add_column_only_swallows_duplicate_column() {
+        let db = Connection::open_in_memory().expect("db");
+        db.execute_batch(SCHEMA_SQL).expect("schema");
+        // Re-adding a column the schema already has is the idempotent re-run case.
+        add_column_if_missing(
+            &db,
+            "ALTER TABLE songs ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
+        )
+        .expect("duplicate column is expected");
+        add_column_if_missing(
+            &db,
+            "ALTER TABLE songs ADD COLUMN liked INTEGER NOT NULL DEFAULT 0",
+        )
+        .expect("duplicate column is expected on repeat");
+        // A genuine failure — no such table — must surface.
+        let error = add_column_if_missing(&db, "ALTER TABLE no_such_table ADD COLUMN x TEXT")
+            .expect_err("genuine failure must surface");
+        assert!(
+            format!("{error}").contains("no such table"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// M10: a genuine ALTER failure aborts the migration, rolls the earlier ALTERs back, and leaves the
+    /// pre-migration backup behind. The sabotage replaces `history` with a view after the schema is built:
+    /// `SCHEMA_SQL` skips it (`CREATE TABLE IF NOT EXISTS` is a no-op against the name), then the `history`
+    /// ALTER fails with "Cannot add a column to a view" — after the `podcasts.detail_json` ALTER, so without
+    /// the transaction that column would survive the failure.
+    #[test]
+    fn migration_genuine_failure_surfaces_and_rolls_back() {
+        let dir = m6_test_dir("m10-migration-failure");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let db = Connection::open(&path).expect("db");
+            db.execute_batch(SCHEMA_SQL).expect("schema");
+            db.execute_batch(
+                "DROP TABLE history;
+                 CREATE VIEW history AS SELECT 1 AS id, 'x' AS song_id, 0 AS played_at;",
+            )
+            .expect("sabotage");
+            assert!(
+                !has_column(&db, "podcasts", "detail_json"),
+                "premise: detail_json not yet added"
+            );
+        }
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        let error =
+            initialize_database(&db, &store).expect_err("genuine ALTER failure must surface");
+        assert!(
+            format!("{error}").contains("Cannot add a column to a view"),
+            "unexpected error: {error}"
+        );
+        // The transaction rolled the earlier ALTERs back with the version stamp.
+        assert_eq!(schema_user_version(&db).expect("version"), 0);
+        assert!(
+            !has_column(&db, "podcasts", "detail_json"),
+            "failed migration rolls back"
+        );
+        drop(db);
+        // The backup was still taken before the failed migration.
+        let backup_path = path.with_extension("migration-backup");
+        assert!(
+            backup_path.exists(),
+            "backup exists even when migration fails"
+        );
+        let backup = Connection::open(&backup_path).expect("open backup");
+        assert_eq!(schema_user_version(&backup).expect("backup version"), 0);
+        drop(backup);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: a database stamped by a newer build is left alone — no migration, no backup, and the recorded
+    /// version is never downgraded. This is the guarantee the deleted best-effort stamp existed to break:
+    /// stamping unconditionally on every startup would rewrite the newer version to SCHEMA_VERSION.
+    #[test]
+    fn migration_preserves_a_newer_schema_version_and_takes_no_backup() {
+        let dir = m6_test_dir("m10-migration-newer-version");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let db = Connection::open(&path).expect("db");
+            db.execute_batch(SCHEMA_SQL).expect("schema");
+            db.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
+                .expect("stamp newer version");
+        }
+        let backup_path = path.with_extension("migration-backup");
+        assert!(!backup_path.exists(), "premise: no backup before start");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for start");
+        initialize_database(&db, &store).expect("newer version is a no-op");
+        assert_eq!(
+            schema_user_version(&db).expect("version"),
+            SCHEMA_VERSION + 1,
+            "newer version is preserved, not downgraded"
+        );
+        drop(db);
+        assert!(
+            !backup_path.exists(),
+            "no backup is taken when nothing migrates"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: the pre-migration backup of a 0.1.8 database holds no plaintext session secret. The fixture is
+    /// the real v0.1.8 shape, with a plaintext cookie, `spotifySpDc`/`spotifySpKey` and `spotifyAccessToken`.
+    /// The backup keeps the library; the live database is still migrated and its secrets still sealed. The
+    /// backup also keeps the non-session `settings` rows and the `spotify_match` row intact — only the
+    /// session rows are deleted.
+    #[test]
+    fn migration_backup_scrubs_plaintext_session_secrets() {
+        let dir = m6_test_dir("m10-migration-backup-scrub-plaintext");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("v0.1.8 db");
+            old.execute_batch(include_str!("../tests/fixtures/v0.1.8-song-db.sql"))
+                .expect("fixture");
+            // The fixture creates `spotify_match` (the real `SCHEMA_SQL` definition) with no rows:
+            // one match row proves the backup keeps it. The song id is the fixture song s1.
+            old.execute_batch(
+                "INSERT INTO spotify_match (spotify_id, youtube_id, title, artist, match_score, cached_at, is_manual_override) VALUES ('spotify:track:4uLU6hMCjMI75M1A2tKUQC', 'v1', 'Blinding Lights', 'The Weeknd', 0.95, 1700000000000, 0);",
+            )
+            .expect("spotify_match row");
+        }
+        let markers: [&[u8]; 4] = [
+            b"V018PLAINCOOKIE",
+            b"V018PLAINSPDC",
+            b"V018PLAINSPKEY",
+            b"V018PLAINTOKEN",
+        ];
+        let before = fs::read(&path).expect("read fixture db");
+        assert!(
+            markers.iter().all(|marker| contains_bytes(&before, marker)),
+            "premise: v0.1.8 stores secrets in plaintext"
+        );
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        // The live database is migrated and its secrets sealed, not deleted: the session still works.
+        for key in [
+            "cookie",
+            "spotifySpDc",
+            "spotifySpKey",
+            "spotifyAccessToken",
+        ] {
+            let raw = setting_value(&db, key)
+                .expect("raw")
+                .expect("still present");
+            assert!(
+                raw.starts_with("enc1:"),
+                "{key} is sealed on the live database"
+            );
+        }
+        drop(db);
+
+        let backup_path = path.with_extension("migration-backup");
+        assert!(backup_path.exists(), "pre-migration backup exists");
+        let backup_bytes = fs::read(&backup_path).expect("read backup");
+        for marker in markers {
+            assert!(
+                !contains_bytes(&backup_bytes, marker),
+                "backup holds no plaintext {}",
+                String::from_utf8_lossy(marker)
+            );
+        }
+        let backup = Connection::open(&backup_path).expect("open backup");
+        for key in GOOGLE_SESSION_KEYS.iter().chain(SPOTIFY_SESSION_KEYS) {
+            assert_eq!(
+                setting_value(&backup, key).expect("backup setting"),
+                None,
+                "backup has no {key} row"
+            );
+        }
+        // The backup keeps everything that is not a session row: the non-session `settings` rows
+        // with the same values, and the `spotify_match` row intact.
+        for (key, value) in [
+            ("audioQuality", "high"),
+            ("playerVolume", "0.6"),
+            ("persistentQueue", "true"),
+            ("varispeed", "false"),
+            ("hideExplicit", "false"),
+        ] {
+            assert_eq!(
+                setting_value(&backup, key)
+                    .expect("backup setting")
+                    .as_deref(),
+                Some(value),
+                "backup keeps non-session setting {key}"
+            );
+        }
+        let (spotify_id, youtube_id, title, artist, match_score, cached_at, manual) = backup
+            .query_row(
+                "SELECT spotify_id, youtube_id, title, artist, match_score, cached_at, is_manual_override FROM spotify_match",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .expect("spotify_match row in backup");
+        assert_eq!(spotify_id, "spotify:track:4uLU6hMCjMI75M1A2tKUQC");
+        assert_eq!(youtube_id, "v1");
+        assert_eq!(title, "Blinding Lights");
+        assert_eq!(artist, "The Weeknd");
+        assert_eq!(match_score, 0.95);
+        assert_eq!(cached_at, 1700000000000);
+        assert_eq!(manual, 0);
+        assert_eq!(
+            backup
+                .query_row("SELECT COUNT(*) FROM songs", [], |row| row.get::<_, i64>(0))
+                .expect("count"),
+            3,
+            "backup keeps the library"
+        );
+        assert_eq!(
+            backup
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .expect("integrity"),
+            "ok"
+        );
+        drop(backup);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: the same scrub for a 0.2.0–0.4.0 database, where the session rows are already sealed: the
+    /// backup has no cookie or token rows at all, and the sealed ciphertext itself is gone from the file.
+    /// The live database keeps its sealed session untouched.
+    #[test]
+    fn migration_backup_scrubs_sealed_session_rows() {
+        let dir = m6_test_dir("m10-migration-backup-scrub-sealed");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("v0.1.8 db");
+            old.execute_batch(include_str!("../tests/fixtures/v0.1.8-song-db.sql"))
+                .expect("fixture");
+        }
+        // Seal the session first, as a 0.2.0–0.4.0 database already has it: the backup is then taken
+        // from sealed rows, and the scrub must still leave no trace of them.
+        let store = MemKeyStore(Mutex::new(None));
+        let sealed: Vec<String>;
+        {
+            let db = Connection::open(&path).expect("open to seal");
+            secrets::migrate_with(&db, &store).expect("seal");
+            sealed = [
+                "cookie",
+                "spotifySpDc",
+                "spotifySpKey",
+                "spotifyAccessToken",
+            ]
+            .iter()
+            .map(|key| setting_value(&db, key).expect("raw").expect("sealed row"))
+            .collect();
+            for value in &sealed {
+                assert!(value.starts_with("enc1:"), "premise: session is sealed");
+            }
+        }
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        // The live session is untouched by the migration: the same sealed values are still there.
+        for (key, expected) in [
+            "cookie",
+            "spotifySpDc",
+            "spotifySpKey",
+            "spotifyAccessToken",
+        ]
+        .iter()
+        .zip(sealed.iter())
+        {
+            assert_eq!(
+                setting_value(&db, key).expect("raw").as_deref(),
+                Some(expected.as_str()),
+                "{key} is unchanged on the live database"
+            );
+        }
+        drop(db);
+
+        let backup_path = path.with_extension("migration-backup");
+        assert!(backup_path.exists(), "pre-migration backup exists");
+        let backup_bytes = fs::read(&backup_path).expect("read backup");
+        for value in &sealed {
+            assert!(
+                !contains_bytes(&backup_bytes, value.as_bytes()),
+                "backup holds no sealed ciphertext"
+            );
+        }
+        let backup = Connection::open(&backup_path).expect("open backup");
+        for key in GOOGLE_SESSION_KEYS.iter().chain(SPOTIFY_SESSION_KEYS) {
+            assert_eq!(
+                setting_value(&backup, key).expect("backup setting"),
+                None,
+                "backup has no {key} row"
+            );
+        }
+        drop(backup);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: a stale `.part` file left by an interrupted scrub is removed at the start of every backup,
+    /// and a stale final-name file is replaced by the scrubbed backup — the rename replaces an existing
+    /// final file (on Windows `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`).
+    #[test]
+    fn migration_backup_replaces_stale_part_and_final_files() {
+        let dir = m6_test_dir("m10-migration-backup-stale-part");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("v0.1.8 db");
+            old.execute_batch(include_str!("../tests/fixtures/v0.1.8-song-db.sql"))
+                .expect("fixture");
+        }
+        let part_path = path.with_extension("migration-backup.part");
+        fs::write(
+            &part_path,
+            b"M10STALEPARTMARKER-junk-from-an-interrupted-scrub",
+        )
+        .expect("stale part");
+        let backup_path = path.with_extension("migration-backup");
+        fs::write(
+            &backup_path,
+            b"M10STALEFINALMARKER-junk-from-an-earlier-backup",
+        )
+        .expect("stale final");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        drop(db);
+
+        assert!(!part_path.exists(), "stale .part is removed");
+        assert!(backup_path.exists(), "final backup is written");
+        let backup_bytes = fs::read(&backup_path).expect("read backup");
+        assert!(
+            !contains_bytes(&backup_bytes, b"M10STALEPARTMARKER"),
+            "stale junk is not in the backup"
+        );
+        assert!(
+            !contains_bytes(&backup_bytes, b"M10STALEFINALMARKER"),
+            "the stale final file is replaced, not kept"
+        );
+        for marker in [
+            b"V018PLAINCOOKIE".as_slice(),
+            b"V018PLAINSPDC",
+            b"V018PLAINSPKEY",
+            b"V018PLAINTOKEN",
+        ] {
+            assert!(!contains_bytes(&backup_bytes, marker), "backup is scrubbed");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: when the scrub itself fails, the migration aborts — but the old final backup is kept: the
+    /// live database is untouched when the backup step fails, so an existing final backup is still a valid
+    /// rollback target, and deleting it could destroy the only recoverable copy. The sabotage replaces
+    /// `settings` with a view: the scrub sees a `settings` object and tries to delete from it, which fails.
+    /// (A database with no `settings` object at all is skipped cleanly instead; see
+    /// `migration_backup_skips_scrub_when_no_settings_table`.)
+    #[test]
+    fn migration_backup_failure_keeps_the_old_final_backup() {
+        let dir = m6_test_dir("m10-migration-backup-scrub-failure");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let db = Connection::open(&path).expect("db");
+            db.execute_batch(SCHEMA_SQL).expect("schema");
+            db.execute_batch(
+                "DROP TABLE settings;
+                 CREATE VIEW settings AS SELECT 'cookie' AS key, 'x' AS value;",
+            )
+            .expect("sabotage");
+        }
+        // A stale final backup from an earlier run is a valid rollback target and must survive a
+        // failed backup: the live database was not touched.
+        let backup_path = path.with_extension("migration-backup");
+        let stale_final = b"M10STALEFINAL-junk";
+        fs::write(&backup_path, stale_final).expect("stale final");
+        let part_path = path.with_extension("migration-backup.part");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        let error =
+            initialize_database(&db, &store).expect_err("scrub failure must abort migration");
+        assert!(
+            format!("{error}").contains("view"),
+            "unexpected error: {error}"
+        );
+        drop(db);
+        assert!(!part_path.exists(), "no .part file is left");
+        assert_eq!(
+            fs::read(&backup_path).expect("old final backup is kept"),
+            stale_final,
+            "the old final backup survives a failed backup, byte for byte"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M10: a database with no `settings` object at all is backed up and migrated normally — the scrub
+    /// skips cleanly instead of failing the migration. This locks in the skip behaviour; it passes on
+    /// the unscrubbed code too, because there is nothing to scrub.
+    #[test]
+    fn migration_backup_skips_scrub_when_no_settings_table() {
+        let dir = m6_test_dir("m10-migration-backup-no-settings");
+        let path = dir.join("soluna.sqlite3");
+        {
+            let old = Connection::open(&path).expect("old db");
+            old.execute_batch(
+                "CREATE TABLE songs (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE playlists (id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE playlist_songs (playlist_id TEXT NOT NULL, position INTEGER NOT NULL, song_id TEXT NOT NULL, PRIMARY KEY (playlist_id, position));
+                 CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, song_id TEXT NOT NULL, played_at INTEGER NOT NULL);
+                 CREATE TABLE downloads (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, downloaded_at INTEGER NOT NULL);
+                 CREATE TABLE albums (id TEXT PRIMARY KEY, title TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE podcasts (id TEXT PRIMARY KEY, title TEXT NOT NULL, saved_at INTEGER NOT NULL);
+                 CREATE TABLE player_cache (song_id TEXT PRIMARY KEY, path TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, cached_at INTEGER NOT NULL);
+                 INSERT INTO songs (id, title, kind, saved_at) VALUES ('s1', 'Old Song', 'song', 1700000000000);",
+            )
+            .expect("old schema");
+        }
+        let backup_path = path.with_extension("migration-backup");
+
+        let store = MemKeyStore(Mutex::new(None));
+        let db = Connection::open(&path).expect("open for migration");
+        initialize_database(&db, &store).expect("migration");
+        assert_eq!(schema_user_version(&db).expect("version"), SCHEMA_VERSION);
+        drop(db);
+
+        assert!(backup_path.exists(), "pre-migration backup exists");
+        let backup = Connection::open(&backup_path).expect("open backup");
+        let settings_objects: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'settings'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(settings_objects, 0, "backup has no settings object");
+        drop(backup);
         let _ = fs::remove_dir_all(&dir);
     }
     fn current_thread_runtime() -> tokio::runtime::Runtime {
