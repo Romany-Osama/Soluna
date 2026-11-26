@@ -8,6 +8,8 @@ on:
   workflow_dispatch:
   # Every pull request reports the required "Release dry run" check. The full build and Windows smoke run only when
   # the PR touches the release pipeline (RELEASE_PIPELINE_PATHS in scripts/lib/release.mjs); otherwise the gate passes.
+  # That is safe for the bundle itself: the CI windows job builds the NSIS installer on every PR (M11), so the gate
+  # passing here only means the signed updater artifacts, portable ZIP and smoke chain were not re-run.
   pull_request:
 
 permissions:
