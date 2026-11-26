@@ -191,3 +191,125 @@ describe("LyricLines re-sync button", () => {
     expect(visiblePill()).toBeNull();
   });
 });
+
+// Gap ring (Meld's IntervalIndicator): rendered in-flow after the last sung
+// line while the playhead is inside a >4s silence; distance classes on each
+// line drive the fullscreen fade (jsdom proves the classes, not the layout
+// — the mocked-render probe proves the sizes and opacities).
+const gapLines: LyricsPayload["lines"] = [
+  {
+    timeMs: 0,
+    text: "I used to rule the world",
+    words: [{ timeMs: 0, endMs: 3600, text: "world" }],
+  },
+  {
+    timeMs: 4000,
+    text: "Seas would rise when I gave the word",
+    words: [{ timeMs: 4000, endMs: 8500, text: "word" }],
+  },
+  {
+    timeMs: 8000,
+    text: "Now in the morning, I sleep alone",
+    words: [{ timeMs: 8000, endMs: 12000, text: "alone" }],
+  },
+  {
+    timeMs: 22000,
+    text: "Be my mirror, my sword and shield",
+    words: [{ timeMs: 22000, endMs: 26000, text: "shield" }],
+  },
+  {
+    timeMs: 26000,
+    text: "My missionaries in a foreign field",
+    words: [{ timeMs: 26000, endMs: 29500, text: "field" }],
+  },
+  {
+    timeMs: 29000,
+    text: "For some reason, I can't explain",
+    words: [{ timeMs: 29000, endMs: 31800, text: "explain" }],
+  },
+];
+
+function renderGapLines(props: { playbackSeconds?: number; activeLyricIndex?: number } = {}) {
+  const audioRef = createRef<HTMLAudioElement | null>();
+  const containerRef = createRef<HTMLDivElement | null>();
+  const activeRef = createRef<HTMLButtonElement | null>();
+  render(
+    <LyricLines
+      lines={gapLines}
+      activeLyricIndex={props.activeLyricIndex ?? 2}
+      activeWordIndex={-1}
+      activeLyricRef={activeRef}
+      audioRef={audioRef}
+      lyricsContainerRef={containerRef}
+      lyricsAutoScrollEnabled
+      playbackSeconds={props.playbackSeconds ?? 17}
+      setLyricsAutoScrollEnabled={() => undefined}
+    />,
+  );
+}
+
+describe("LyricLines gap ring", () => {
+  const ring = () => document.querySelector(".lyrics-gap-row .gap-ring");
+
+  it("shows the ring 50% filled at 17s in the 12s -> 22s gap", () => {
+    renderGapLines();
+    expect(ring()).not.toBeNull();
+    expect(ring()?.getAttribute("data-fill")).toBe("0.50");
+    expect(ring()?.getAttribute("data-waves")).toBe("10");
+    expect(ring()?.getAttribute("data-amplitude")).toBe("2");
+    // In-flow, right after the active (last sung) line.
+    const row = document.querySelector(".lyrics-gap-row");
+    const prev = row?.previousElementSibling;
+    expect(prev?.classList.contains("lyric-line")).toBe(true);
+    expect(prev?.classList.contains("active")).toBe(true);
+  });
+
+  it("hides the ring before the gap starts", () => {
+    renderGapLines({ playbackSeconds: 10 });
+    expect(ring()).toBeNull();
+  });
+
+  it("hides the ring after gapEnd - 650ms", () => {
+    renderGapLines({ playbackSeconds: 21.5 });
+    expect(ring()).toBeNull();
+  });
+
+  it("keeps the ring at gapEnd - 650ms", () => {
+    renderGapLines({ playbackSeconds: 21.35 });
+    expect(ring()).not.toBeNull();
+  });
+
+  it("shows the ring at 0% at the gap start", () => {
+    renderGapLines({ playbackSeconds: 12 });
+    expect(ring()?.getAttribute("data-fill")).toBe("0.00");
+  });
+
+  it("shows no ring when the gap is 4000ms or less", () => {
+    // The two-line fixture has a 2375ms gap: nothing to fill.
+    renderLines({ playbackSeconds: 10.1 });
+    expect(ring()).toBeNull();
+  });
+});
+
+describe("LyricLines fullscreen distance classes", () => {
+  it("marks each line by its distance from the active line, capped at 3", () => {
+    renderGapLines({ activeLyricIndex: 2 });
+    const buttons = Array.from(document.querySelectorAll(".lyric-line"));
+    expect(buttons.length).toBe(6);
+    expect(buttons[2].classList.contains("lyric-dist-0")).toBe(true);
+    expect(buttons[2].classList.contains("active")).toBe(true);
+    expect(buttons[1].classList.contains("lyric-dist-1")).toBe(true);
+    expect(buttons[3].classList.contains("lyric-dist-1")).toBe(true);
+    expect(buttons[0].classList.contains("lyric-dist-2")).toBe(true);
+    expect(buttons[4].classList.contains("lyric-dist-2")).toBe(true);
+    expect(buttons[5].classList.contains("lyric-dist-3")).toBe(true);
+  });
+
+  it("marks no distance before the first line is active", () => {
+    renderGapLines({ activeLyricIndex: -1, playbackSeconds: 0 });
+    expect(document.querySelector(".lyric-dist-0")).toBeNull();
+    expect(document.querySelector(".lyric-dist-1")).toBeNull();
+    expect(document.querySelector(".lyric-dist-2")).toBeNull();
+    expect(document.querySelector(".lyric-dist-3")).toBeNull();
+  });
+});

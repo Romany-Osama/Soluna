@@ -1,5 +1,7 @@
-import { RefObject, useEffect, useState } from "react";
+import { Fragment, RefObject, useEffect, useState } from "react";
 import type { LyricLine } from "../../types";
+import { GapRing } from "./GapRing";
+import { findLyricsGap } from "./lyricsGap";
 import { InstrumentalInterlude } from "./InstrumentalInterlude";
 
 // Meld's LYRICS_PREVIEW_TIME: follow resumes 8s after the last manual
@@ -32,6 +34,12 @@ export type LyricLinesProps = {
  * without seeking). Follow also resumes on its own 8s after the last manual
  * scroll input. LyricLines only renders for synced lyrics, so plain lyrics
  * never see the pill.
+ *
+ * A mid-song silence over 4s gets Meld's filling circle in-flow after the
+ * last sung line (see GapRing), and each line carries a lyric-dist-0..3
+ * class by its distance from the active line, which the fullscreen look
+ * uses to fade inactive lines. The small lyrics panel keeps its pill
+ * lyrics: the distance classes have no rules outside fullscreen.
  */
 export function LyricLines({
   lines,
@@ -47,6 +55,9 @@ export function LyricLines({
   const showIntro = lines.length > 0 && playbackSeconds * 1000 < lines[0].timeMs;
   // Before the first line there is nothing to resync to.
   const showResync = !lyricsAutoScrollEnabled && activeLyricIndex >= 0;
+  // Mid-song silence: Meld's filling circle, in-flow after the last sung
+  // line, while the playhead is inside the gap.
+  const gap = findLyricsGap(lines, playbackSeconds * 1000);
   const [lastManualScrollAt, setLastManualScrollAt] = useState<number | null>(null);
 
   // Auto-resume 8s after the latest manual scroll. A new stamp restarts the
@@ -80,40 +91,52 @@ export function LyricLines({
         {showIntro && <InstrumentalInterlude label="Intro" />}
         {lines.map((line, index) => {
           const isActive = index === activeLyricIndex;
+          // Distance from the active line, capped at 3: the fullscreen
+          // look fades inactive lines by distance (Meld's ladder). Before
+          // the first line there is no active line to measure from.
+          const distance = activeLyricIndex < 0 ? -1 : Math.min(Math.abs(index - activeLyricIndex), 3);
           const words = line.words ?? [];
           return (
-            <button
-              ref={isActive ? activeLyricRef : undefined}
-              key={`${line.timeMs}-${index}`}
-              className={isActive ? "lyric-line active" : "lyric-line"}
-              onClick={() => {
-                setLyricsAutoScrollEnabled(true);
-                if (audioRef.current) audioRef.current.currentTime = line.timeMs / 1000;
-              }}
-            >
-              {isActive && words.length > 0 ? (
-                <span className="lyric-words">
-                  {words.map((word, wordIndex) => (
-                    <span key={`${word.timeMs}-${wordIndex}`}>
-                      {wordIndex > 0 ? " " : null}
-                      <span
-                        className={
-                          wordIndex < activeWordIndex
-                            ? "lyric-word sung"
-                            : wordIndex === activeWordIndex
-                              ? "lyric-word sung current"
-                              : "lyric-word"
-                        }
-                      >
-                        {word.text}
+            <Fragment key={`${line.timeMs}-${index}`}>
+              <button
+                ref={isActive ? activeLyricRef : undefined}
+                className={
+                  isActive
+                    ? "lyric-line active lyric-dist-0"
+                    : distance >= 0
+                      ? `lyric-line lyric-dist-${distance}`
+                      : "lyric-line"
+                }
+                onClick={() => {
+                  setLyricsAutoScrollEnabled(true);
+                  if (audioRef.current) audioRef.current.currentTime = line.timeMs / 1000;
+                }}
+              >
+                {isActive && words.length > 0 ? (
+                  <span className="lyric-words">
+                    {words.map((word, wordIndex) => (
+                      <span key={`${word.timeMs}-${wordIndex}`}>
+                        {wordIndex > 0 ? " " : null}
+                        <span
+                          className={
+                            wordIndex < activeWordIndex
+                              ? "lyric-word sung"
+                              : wordIndex === activeWordIndex
+                                ? "lyric-word sung current"
+                                : "lyric-word"
+                          }
+                        >
+                          {word.text}
+                        </span>
                       </span>
-                    </span>
-                  ))}
-                </span>
-              ) : (
-                line.text
-              )}
-            </button>
+                    ))}
+                  </span>
+                ) : (
+                  line.text
+                )}
+              </button>
+              {gap?.index === index ? <GapRing progress={gap.progress} /> : null}
+            </Fragment>
           );
         })}
       </div>

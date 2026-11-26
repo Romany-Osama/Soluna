@@ -1390,7 +1390,8 @@ h2 {
   transition:
     color 0.16s ease,
     background 0.16s ease,
-    transform 0.16s ease;
+    transform 0.16s ease,
+    opacity 0.16s ease;
 }
 .lyric-line:hover {
   color: #dfe2f7;
@@ -1824,6 +1825,15 @@ h2 {
   inset: 0;
   background: rgba(4, 5, 9, 0.55);
 }
+/* Fullscreen only: a dimmer, less saturated backdrop, so a vivid cover
+   does not wash the lyrics (the mock's 0.72 dim / 0.9 saturation). The
+   expanded view keeps today's 0.55 / 1.18. */
+.player-fullscreen-view .full-player-ambient img {
+  filter: blur(48px) saturate(0.9);
+}
+.player-fullscreen-view .full-player-ambient::after {
+  background: rgba(4, 5, 9, 0.72);
+}
 /* True fullscreen view: the player takes over the whole window, above the
    sidebar and top bar, with no floating-panel chrome. */
 .player-overlay.player-fullscreen-view {
@@ -1894,6 +1904,59 @@ h2 {
    not stay 1080p-sized on a 1440p screen. */
 .player-fullscreen-view .lyric-line {
   font-size: clamp(15px, 1.05vw, 19px);
+}
+/* Fullscreen lyrics: no pill, no panel — the lines sit directly on the
+   backdrop (the mock's borderless look). The active line is big and white;
+   inactive lines fade by distance from it (Meld's distance ladder, as
+   classes from LyricLines). The small lyrics panel keeps its pill. */
+.player-fullscreen-view .lyric-line {
+  background: transparent;
+}
+.player-fullscreen-view .lyric-line:hover {
+  background: transparent;
+}
+.player-fullscreen-view .lyric-line.active {
+  background: transparent;
+  color: #ffffff;
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+.player-fullscreen-view .lyric-line.lyric-dist-1 {
+  font-size: 22px;
+  opacity: 0.55;
+}
+.player-fullscreen-view .lyric-line.lyric-dist-2 {
+  font-size: 20px;
+  opacity: 0.4;
+}
+.player-fullscreen-view .lyric-line.lyric-dist-3 {
+  font-size: 20px;
+  opacity: 0.25;
+}
+/* Fullscreen lyrics column: no border, no tinted box — the section sits
+   directly on the dimmed backdrop. Compact header (the mock): no eyebrow,
+   smaller status line, slimmer provider select. */
+.player-fullscreen-view .full-player-lyrics {
+  border: none;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.player-fullscreen-view .full-player-lyrics .section-heading {
+  margin-bottom: 6px;
+}
+.player-fullscreen-view .full-player-lyrics .section-heading .eyebrow {
+  display: none;
+}
+.player-fullscreen-view .full-player-lyrics h3 {
+  font-size: 13px;
+  color: rgba(238, 240, 255, 0.75);
+}
+.player-fullscreen-view .lyrics-provider-picker select {
+  font-size: 12px;
+  padding: 3px 20px 3px 8px;
 }
 .player-fullscreen-view .full-player-action-row .player-action,
 .player-fullscreen-view .full-player-action-row .transport-button,
@@ -2012,6 +2075,29 @@ h2 {
   }
   50% {
     height: 100%;
+  }
+}
+/* Mid-song gap ring (Meld's IntervalIndicator, reimplemented for the DOM):
+   the row holds the 80px wavy progress ring, centred in the lyrics list,
+   and fades in over 200ms as Meld's does. */
+.lyrics-gap-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  padding: 24px 16px;
+  animation: lyrics-gap-fade 200ms ease-in;
+}
+.lyrics-gap-row .gap-ring {
+  flex-shrink: 0;
+  display: block;
+}
+@keyframes lyrics-gap-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 .full-player-panel {
