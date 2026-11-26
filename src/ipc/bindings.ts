@@ -22,6 +22,7 @@ import type {
   SpotifyLibraryNode,
   SpotifyLikedTracks,
   SpotifyPlaylistItem,
+  SpotifyPlaylistPage,
   SpotifyProfile,
   SpotifySessionStatus,
   SpotifyTrackMatch,
@@ -53,6 +54,7 @@ type RustModels = {
   SpotifyLibraryNode: SpotifyLibraryNode;
   SpotifyLikedTracks: SpotifyLikedTracks;
   SpotifyPlaylistItem: SpotifyPlaylistItem;
+  SpotifyPlaylistPage: SpotifyPlaylistPage;
   SpotifyProfile: SpotifyProfile;
   SpotifySessionStatus: SpotifySessionStatus;
   SpotifyTrackMatch: SpotifyTrackMatch;
@@ -85,8 +87,11 @@ export type IpcCommandMap = {
   ytm_history: { args: Record<string, never>; result: ResolveModel<RemoteHistoryPage> };
   ytm_remove_from_history: { args: { token: Token }; result: ResolveModel<void> };
   spotify_profile: { args: Record<string, never>; result: ResolveModel<SpotifyProfile> };
-  spotify_library_node: { args: { folderUri?: SpotifyUri | null }; result: ResolveModel<SpotifyLibraryNode> };
-  spotify_playlists: { args: Record<string, never>; result: ResolveModel<SpotifyPlaylistItem[]> };
+  spotify_library_node: {
+    args: { folderUri?: SpotifyUri | null; offset?: number | null };
+    result: ResolveModel<SpotifyLibraryNode>;
+  };
+  spotify_playlists: { args: { offset?: number | null }; result: ResolveModel<SpotifyPlaylistPage> };
   spotify_playlist_tracks: {
     args: { playlistId: SpotifyId; offset?: number | null };
     result: ResolveModel<SpotifyTrackPage>;
@@ -97,7 +102,7 @@ export type IpcCommandMap = {
     result: ResolveModel<void>;
   };
   spotify_rename_playlist: { args: { playlistId: SpotifyId; newName: Name }; result: ResolveModel<void> };
-  spotify_liked_tracks: { args: Record<string, never>; result: ResolveModel<SpotifyLikedTracks> };
+  spotify_liked_tracks: { args: { offset?: number | null }; result: ResolveModel<SpotifyLikedTracks> };
   spotify_match_for_youtube: { args: { youtubeId: VideoId }; result: ResolveModel<SpotifyTrackMatch | null> };
   spotify_override_youtube: {
     args: { spotifyId: LibraryId; youtubeId: VideoId; title: Text; artist: Text };

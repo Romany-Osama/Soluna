@@ -6640,6 +6640,8 @@ struct SpotifyLibraryNode {
     folders: Vec<SpotifyFolderItem>,
     playlists: Vec<SpotifyPlaylistItem>,
     total_count: i64,
+    offset: i64,
+    limit: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -6660,6 +6662,17 @@ struct SpotifyTrackItem {
 struct SpotifyLikedTracks {
     tracks: Vec<SpotifyTrackItem>,
     total_count: i64,
+    offset: i64,
+    limit: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SpotifyPlaylistPage {
+    playlists: Vec<SpotifyPlaylistItem>,
+    total_count: i64,
+    offset: i64,
+    limit: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -6733,7 +6746,20 @@ fn spotify_playlist_items(response: &Value) -> Vec<SpotifyPlaylistItem> {
         .collect()
 }
 
-fn parse_spotify_library_node(response: &Value) -> SpotifyLibraryNode {
+fn parse_spotify_playlist_page(response: &Value, offset: i64, limit: i64) -> SpotifyPlaylistPage {
+    let total_count = response
+        .pointer("/data/me/libraryV3/totalCount")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    SpotifyPlaylistPage {
+        playlists: spotify_playlist_items(response),
+        total_count,
+        offset,
+        limit,
+    }
+}
+
+fn parse_spotify_library_node(response: &Value, offset: i64, limit: i64) -> SpotifyLibraryNode {
     let library = response.pointer("/data/me/libraryV3");
     let total_count = library
         .and_then(|value| value.get("totalCount"))
@@ -6788,6 +6814,8 @@ fn parse_spotify_library_node(response: &Value) -> SpotifyLibraryNode {
         folders,
         playlists,
         total_count,
+        offset,
+        limit,
     }
 }
 
@@ -6893,7 +6921,7 @@ fn parse_spotify_playlist_tracks(response: &Value) -> Vec<SpotifyTrackItem> {
         .collect()
 }
 
-fn parse_spotify_liked_tracks(response: &Value) -> SpotifyLikedTracks {
+fn parse_spotify_liked_tracks(response: &Value, offset: i64, limit: i64) -> SpotifyLikedTracks {
     let tracks_data = response.pointer("/data/me/library/tracks");
     let total_count = tracks_data
         .and_then(|value| value.get("totalCount"))
@@ -6952,6 +6980,8 @@ fn parse_spotify_liked_tracks(response: &Value) -> SpotifyLikedTracks {
     SpotifyLikedTracks {
         tracks,
         total_count,
+        offset,
+        limit,
     }
 }
 
@@ -8883,6 +8913,87 @@ mod tests {
             0.0,
             "two empty titles are not a match"
         );
+    }
+
+    // M19: a liked library larger than one page must be retrievable — the parser has
+    // to keep the server totalCount and the requested offset/limit so the UI can page.
+    #[test]
+    fn spotify_liked_tracks_page_keeps_total_count_and_offset() {
+        let response = json!({
+            "data": { "me": { "library": { "tracks": {
+                "totalCount": 250,
+                "items": [{ "track": {
+                    "_uri": "spotify:track:abc",
+                    "data": {
+                        "name": "Song",
+                        "artists": { "items": [{ "profile": { "name": "Artist" } }] },
+                        "albumOfTrack": { "name": "Album", "coverArt": { "sources": [{ "url": "https://img" }] } },
+                        "duration": { "totalMilliseconds": 180000 }
+                    }
+                } }]
+            } } } }
+        });
+        let page = parse_spotify_liked_tracks(&response, 100, 100);
+        assert_eq!(page.total_count, 250);
+        assert_eq!(page.offset, 100);
+        assert_eq!(page.limit, 100);
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(page.tracks[0].name, "Song");
+    }
+
+    // M19: unlike liked tracks, the playlist list did not even read a totalCount, so
+    // truncation past 50 was undetectable. The paged parser must report it.
+    #[test]
+    fn spotify_playlist_page_reports_total_count_beyond_the_first_page() {
+        let response = json!({
+            "data": { "me": { "libraryV3": {
+                "totalCount": 120,
+                "items": [{ "item": {
+                    "__typename": "PlaylistResponseWrapper",
+                    "_uri": "spotify:playlist:pl1",
+                    "data": { "name": "My Playlist" }
+                } }]
+            } } }
+        });
+        let page = parse_spotify_playlist_page(&response, 50, 50);
+        assert_eq!(page.total_count, 120);
+        assert_eq!(page.offset, 50);
+        assert_eq!(page.limit, 50);
+        assert_eq!(page.playlists.len(), 1);
+        assert_eq!(page.playlists[0].id, "pl1");
+        assert_eq!(page.playlists[0].name, "My Playlist");
+    }
+
+    // M19: the library view is the same libraryV3 query with limit 100, so a
+    // >100-item library was truncated there too. The node parser must keep the
+    // server totalCount and the requested offset/limit so the UI can page it.
+    #[test]
+    fn spotify_library_node_page_keeps_total_count_and_offset() {
+        let response = json!({
+            "data": { "me": { "libraryV3": {
+                "totalCount": 250,
+                "items": [
+                    { "item": {
+                        "__typename": "FolderResponseWrapper",
+                        "_uri": "spotify:folder:f1",
+                        "data": { "name": "My Folder", "totalLength": 3 }
+                    } },
+                    { "item": {
+                        "__typename": "PlaylistResponseWrapper",
+                        "_uri": "spotify:playlist:pl1",
+                        "data": { "name": "My Playlist" }
+                    } }
+                ]
+            } } }
+        });
+        let node = parse_spotify_library_node(&response, 100, 100);
+        assert_eq!(node.total_count, 250);
+        assert_eq!(node.offset, 100);
+        assert_eq!(node.limit, 100);
+        assert_eq!(node.folders.len(), 1);
+        assert_eq!(node.folders[0].name, "My Folder");
+        assert_eq!(node.playlists.len(), 1);
+        assert_eq!(node.playlists[0].id, "pl1");
     }
 
     #[test]

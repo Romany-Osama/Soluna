@@ -107,38 +107,46 @@ pub async fn spotify_rename_playlist(
 
 #[tauri::command]
 pub async fn spotify_liked_tracks(
+    offset: Option<i64>,
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<SpotifyLikedTracks> {
     let token = spotify_token(&state).await?;
+    let offset = clamp_spotify_offset(offset);
+    let limit = 100_i64;
     let response = spotify_graphql_post(
         "fetchLibraryTracks",
-        json!({ "offset": 0, "limit": 100 }),
+        json!({ "offset": offset, "limit": limit }),
         &token,
     )
     .await?;
-    Ok(parse_spotify_liked_tracks(&response))
+    Ok(parse_spotify_liked_tracks(&response, offset, limit))
 }
 
 #[tauri::command]
 pub async fn spotify_library_node(
     folder_uri: Opt<SpotifyUri>,
+    offset: Option<i64>,
     state: tauri::State<'_, RuntimeState>,
 ) -> IpcResult<SpotifyLibraryNode> {
     let folder_uri = folder_uri.into_string();
     let token = spotify_token(&state).await?;
-    let variables = json!({ "filters": ["Playlists"], "order": Value::Null, "textFilter": "", "features": ["LIKED_SONGS", "YOUR_EPISODES_V2", "PRERELEASES", "EVENTS"], "limit": 100, "offset": 0, "flatten": false, "expandedFolders": [], "folderUri": folder_uri, "includeFoldersWhenFlattening": true });
+    let offset = clamp_spotify_offset(offset);
+    let variables = json!({ "filters": ["Playlists"], "order": Value::Null, "textFilter": "", "features": ["LIKED_SONGS", "YOUR_EPISODES_V2", "PRERELEASES", "EVENTS"], "limit": 100, "offset": offset, "flatten": false, "expandedFolders": [], "folderUri": folder_uri, "includeFoldersWhenFlattening": true });
     let response = spotify_graphql_post("libraryV3", variables, &token).await?;
-    Ok(parse_spotify_library_node(&response))
+    Ok(parse_spotify_library_node(&response, offset, 100))
 }
 
 #[tauri::command]
 pub async fn spotify_playlists(
+    offset: Option<i64>,
     state: tauri::State<'_, RuntimeState>,
-) -> IpcResult<Vec<SpotifyPlaylistItem>> {
+) -> IpcResult<SpotifyPlaylistPage> {
     let token = spotify_token(&state).await?;
-    let variables = json!({ "filters": ["Playlists"], "order": Value::Null, "textFilter": "", "features": ["LIKED_SONGS", "YOUR_EPISODES_V2", "PRERELEASES", "EVENTS"], "limit": 50, "offset": 0, "flatten": true, "expandedFolders": [], "folderUri": Value::Null, "includeFoldersWhenFlattening": false });
+    let offset = clamp_spotify_offset(offset);
+    let limit = 50_i64;
+    let variables = json!({ "filters": ["Playlists"], "order": Value::Null, "textFilter": "", "features": ["LIKED_SONGS", "YOUR_EPISODES_V2", "PRERELEASES", "EVENTS"], "limit": limit, "offset": offset, "flatten": true, "expandedFolders": [], "folderUri": Value::Null, "includeFoldersWhenFlattening": false });
     let response = spotify_graphql_post("libraryV3", variables, &token).await?;
-    Ok(spotify_playlist_items(&response))
+    Ok(parse_spotify_playlist_page(&response, offset, limit))
 }
 
 #[tauri::command]

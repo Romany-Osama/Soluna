@@ -14,6 +14,7 @@ import {
   PlaylistSort,
   SpotifyLibraryNode,
   SpotifyLikedTracksPayload,
+  SpotifyLoadMoreState,
   SpotifySessionStatus,
 } from "../../types";
 import { withOccurrences } from "../../lib/identity";
@@ -48,6 +49,7 @@ export type LibraryScreenProps = {
   librarySyncing: boolean;
   libraryView: "grid" | "list";
   loadSpotifyLibrary: (folderUri?: string | null) => Promise<void>;
+  spotifyLibraryMore: SpotifyLoadMoreState;
   matchesLibraryQuery: (title: string) => boolean;
   openCreatePlaylistDialog: () => void;
   openItem: (item: YtItem, sourceQueue?: YtItem[], sourceIndex?: number) => Promise<void>;
@@ -114,6 +116,7 @@ export function LibraryScreen({
   librarySyncing,
   libraryView,
   loadSpotifyLibrary,
+  spotifyLibraryMore,
   matchesLibraryQuery,
   openCreatePlaylistDialog,
   openItem,
@@ -825,6 +828,8 @@ export function LibraryScreen({
                   onRetry={() =>
                     void loadSpotifyLibrary(spotifyFolderStack[spotifyFolderStack.length - 1]?.uri ?? null)
                   }
+                  onLoadMore={() => void spotifyLibraryMore.loadMore()}
+                  loadingMore={spotifyLibraryMore.loading}
                 />
               )}
             </>

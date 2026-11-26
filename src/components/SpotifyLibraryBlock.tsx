@@ -16,6 +16,8 @@ export function SpotifyLibraryBlock({
   onOpenLiked,
   onBack,
   onRetry,
+  onLoadMore,
+  loadingMore,
 }: {
   node: LoadState<SpotifyLibraryNode>;
   liked: LoadState<SpotifyLikedTracksPayload>;
@@ -25,6 +27,8 @@ export function SpotifyLibraryBlock({
   onOpenLiked: () => void;
   onBack: () => void;
   onRetry: () => void;
+  onLoadMore: () => void;
+  loadingMore: boolean;
 }) {
   return (
     <section className="spotify-library-block">
@@ -111,6 +115,11 @@ export function SpotifyLibraryBlock({
             </button>
           ))}
         </div>
+      )}
+      {node.status === "ready" && node.data.folders.length + node.data.playlists.length < node.data.totalCount && (
+        <button className="secondary-button" onClick={onLoadMore} disabled={loadingMore}>
+          {loadingMore ? "Loading…" : "Load more"}
+        </button>
       )}
     </section>
   );

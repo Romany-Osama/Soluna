@@ -1,5 +1,5 @@
 import { invokeApp as invoke } from "../../ipc/bindings";
-import { Dispatch, SetStateAction, useState } from "react";
+import { Dispatch, SetStateAction, useRef, useState } from "react";
 import { AudioQuality } from "../../lib/audioQuality";
 import { errorMessage } from "../../lib/util";
 import {
@@ -11,6 +11,7 @@ import {
   SpotifyTrackPage,
   SpotifyLikedTracksPayload,
   SpotifyPlaylistItem,
+  SpotifyPlaylistPage,
   SpotifyTrackMatch,
   SpotifyFolderItem,
   SpotifyTrackItem,
@@ -38,10 +39,18 @@ export function useSpotifyLibrary({
 }: SpotifyLibraryDeps) {
   const [spotifyLibrary, setSpotifyLibrary] = useState<LoadState<SpotifyLibraryNode>>({
     status: "idle",
-    data: { folders: [], playlists: [], totalCount: 0 },
+    data: { folders: [], playlists: [], totalCount: 0, offset: 0, limit: 100 },
   });
 
   const [spotifyFolderStack, setSpotifyFolderStack] = useState<{ uri: string; name: string }[]>([]);
+
+  // Generation counters for the two paged lists. Every fresh load bumps its
+  // counter; a load-more captures the counter before its await and discards the
+  // result if a fresh load started since (O1: opening a folder, going back, or
+  // reloading while a page is in flight must not overwrite the new view when
+  // the stale page resolves).
+  const spotifyLibraryGeneration = useRef(0);
+  const spotifyLikedGeneration = useRef(0);
 
   const [spotifyPlaylistTracks, setSpotifyPlaylistTracks] = useState<LoadState<SpotifyTrackPage>>({
     status: "idle",
@@ -50,12 +59,14 @@ export function useSpotifyLibrary({
 
   const [spotifyLikedTracks, setSpotifyLikedTracks] = useState<LoadState<SpotifyLikedTracksPayload>>({
     status: "idle",
-    data: { tracks: [], totalCount: 0 },
+    data: { tracks: [], totalCount: 0, offset: 0, limit: 100 },
   });
 
   const [spotifyOpenPlaylist, setSpotifyOpenPlaylist] = useState<SpotifyPlaylistItem | null>(null);
   const [spotifyRenameName, setSpotifyRenameName] = useState("");
   const [spotifyPlaylistLoadingMore, setSpotifyPlaylistLoadingMore] = useState(false);
+  const [spotifyLibraryLoadingMore, setSpotifyLibraryLoadingMore] = useState(false);
+  const [spotifyLikedLoadingMore, setSpotifyLikedLoadingMore] = useState(false);
   const [spotifyDetailQuery, setSpotifyDetailQuery] = useState("");
   const [spotifyDetailSort, setSpotifyDetailSort] = useState<"original" | "name" | "artist" | "duration">("original");
   const [spotifyDetailSortDescending, setSpotifyDetailSortDescending] = useState(true);
@@ -70,9 +81,11 @@ export function useSpotifyLibrary({
 
   const loadSpotifyProfile = async () => {
     if (!spotifyStatus.authenticated) {
+      spotifyLibraryGeneration.current += 1;
+      spotifyLikedGeneration.current += 1;
       setSpotifyProfile(null);
-      setSpotifyLibrary({ status: "idle", data: { folders: [], playlists: [], totalCount: 0 } });
-      setSpotifyLikedTracks({ status: "idle", data: { tracks: [], totalCount: 0 } });
+      setSpotifyLibrary({ status: "idle", data: { folders: [], playlists: [], totalCount: 0, offset: 0, limit: 100 } });
+      setSpotifyLikedTracks({ status: "idle", data: { tracks: [], totalCount: 0, offset: 0, limit: 100 } });
       setSpotifyFolderStack([]);
       return;
     }
@@ -86,28 +99,102 @@ export function useSpotifyLibrary({
 
   const loadSpotifyLibrary = async (folderUri: string | null = null) => {
     if (!spotifyStatus.authenticated) return;
+    spotifyLibraryGeneration.current += 1;
+    const generation = spotifyLibraryGeneration.current;
     setSpotifyLibrary((current) => ({ ...current, status: "loading", error: undefined }));
     try {
+      const data = await invoke<SpotifyLibraryNode>("spotify_library_node", { folderUri, offset: 0 });
+      if (spotifyLibraryGeneration.current !== generation) return;
       setSpotifyLibrary({
         status: "ready",
-        data: await invoke<SpotifyLibraryNode>("spotify_library_node", { folderUri }),
+        data,
       });
     } catch (error) {
+      if (spotifyLibraryGeneration.current !== generation) return;
       setSpotifyLibrary({
         status: "error",
-        data: { folders: [], playlists: [], totalCount: 0 },
+        data: { folders: [], playlists: [], totalCount: 0, offset: 0, limit: 100 },
         error: errorMessage(error),
       });
     }
   };
 
+  // The library node pages over folders + playlists together (limit 100), so
+  // the next offset is the number of items already loaded, not just playlists.
+  const loadMoreSpotifyLibrary = async () => {
+    if (
+      spotifyLibrary.status !== "ready" ||
+      spotifyLibraryLoadingMore ||
+      spotifyLibrary.data.folders.length + spotifyLibrary.data.playlists.length >= spotifyLibrary.data.totalCount
+    )
+      return;
+    setSpotifyLibraryLoadingMore(true);
+    try {
+      const generation = spotifyLibraryGeneration.current;
+      const next = await invoke<SpotifyLibraryNode>("spotify_library_node", {
+        folderUri: spotifyFolderStack[spotifyFolderStack.length - 1]?.uri ?? null,
+        offset: spotifyLibrary.data.folders.length + spotifyLibrary.data.playlists.length,
+      });
+      if (spotifyLibraryGeneration.current !== generation) return;
+      setSpotifyLibrary({
+        status: "ready",
+        data: {
+          ...next,
+          folders: [...spotifyLibrary.data.folders, ...next.folders],
+          playlists: [...spotifyLibrary.data.playlists, ...next.playlists],
+        },
+      });
+    } catch (error) {
+      setNotice(`More Spotify library items could not be loaded: ${errorMessage(error)}`, "error");
+    } finally {
+      setSpotifyLibraryLoadingMore(false);
+    }
+  };
+
   const loadSpotifyLikedTracks = async () => {
     if (!spotifyStatus.authenticated) return;
+    spotifyLikedGeneration.current += 1;
+    const generation = spotifyLikedGeneration.current;
     setSpotifyLikedTracks((current) => ({ ...current, status: "loading", error: undefined }));
     try {
-      setSpotifyLikedTracks({ status: "ready", data: await invoke<SpotifyLikedTracksPayload>("spotify_liked_tracks") });
+      const data = await invoke<SpotifyLikedTracksPayload>("spotify_liked_tracks", { offset: 0 });
+      if (spotifyLikedGeneration.current !== generation) return;
+      setSpotifyLikedTracks({
+        status: "ready",
+        data,
+      });
     } catch (error) {
-      setSpotifyLikedTracks({ status: "error", data: { tracks: [], totalCount: 0 }, error: errorMessage(error) });
+      if (spotifyLikedGeneration.current !== generation) return;
+      setSpotifyLikedTracks({
+        status: "error",
+        data: { tracks: [], totalCount: 0, offset: 0, limit: 100 },
+        error: errorMessage(error),
+      });
+    }
+  };
+
+  const loadMoreSpotifyLikedTracks = async () => {
+    if (
+      spotifyLikedTracks.status !== "ready" ||
+      spotifyLikedLoadingMore ||
+      spotifyLikedTracks.data.tracks.length >= spotifyLikedTracks.data.totalCount
+    )
+      return;
+    setSpotifyLikedLoadingMore(true);
+    try {
+      const generation = spotifyLikedGeneration.current;
+      const next = await invoke<SpotifyLikedTracksPayload>("spotify_liked_tracks", {
+        offset: spotifyLikedTracks.data.tracks.length,
+      });
+      if (spotifyLikedGeneration.current !== generation) return;
+      setSpotifyLikedTracks({
+        status: "ready",
+        data: { ...next, tracks: [...spotifyLikedTracks.data.tracks, ...next.tracks] },
+      });
+    } catch (error) {
+      setNotice(`More Spotify liked songs could not be loaded: ${errorMessage(error)}`, "error");
+    } finally {
+      setSpotifyLikedLoadingMore(false);
     }
   };
 
@@ -340,7 +427,18 @@ export function useSpotifyLibrary({
         });
         return;
       }
-      const playlists = await invoke<SpotifyPlaylistItem[]>("spotify_playlists");
+      // The add-to-playlist dialog needs the whole library to pick from, so page
+      // through every playlist page instead of only the first 50.
+      const playlists: SpotifyPlaylistItem[] = [];
+      let offset = 0;
+      let totalCount = 0;
+      do {
+        const page = await invoke<SpotifyPlaylistPage>("spotify_playlists", { offset });
+        if (page.playlists.length === 0) break;
+        playlists.push(...page.playlists);
+        offset = playlists.length;
+        totalCount = page.totalCount;
+      } while (offset < totalCount);
       setSpotifyAddState({ status: "ready", data: { match, playlists } });
     } catch (error) {
       setSpotifyAddState({ status: "error", data: { match: null, playlists: [] }, error: errorMessage(error) });
@@ -370,7 +468,14 @@ export function useSpotifyLibrary({
     setSpotifyOpenPlaylist,
     spotifyRenameName,
     setSpotifyRenameName,
-    spotifyPlaylistLoadingMore,
+    // The three "load more" pairs travel as one grouped object: App.tsx
+    // destructures and threads a single value instead of six, which keeps
+    // the shell under its line cap. Each screen receives only its own slice.
+    spotifyLoadMore: {
+      library: { loadMore: loadMoreSpotifyLibrary, loading: spotifyLibraryLoadingMore },
+      liked: { loadMore: loadMoreSpotifyLikedTracks, loading: spotifyLikedLoadingMore },
+      playlist: { loadMore: loadMoreSpotifyPlaylistTracks, loading: spotifyPlaylistLoadingMore },
+    },
     spotifyDetailQuery,
     setSpotifyDetailQuery,
     spotifyDetailSort,
@@ -392,7 +497,6 @@ export function useSpotifyLibrary({
     openSpotifyPlaylist,
     visibleSpotifyPlaylistTracks,
     moveSpotifyTrack,
-    loadMoreSpotifyPlaylistTracks,
     renameSpotifyPlaylist,
     removeSpotifyTrack,
     findYouTubeMatchForSpotifyTrack,

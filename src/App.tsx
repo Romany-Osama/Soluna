@@ -316,7 +316,7 @@ function App() {
     setSpotifyOpenPlaylist,
     spotifyRenameName,
     setSpotifyRenameName,
-    spotifyPlaylistLoadingMore,
+    spotifyLoadMore,
     spotifyDetailQuery,
     setSpotifyDetailQuery,
     spotifyDetailSort,
@@ -338,7 +338,6 @@ function App() {
     openSpotifyPlaylist,
     visibleSpotifyPlaylistTracks,
     moveSpotifyTrack,
-    loadMoreSpotifyPlaylistTracks,
     renameSpotifyPlaylist,
     removeSpotifyTrack,
     findYouTubeMatchForSpotifyTrack,
@@ -2786,6 +2785,7 @@ function App() {
                 librarySyncing={librarySyncing}
                 libraryView={libraryView}
                 loadSpotifyLibrary={loadSpotifyLibrary}
+                spotifyLibraryMore={spotifyLoadMore.library}
                 matchesLibraryQuery={matchesLibraryQuery}
                 openCreatePlaylistDialog={openCreatePlaylistDialog}
                 openItem={openItem}
@@ -2868,6 +2868,7 @@ function App() {
       >
         <SpotifyLikedScreen
           loadSpotifyLikedTracks={loadSpotifyLikedTracks}
+          spotifyLikedMore={spotifyLoadMore.liked}
           playSpotifyTrack={playSpotifyTrack}
           setSpotifyLikedOpen={setSpotifyLikedOpen}
           spotifyLikedOpen={spotifyLikedOpen}
@@ -2882,7 +2883,6 @@ function App() {
       >
         <SpotifyPlaylistScreen
           downloadSpotifyPlaylist={downloadSpotifyPlaylist}
-          loadMoreSpotifyPlaylistTracks={loadMoreSpotifyPlaylistTracks}
           moveSpotifyTrack={moveSpotifyTrack}
           openSpotifyPlaylist={openSpotifyPlaylist}
           playSpotifyTrack={playSpotifyTrack}
@@ -2898,7 +2898,7 @@ function App() {
           spotifyDetailSort={spotifyDetailSort}
           spotifyDetailSortDescending={spotifyDetailSortDescending}
           spotifyOpenPlaylist={spotifyOpenPlaylist}
-          spotifyPlaylistLoadingMore={spotifyPlaylistLoadingMore}
+          spotifyPlaylistMore={spotifyLoadMore.playlist}
           spotifyPlaylistTracks={spotifyPlaylistTracks}
           spotifyProfile={spotifyProfile}
           spotifyRenameName={spotifyRenameName}
