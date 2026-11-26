@@ -1,6 +1,6 @@
 # Soluna
 
-**Soluna** is a lightweight music player for Windows 10 and Windows 11. It brings the calm, dark blue-black Meld/Spotify-style experience to the desktop while keeping the application native, fast, and easy to use.
+**Soluna** is a lightweight music player for Windows 10 and Windows 11. It brings the calm, dark blue-black, Spotify-style experience to the desktop while keeping the application native, fast, and easy to use.
 
 This is an independent Windows project. It is not the official Meld mobile application, and this repository contains only the desktop implementation. It does not include Android, Kotlin, Gradle, or mobile application files.
 
@@ -28,7 +28,7 @@ Downloaded songs, temporary playback cache, imported local files, account sessio
 
 ## Getting started
 
-Download the latest portable package from the [Soluna Releases page](https://github.com/Romany-Osama/Soluna/releases). The current release is **Meld Desktop v0.3.0**. Extract the complete ZIP folder and start `Meld Desktop.exe`. Keep the `icons/taskbar` folder beside the executable so the Windows taskbar thumbnail controls can load their icons.
+Download the latest portable package from the [Soluna Releases page](https://github.com/Romany-Osama/Soluna/releases). The current release is **Soluna v0.4.0**. Extract the complete ZIP folder and start `Soluna.exe`. Keep the `icons/taskbar` folder beside the executable so the Windows taskbar thumbnail controls can load their icons.
 
 The first screen can be used without connecting an account for supported public browsing and playback. Connect Google/YouTube Music when you want account library actions, saved shows, subscriptions, or synchronized personal content. Connect Spotify only when you want Spotify library and playlist features.
 
@@ -70,9 +70,9 @@ Some mobile-only or service-dependent features are not part of the Windows appli
 
 ## Project status
 
-The current public release is [Meld Desktop v0.3.0](https://github.com/Romany-Osama/Soluna/releases/tag/v0.3.0). Read [CHANGELOG.md](CHANGELOG.md) for the release history and the exact validation results.
+The current public release is [Soluna v0.4.0](https://github.com/Romany-Osama/Soluna/releases/tag/v0.4.0). Read [CHANGELOG.md](CHANGELOG.md) for the release history and the exact validation results.
 
-The GitHub repository is named **Soluna**, while the application and existing release artifacts are still branded **Meld Desktop**. This README intentionally keeps that product name until a separate branding migration is approved.
+The application is **Soluna**. Releases before 0.4.0 were branded **Meld Desktop**; see [CHANGELOG.md](CHANGELOG.md) for the rename and what carries over from a Meld Desktop install.
 
 This project is an active independent desktop adaptation. It follows the user-facing ideas and publicly available behavior of Meld where a reliable Windows implementation is possible, but it does not claim to be the official Meld release or to be a byte-for-byte copy of the mobile application.
 

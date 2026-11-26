@@ -35,3 +35,21 @@ export async function closeWindow() {
     console.error("Close window failed:", error);
   }
 }
+
+/** Fullscreen for the expanded player (fullscreen behaviour studied from Liner as a design reference). */
+export async function setFullscreenWindow(value: boolean) {
+  try {
+    await (await currentWindow()).setFullscreen(value);
+  } catch (error) {
+    console.error("Fullscreen window failed:", error);
+  }
+}
+
+export async function isFullscreenWindow() {
+  try {
+    return await (await currentWindow()).isFullscreen();
+  } catch (error) {
+    console.error("Fullscreen window check failed:", error);
+    return false;
+  }
+}
