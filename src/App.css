@@ -1790,11 +1790,38 @@ h2 {
     rgba(16, 18, 28, 0.78) 100%
   );
 }
+/* Fullscreen sizes follow the viewport height as well as the width, so the
+   cover and title stay in proportion on tall (5:4), short (600px) and very
+   large (1440p) screens instead of only scaling with width: the cover is
+   about half the viewport height wherever the width cap does not bind. */
 .player-fullscreen-view .full-player-art {
-  width: min(38vw, 520px);
+  width: min(38vw, 52vh, 680px);
 }
 .player-fullscreen-view .full-player-meta h2 {
-  font-size: clamp(28px, 3.4vw, 48px);
+  font-size: clamp(28px, min(3.4vw, 5vh), 56px);
+}
+.player-fullscreen-view .full-player-panel {
+  padding: clamp(20px, min(3.2vw, 4.2vh), 64px);
+  gap: clamp(14px, min(2.4vw, 3vh), 40px);
+}
+/* Fullscreen lyrics and controls scale with the viewport too, so they do
+   not stay 1080p-sized on a 1440p screen. */
+.player-fullscreen-view .lyric-line {
+  font-size: clamp(15px, 1.05vw, 19px);
+}
+.player-fullscreen-view .full-player-action-row .player-action,
+.player-fullscreen-view .full-player-action-row .transport-button,
+.player-fullscreen-view .full-player-action-row .queue-button {
+  width: clamp(32px, 2.6vh, 40px);
+  height: clamp(32px, 2.6vh, 40px);
+}
+.player-fullscreen-view .full-player-action-row .transport-button {
+  font-size: clamp(22px, 1.8vh, 26px);
+}
+.player-fullscreen-view .full-player-controls .play-button {
+  width: clamp(42px, 3.5vh, 54px);
+  height: clamp(42px, 3.5vh, 54px);
+  font-size: clamp(24px, 2vh, 30px);
 }
 /* Word-by-word lyrics: words already sung light up; the word under the
    playhead gets the accent. Lines without word timings highlight whole. */
@@ -2079,6 +2106,60 @@ h2 {
   .full-player-lyrics .lyrics-lines {
     padding-top: 90px;
     padding-bottom: 90px;
+  }
+}
+
+/* Short windows: compact the player chrome so the lyrics list keeps real
+   room. At 1024x600 the expanded panel is only 451px tall; the metadata
+   row, panel padding and the lyrics header alone used to take all of it,
+   pushing the whole lyrics list below the panel — the active line sat 34px
+   past the panel's bottom edge. These rules shrink the chrome, not the
+   content, so the active line stays visible. They do not trigger at 720px
+   and above, where the layout is already proven. */
+@media (max-height: 700px) {
+  .full-player-panel {
+    padding: clamp(14px, 3vh, 20px);
+    gap: 14px;
+  }
+  .player-fullscreen-view .full-player-panel {
+    padding: clamp(14px, 3vh, 20px);
+    gap: 14px;
+  }
+  .full-player-meta h2 {
+    font-size: clamp(24px, 2.6vw, 30px);
+  }
+  .full-player-action-row {
+    margin-top: 10px;
+  }
+  .full-player-progress {
+    margin-top: 10px;
+  }
+  .full-volume-control {
+    margin-top: 10px;
+  }
+  .full-player-lyrics {
+    padding: 12px;
+  }
+  .full-player-lyrics .section-heading {
+    margin-bottom: 8px;
+  }
+  .full-player-lyrics .section-heading .eyebrow {
+    display: none;
+  }
+  .full-player-lyrics h3 {
+    font-size: 14px;
+  }
+  .lyrics-provider-picker {
+    margin-top: 4px;
+  }
+  .lyrics-provider-picker select {
+    padding: 4px 24px 4px 8px;
+  }
+  .player-overlay:not(.player-fullscreen-view) .full-player-lyrics .lyrics-lines {
+    padding: min(5vh, 32px) 2px;
+  }
+  .player-fullscreen-view .full-player-lyrics .lyrics-lines {
+    padding: min(6vh, 40px) 2px;
   }
 }
 
