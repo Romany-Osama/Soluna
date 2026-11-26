@@ -28,6 +28,7 @@ export type ExpandedPlayerProps = {
   hasTransientLayer: boolean;
   isPlaying: boolean;
   lyrics: LoadState<LyricsPayload> | null;
+  lyricsAutoScrollEnabled: boolean;
   lyricsContainerRef: RefObject<HTMLDivElement | null>;
   lyricsProviderLoading: boolean;
   lyricsProviderOrder: string[];
@@ -74,6 +75,7 @@ export function ExpandedPlayer({
   hasTransientLayer,
   isPlaying,
   lyrics,
+  lyricsAutoScrollEnabled,
   lyricsContainerRef,
   lyricsProviderLoading,
   lyricsProviderOrder,
@@ -341,6 +343,7 @@ export function ExpandedPlayer({
                   activeLyricRef={activeLyricRef}
                   audioRef={audioRef}
                   lyricsContainerRef={lyricsContainerRef}
+                  lyricsAutoScrollEnabled={lyricsAutoScrollEnabled}
                   playbackSeconds={playerView.lyricsFollow.playbackSeconds}
                   setLyricsAutoScrollEnabled={setLyricsAutoScrollEnabled}
                 />

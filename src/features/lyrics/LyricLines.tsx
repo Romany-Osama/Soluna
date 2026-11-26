@@ -1,6 +1,10 @@
-import { RefObject } from "react";
+import { RefObject, useEffect, useState } from "react";
 import type { LyricLine } from "../../types";
 import { InstrumentalInterlude } from "./InstrumentalInterlude";
+
+// Meld's LYRICS_PREVIEW_TIME: follow resumes 8s after the last manual
+// scroll input, so the lyrics jump back in sync on their own.
+const RESYNC_DELAY_MS = 8000;
 
 export type LyricLinesProps = {
   lines: LyricLine[];
@@ -9,6 +13,7 @@ export type LyricLinesProps = {
   activeLyricRef: RefObject<HTMLButtonElement | null>;
   audioRef: RefObject<HTMLAudioElement | null>;
   lyricsContainerRef: RefObject<HTMLDivElement | null>;
+  lyricsAutoScrollEnabled: boolean;
   playbackSeconds: number;
   setLyricsAutoScrollEnabled: (value: boolean) => void;
 };
@@ -20,6 +25,13 @@ export type LyricLinesProps = {
  * without word timings highlight as a whole, as before. Before the first
  * line starts, the intro gets the small instrumental animation instead of
  * an empty list.
+ *
+ * Once the user scrolls away, a floating Re-sync pill appears at the bottom
+ * of the list (Meld's LyricsActionOverlay, same behaviour: it shows exactly
+ * when follow is off and a line is active, and one tap turns follow back on
+ * without seeking). Follow also resumes on its own 8s after the last manual
+ * scroll input. LyricLines only renders for synced lyrics, so plain lyrics
+ * never see the pill.
  */
 export function LyricLines({
   lines,
@@ -28,58 +40,100 @@ export function LyricLines({
   activeLyricRef,
   audioRef,
   lyricsContainerRef,
+  lyricsAutoScrollEnabled,
   playbackSeconds,
   setLyricsAutoScrollEnabled,
 }: LyricLinesProps) {
   const showIntro = lines.length > 0 && playbackSeconds * 1000 < lines[0].timeMs;
+  // Before the first line there is nothing to resync to.
+  const showResync = !lyricsAutoScrollEnabled && activeLyricIndex >= 0;
+  const [lastManualScrollAt, setLastManualScrollAt] = useState<number | null>(null);
+
+  // Auto-resume 8s after the latest manual scroll. A new stamp restarts the
+  // wait (the effect cleanup clears the pending timer); a line click, a new
+  // song or a re-fetch re-enables follow first, which cancels the timer the
+  // same way — the timer never fires after follow is already back on.
+  useEffect(() => {
+    if (lyricsAutoScrollEnabled || lastManualScrollAt === null) return;
+    const timer = window.setTimeout(() => {
+      setLastManualScrollAt(null);
+      setLyricsAutoScrollEnabled(true);
+    }, RESYNC_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [lyricsAutoScrollEnabled, lastManualScrollAt, setLyricsAutoScrollEnabled]);
+
+  const handleManualScroll = () => {
+    setLyricsAutoScrollEnabled(false);
+    setLastManualScrollAt(Date.now());
+  };
+
   return (
-    <div
-      ref={lyricsContainerRef}
-      className="lyrics-lines"
-      onWheel={() => setLyricsAutoScrollEnabled(false)}
-      onTouchMove={() => setLyricsAutoScrollEnabled(false)}
-      onPointerDown={() => setLyricsAutoScrollEnabled(false)}
-      onKeyDown={() => setLyricsAutoScrollEnabled(false)}
-    >
-      {showIntro && <InstrumentalInterlude label="Intro" />}
-      {lines.map((line, index) => {
-        const isActive = index === activeLyricIndex;
-        const words = line.words ?? [];
-        return (
-          <button
-            ref={isActive ? activeLyricRef : undefined}
-            key={`${line.timeMs}-${index}`}
-            className={isActive ? "lyric-line active" : "lyric-line"}
-            onClick={() => {
-              setLyricsAutoScrollEnabled(true);
-              if (audioRef.current) audioRef.current.currentTime = line.timeMs / 1000;
-            }}
-          >
-            {isActive && words.length > 0 ? (
-              <span className="lyric-words">
-                {words.map((word, wordIndex) => (
-                  <span key={`${word.timeMs}-${wordIndex}`}>
-                    {wordIndex > 0 ? " " : null}
-                    <span
-                      className={
-                        wordIndex < activeWordIndex
-                          ? "lyric-word sung"
-                          : wordIndex === activeWordIndex
-                            ? "lyric-word sung current"
-                            : "lyric-word"
-                      }
-                    >
-                      {word.text}
+    <div className="lyrics-lines-wrap">
+      <div
+        ref={lyricsContainerRef}
+        className="lyrics-lines"
+        onWheel={handleManualScroll}
+        onTouchMove={handleManualScroll}
+        onPointerDown={handleManualScroll}
+        onKeyDown={handleManualScroll}
+      >
+        {showIntro && <InstrumentalInterlude label="Intro" />}
+        {lines.map((line, index) => {
+          const isActive = index === activeLyricIndex;
+          const words = line.words ?? [];
+          return (
+            <button
+              ref={isActive ? activeLyricRef : undefined}
+              key={`${line.timeMs}-${index}`}
+              className={isActive ? "lyric-line active" : "lyric-line"}
+              onClick={() => {
+                setLyricsAutoScrollEnabled(true);
+                if (audioRef.current) audioRef.current.currentTime = line.timeMs / 1000;
+              }}
+            >
+              {isActive && words.length > 0 ? (
+                <span className="lyric-words">
+                  {words.map((word, wordIndex) => (
+                    <span key={`${word.timeMs}-${wordIndex}`}>
+                      {wordIndex > 0 ? " " : null}
+                      <span
+                        className={
+                          wordIndex < activeWordIndex
+                            ? "lyric-word sung"
+                            : wordIndex === activeWordIndex
+                              ? "lyric-word sung current"
+                              : "lyric-word"
+                        }
+                      >
+                        {word.text}
+                      </span>
                     </span>
-                  </span>
-                ))}
-              </span>
-            ) : (
-              line.text
-            )}
-          </button>
-        );
-      })}
+                  ))}
+                </span>
+              ) : (
+                line.text
+              )}
+            </button>
+          );
+        })}
+      </div>
+      <button
+        type="button"
+        className={showResync ? "lyrics-resync visible" : "lyrics-resync"}
+        aria-hidden={!showResync}
+        tabIndex={showResync ? 0 : -1}
+        onClick={() => {
+          // Resync only: re-enable follow and let the follow effect centre
+          // the active line. No seek, no re-fetch.
+          setLastManualScrollAt(null);
+          setLyricsAutoScrollEnabled(true);
+        }}
+      >
+        <span aria-hidden="true" className="lyrics-resync-icon">
+          ↻
+        </span>
+        Re-sync
+      </button>
     </div>
   );
 }

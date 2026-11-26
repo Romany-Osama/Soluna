@@ -15,6 +15,7 @@ export type LyricsPanelProps = {
   goBack: () => void;
   hasTransientLayer: boolean;
   lyrics: LoadState<LyricsPayload> | null;
+  lyricsAutoScrollEnabled: boolean;
   lyricsContainerRef: RefObject<HTMLDivElement | null>;
   lyricsProviderLoading: boolean;
   lyricsProviderOrder: string[];
@@ -35,6 +36,7 @@ export function LyricsPanel({
   goBack,
   hasTransientLayer,
   lyrics,
+  lyricsAutoScrollEnabled,
   lyricsContainerRef,
   lyricsProviderLoading,
   lyricsProviderOrder,
@@ -126,6 +128,7 @@ export function LyricsPanel({
                     activeLyricRef={activeLyricRef}
                     audioRef={audioRef}
                     lyricsContainerRef={lyricsContainerRef}
+                    lyricsAutoScrollEnabled={lyricsAutoScrollEnabled}
                     playbackSeconds={lyricsFollow.playbackSeconds}
                     setLyricsAutoScrollEnabled={setLyricsAutoScrollEnabled}
                   />

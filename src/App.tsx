@@ -3071,6 +3071,7 @@ function App() {
           isPlaying={isPlaying}
           lyrics={lyrics}
           lyricsContainerRef={lyricsContainerRef}
+          lyricsAutoScrollEnabled={lyricsAutoScrollEnabled}
           lyricsProviderLoading={lyricsProviderLoading}
           lyricsProviderOrder={lyricsProviderOrder}
           lyricsProviderSelection={lyricsProviderSelection}
@@ -3113,6 +3114,7 @@ function App() {
           hasTransientLayer={hasTransientLayer}
           lyrics={lyrics}
           lyricsContainerRef={lyricsContainerRef}
+          lyricsAutoScrollEnabled={lyricsAutoScrollEnabled}
           lyricsProviderLoading={lyricsProviderLoading}
           lyricsProviderOrder={lyricsProviderOrder}
           lyricsProviderSelection={lyricsProviderSelection}

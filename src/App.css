@@ -1184,7 +1184,7 @@ h2 {
   display: flex;
   flex-direction: column;
 }
-.lyrics-panel > .lyrics-lines {
+.lyrics-panel > .lyrics-lines-wrap {
   flex: 1;
   min-height: 0;
   max-height: none;
@@ -1319,6 +1319,64 @@ h2 {
   scroll-behavior: smooth;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+/* Relative anchor for the floating Re-sync pill; the list keeps its own
+   flex slot inside it, so the panel and player layouts are unchanged. */
+.lyrics-lines-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.lyrics-lines-wrap > .lyrics-lines {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+/* Re-sync pill: floats over the bottom of the lyrics list (Meld's
+   LyricsActionOverlay) and slides/fades in when follow is off. It stays
+   mounted while hidden so the exit animation plays; pointer events and
+   keyboard focus are off until it is visible. */
+.lyrics-resync {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: #2a2f47;
+  color: #eef0ff;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
+  pointer-events: none;
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+.lyrics-resync.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+.lyrics-resync:hover {
+  background: #343a58;
+}
+.lyrics-resync:focus-visible {
+  outline: 2px solid #7e88d2;
+  outline-offset: 2px;
+}
+.lyrics-resync-icon {
+  font-size: 16px;
+  line-height: 1;
 }
 .lyric-line {
   width: 100%;
@@ -2083,6 +2141,10 @@ h2 {
   height: auto;
   padding: min(18vh, 130px) 2px min(18vh, 130px);
   scroll-padding-block: 50%;
+}
+.full-player-lyrics > .lyrics-lines-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 /* Expanded player only: the lyrics list's tall centring padding
    (min(18vh, 130px)) is taller than the space the expanded panel gives the
