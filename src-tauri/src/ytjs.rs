@@ -2,7 +2,7 @@
 //!
 //! Some YouTube clients (WEB_REMIX, TVHTML5, WEB_CREATOR) only return audio formats whose URL needs a
 //! signature (`s`/`sp`) and a throttling parameter (`n`) transformed by functions that live in YouTube's
-//! public player script. Like yt-dlp, Meld runs yt-dlp's EJS solver (Unlicense, vendored in
+//! public player script. Like yt-dlp, Soluna runs yt-dlp's EJS solver (Unlicense, vendored in
 //! `vendor/ejs/`) inside an embedded QuickJS interpreter. The interpreter has no file, network or
 //! process access, a memory cap and a hard deadline. This is the same legal format handling that every
 //! YouTube web player performs; it does not touch DRM, ads or PoTokens.

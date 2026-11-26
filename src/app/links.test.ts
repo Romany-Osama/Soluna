@@ -1,4 +1,4 @@
-// U4-007: deep-link parsing for Meld routes, YouTube / YouTube Music and Spotify links.
+// U4-007: deep-link parsing for Soluna routes, YouTube / YouTube Music and Spotify links.
 import { describe, expect, it } from "vitest";
 import { parseLink } from "./links";
 

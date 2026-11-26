@@ -48,7 +48,7 @@ import { useSelection } from "./features/selection/useSelection";
 import { useNotice } from "./features/notifications/useNotice";
 import { useSleepTimer } from "./features/player/useSleepTimer";
 import { useLyrics } from "./features/lyrics/useLyrics";
-import { useLyricsFollow } from "./features/lyrics/useLyrics";
+import { useLyricsFollowView } from "./features/lyrics/useLyrics";
 import { useItemMenu } from "./features/menu/useItemMenu";
 import { useAccounts } from "./features/accounts/useAccounts";
 import { useSpotifyLibrary } from "./features/spotify/useSpotifyLibrary";
@@ -56,6 +56,8 @@ import { useSettingsState } from "./features/settings/useSettingsState";
 import { usePlaylists } from "./features/playlist/usePlaylists";
 import { useQueue } from "./features/queue/useQueue";
 import { usePlayer } from "./features/player/usePlayer";
+import { useFullscreenPlayer } from "./features/player/useFullscreenPlayer";
+import { useMediaSession } from "./features/player/useMediaSession";
 import { useDownloads } from "./features/downloads/useDownloads";
 import { EMPTY_HISTORY, HistoryEntry, NavHistory, pushEntry, stepBack, stepForward } from "./app/history";
 import {
@@ -573,6 +575,8 @@ function App() {
     spotifyPlaylist: spotifyOpenPlaylist !== null,
     spotifyLiked: spotifyLikedOpen,
   };
+
+  const fullscreenPlayer = useFullscreenPlayer(playerExpanded, layerState);
 
   const closeLayer = (layer: Layer) => {
     switch (layer) {
@@ -2027,90 +2031,18 @@ function App() {
     audioRef,
   ]);
 
-  useEffect(() => {
-    const mediaSession = navigator.mediaSession;
-    if (!mediaSession) return;
-    const setHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
-      try {
-        mediaSession.setActionHandler(action, handler);
-      } catch {
-        /* WebView2 may not support every action. */
-      }
-    };
-    if (!player) {
-      mediaSession.metadata = null;
-      for (const action of [
-        "play",
-        "pause",
-        "seekbackward",
-        "seekforward",
-        "seekto",
-        "previoustrack",
-        "nexttrack",
-      ] as MediaSessionAction[])
-        setHandler(action, null);
-      return;
-    }
-    mediaSession.metadata = new MediaMetadata({
-      title: player.payload.title || player.item.title,
-      artist: player.payload.artist || player.item.subtitle,
-      album: player.item.albumTitle || "Soluna Desktop",
-    });
-    setHandler("play", () => {
-      if (audioRef.current)
-        void audioRef.current
-          .play()
-          .catch((error) => setNotice(`Audio playback failed: ${errorMessage(error)}`, "error"));
-    });
-    setHandler("pause", () => audioRef.current?.pause());
-    setHandler("seekbackward", () => {
-      const current = audioRef.current?.currentTime ?? playbackSeconds;
-      seekPlayback(Math.max(0, current - 10));
-    });
-    setHandler("seekforward", () => {
-      const current = audioRef.current?.currentTime ?? playbackSeconds;
-      seekPlayback(Math.min(durationSeconds || Number.MAX_SAFE_INTEGER, current + 10));
-    });
-    setHandler("seekto", (details) => {
-      if (details.seekTime !== undefined)
-        seekPlayback(Math.max(0, Math.min(durationSeconds || Number.MAX_SAFE_INTEGER, details.seekTime)));
-    });
-    setHandler("previoustrack", () => {
-      if (queueIndex > 0) void playQueueIndexRef.current(queueIndex - 1);
-    });
-    setHandler("nexttrack", () => {
-      if (queueIndex + 1 < queueItems.length || queueContinuation) void playQueueIndexRef.current(queueIndex + 1);
-    });
-    return () => {
-      mediaSession.metadata = null;
-      for (const action of [
-        "play",
-        "pause",
-        "seekbackward",
-        "seekforward",
-        "seekto",
-        "previoustrack",
-        "nexttrack",
-      ] as MediaSessionAction[])
-        setHandler(action, null);
-    };
-  }, [
-    durationSeconds,
-    playbackSeconds,
-    player?.item.id,
-    player?.item.title,
-    player?.item.subtitle,
-    player?.item.albumTitle,
-    player?.payload.artist,
-    player?.payload.title,
-    queueContinuation,
-    queueIndex,
-    queueItems.length,
+  useMediaSession({
     player,
-    setNotice,
-    seekPlayback,
     audioRef,
-  ]);
+    playbackSeconds,
+    durationSeconds,
+    queueIndex,
+    queueItems,
+    queueContinuation,
+    seekPlayback,
+    playQueueIndexRef,
+    setNotice,
+  });
 
   const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
     const target = event.target as HTMLElement | null;
@@ -2442,7 +2374,7 @@ function App() {
     await openItem(item, queue.length > 0 ? queue : [item], index >= 0 ? index : 0);
   };
 
-  const { activeLyricIndex } = useLyricsFollow({
+  const lyricsFollow = useLyricsFollowView({
     activeLyricRef,
     lyrics,
     lyricsAutoScrollEnabled,
@@ -3124,7 +3056,7 @@ function App() {
         onClose={() => setPlayerExpanded(false)}
       >
         <ExpandedPlayer
-          activeLyricIndex={activeLyricIndex}
+          playerView={{ fullscreen: fullscreenPlayer, lyricsFollow }}
           activeLyricRef={activeLyricRef}
           adjustVolumeByWheel={adjustVolumeByWheel}
           audioRef={audioRef}
@@ -3171,7 +3103,7 @@ function App() {
       </ErrorBoundary>
       <ErrorBoundary name="Lyrics" variant="panel" resetKey={lyrics === null} onClose={() => setLyrics(null)}>
         <LyricsPanel
-          activeLyricIndex={activeLyricIndex}
+          lyricsFollow={lyricsFollow}
           activeLyricRef={activeLyricRef}
           audioRef={audioRef}
           backStack={navHistory.back}
