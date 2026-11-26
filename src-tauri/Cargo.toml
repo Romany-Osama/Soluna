@@ -1,6 +1,6 @@
 [package]
 name = "soluna-desktop"
-version = "0.4.0"
+version = "0.5.0"
 description = "Soluna — An obsidian-dark, lightweight native Windows client for YouTube Music"
 authors = ["Romany-Osama and Soluna contributors"]
 edition = "2021"

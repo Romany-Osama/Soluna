@@ -204,7 +204,9 @@ jobs:
           set -euo pipefail
           tag=$(cat release-tag.txt)
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Soluna ${tag#v}" --notes-file release-notes.md release-assets/*
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          # 0.5.0 is published as a pre-release: GitHub's "latest" excludes it, so the in-app updater (releases/latest) does not
+          # offer it until the owner promotes it in the GitHub UI (clear "pre-release", tick "Set as the latest release").
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
 
   dry-run:
     # Required status check on main (R6-075). Always reports, so PRs that do not touch the pipeline are not blocked.
