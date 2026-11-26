@@ -1775,6 +1775,34 @@ h2 {
   padding: 0;
   background: #000;
 }
+/* Fullscreen player open: layers opened from the player sit above it, in the
+   layer-model order (src/app/layers.ts: dialogs > menu > queue > player).
+   The plain .detail-overlay rule also matches the player itself, so the
+   dialog rule excludes the player/queue/menu overlays and the player stays
+   at z-300. Scoped to fullscreen only: in expanded mode the layers stay at
+   82-98 so the top bar (z-100) stays visible above them. :has() is used
+   because the overlays are siblings of the player (no root class exists)
+   and the fix must stay CSS-only; Chromium/WebView2 supports it. */
+.app-shell:has(.player-overlay.player-fullscreen-view) .queue-overlay {
+  z-index: 310;
+}
+.app-shell:has(.player-overlay.player-fullscreen-view) .menu-overlay {
+  z-index: 320;
+}
+.app-shell:has(.player-overlay.player-fullscreen-view)
+  .detail-overlay:not(.player-overlay):not(.queue-overlay):not(.menu-overlay) {
+  z-index: 330;
+}
+/* Notices are in-flow (no position, no z-index) and render under the
+   fullscreen player; pin them top-right, above it, while it is open. */
+.app-shell:has(.player-overlay.player-fullscreen-view) .notice-stack {
+  position: fixed;
+  top: 18px;
+  right: 36px;
+  left: 36px;
+  z-index: 340;
+  margin: 0;
+}
 .player-fullscreen-view .full-player-panel {
   width: 100%;
   height: 100%;
