@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 // Word-by-word lyrics: the active line highlights word by word from the
 // provider's word timings, and the intro gets the instrumental animation.
-import { createRef } from "react";
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { createRef, useRef, useState } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { LyricLines } from "./LyricLines";
 import type { LyricsPayload } from "../../types";
 
@@ -34,6 +34,7 @@ function renderLines(props: Partial<Parameters<typeof LyricLines>[0]> = {}) {
       activeLyricRef={activeRef}
       audioRef={audioRef}
       lyricsContainerRef={containerRef}
+      lyricsAutoScrollEnabled
       playbackSeconds={10.1}
       setLyricsAutoScrollEnabled={() => undefined}
       {...props}
@@ -68,5 +69,125 @@ describe("LyricLines word-by-word highlight", () => {
   it("does not show the intro once singing starts", () => {
     renderLines({ playbackSeconds: 10.1 });
     expect(screen.queryByText("Intro")).toBeNull();
+  });
+});
+
+// Re-sync button: scrolling away disables follow and the pill appears;
+// tapping it re-enables follow without seeking; 8s idle re-enables follow
+// on its own (Meld's LYRICS_PREVIEW_TIME).
+function renderResync(
+  props: {
+    initialEnabled?: boolean;
+    activeLyricIndex?: number;
+    playbackSeconds?: number;
+    audioCurrentTime?: number;
+  } = {},
+) {
+  // A stand-in audio element: LyricLines only reads/writes currentTime on
+  // it, so a plain object proves the pill tap does not seek.
+  const audioRef = { current: { currentTime: props.audioCurrentTime ?? 30 } as unknown as HTMLAudioElement };
+  function Harness() {
+    const [enabled, setEnabled] = useState(props.initialEnabled ?? true);
+    const containerRef = useRef<HTMLDivElement | null>(null);
+    const activeRef = useRef<HTMLButtonElement | null>(null);
+    return (
+      <LyricLines
+        lines={lines}
+        activeLyricIndex={props.activeLyricIndex ?? 1}
+        activeWordIndex={-1}
+        activeLyricRef={activeRef}
+        audioRef={audioRef}
+        lyricsContainerRef={containerRef}
+        lyricsAutoScrollEnabled={enabled}
+        playbackSeconds={props.playbackSeconds ?? 12.5}
+        setLyricsAutoScrollEnabled={setEnabled}
+      />
+    );
+  }
+  render(<Harness />);
+  return { audioRef };
+}
+
+describe("LyricLines re-sync button", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const pill = () => document.querySelector(".lyrics-resync");
+  const visiblePill = () => document.querySelector(".lyrics-resync.visible");
+  const scrollLines = () => {
+    const container = document.querySelector(".lyrics-lines");
+    expect(container).not.toBeNull();
+    fireEvent.wheel(container!);
+  };
+
+  it("hides the pill while follow is on", () => {
+    renderResync();
+    expect(pill()).not.toBeNull();
+    expect(visiblePill()).toBeNull();
+    expect(pill()?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("shows the pill after a wheel scroll disables follow", () => {
+    renderResync();
+    scrollLines();
+    expect(visiblePill()).not.toBeNull();
+    expect(screen.getByText("Re-sync")).toBeTruthy();
+    expect(pill()?.getAttribute("aria-hidden")).toBe("false");
+  });
+
+  it("tapping the pill re-enables follow without seeking", () => {
+    const { audioRef } = renderResync({ audioCurrentTime: 30 });
+    scrollLines();
+    expect(visiblePill()).not.toBeNull();
+    fireEvent.click(screen.getByText("Re-sync"));
+    expect(visiblePill()).toBeNull();
+    expect(audioRef.current.currentTime).toBe(30);
+  });
+
+  it("re-enables follow 8s after the last scroll input", () => {
+    vi.useFakeTimers();
+    renderResync();
+    scrollLines();
+    expect(visiblePill()).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(7999);
+    });
+    expect(visiblePill()).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(visiblePill()).toBeNull();
+  });
+
+  it("restarts the 8s wait on each new scroll input", () => {
+    vi.useFakeTimers();
+    renderResync();
+    scrollLines();
+    act(() => {
+      vi.advanceTimersByTime(7000);
+    });
+    scrollLines();
+    act(() => {
+      vi.advanceTimersByTime(7000);
+    });
+    expect(visiblePill()).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(visiblePill()).toBeNull();
+  });
+
+  it("does not show the pill before the first line is active", () => {
+    renderResync({ initialEnabled: false, activeLyricIndex: -1, playbackSeconds: 2 });
+    expect(visiblePill()).toBeNull();
+  });
+
+  it("line click still seeks and re-enables follow", () => {
+    const { audioRef } = renderResync({ initialEnabled: false, audioCurrentTime: 0 });
+    expect(visiblePill()).not.toBeNull();
+    fireEvent.click(screen.getByText("So the bar is where I go"));
+    expect(audioRef.current.currentTime).toBeCloseTo(12.105);
+    expect(visiblePill()).toBeNull();
   });
 });
