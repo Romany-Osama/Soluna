@@ -127,5 +127,14 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
 
-      - name: Tauri release build (no bundle)
-        run: npx tauri build --no-bundle
+      # M11: bundle the NSIS installer on every PR. The release dry run only
+      # runs when release-pipeline paths change, so skipping the bundle step
+      # here left bundle breakage from app-code PRs untested. Updater artifacts
+      # are disabled with a config-file overlay (src-tauri/tauri.ci.conf.json)
+      # because signing them needs the updater private key, which must not be
+      # exposed to PR builds; the release job builds (and signs) them with the
+      # key. The overlay is a file, not inline JSON: on windows-latest the
+      # default shell is pwsh, and inline JSON would have to survive pwsh plus
+      # the npx .cmd shim with its embedded double quotes intact.
+      - name: Tauri bundle build (NSIS)
+        run: npx tauri build --config src-tauri/tauri.ci.conf.json

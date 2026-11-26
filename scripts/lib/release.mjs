@@ -117,7 +117,10 @@ export function thirdPartyNotices({ appName, packages }) {
   return `${lines.filter((line, index, all) => !(line === "" && all[index - 1] === "")).join("\n")}\n`;
 }
 
-/** Files whose change must run the full release dry run on a pull request (build, smoke, publish skipped). */
+/** Files whose change must run the full release dry run on a pull request (build, smoke, publish skipped).
+ * App code is deliberately absent: the CI windows job builds the NSIS bundle on every PR (M11), so bundle
+ * breakage from src-tauri/, src/ or the manifests is caught there. This list only gates the signed updater
+ * artifacts, portable ZIP and smoke chain, which only pipeline files can break. */
 export const RELEASE_PIPELINE_PATHS = [
   ".github/workflows/release.yml",
   "scripts/release-assets.mjs",

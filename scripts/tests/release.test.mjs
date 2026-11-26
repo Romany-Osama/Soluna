@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   changelogSection,
   checkTag,
@@ -105,6 +105,32 @@ test("only release-pipeline files trigger the full dry run on a pull request (R6
   assert.equal(touchesReleasePipeline(["src-tauri/tauri.conf.json"]), true);
   assert.equal(touchesReleasePipeline(["src-tauri/tauri.conf.json.bak", "packaging-notes.md"]), false);
   assert.equal(touchesReleasePipeline([]), false);
+});
+
+test("release assembly copies the Cargo binary and portable inputs that CI bundling does not pin (M11)", () => {
+  // The CI windows job now builds the NSIS bundle on every PR, so bundle
+  // breakage from app-code PRs is caught there — but the release-only
+  // portable assembly is not: it copies target/release/<cargo-name>.exe and
+  // LICENSE/NOTICE/packaging/README-portable.txt, none of which the bundle
+  // step exercises (and Cargo.toml stays out of RELEASE_PIPELINE_PATHS, so a
+  // rename would not run the dry run either). Pin those couplings here so a
+  // rename or deletion fails test:scripts instead of the release.
+  const cargoToml = readFileSync("src-tauri/Cargo.toml", "utf8");
+  const binaryName = cargoToml.match(/\[\s*package\s*\][\s\S]*?name\s*=\s*"([^"]+)"/s)?.[1];
+  assert.ok(binaryName, "Cargo.toml must declare a [package] name");
+  const releaseYml = readFileSync(".github/workflows/release.yml", "utf8");
+  assert.ok(
+    releaseYml.includes(`target/release/${binaryName}.exe`),
+    `release.yml must copy the Cargo binary target/release/${binaryName}.exe into the portable ZIP`,
+  );
+  const productName = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")).productName;
+  assert.ok(
+    releaseYml.includes(`${productName}_\${VERSION}_x64-setup.exe`),
+    `release.yml must copy the ${productName} NSIS setup matching tauri.conf.json productName`,
+  );
+  for (const input of ["LICENSE", "NOTICE", "packaging/README-portable.txt"]) {
+    assert.ok(existsSync(input), `release assembly input ${input} must exist`);
+  }
 });
 
 test("the always-reported dry-run gate passes only when the needed jobs did", () => {
