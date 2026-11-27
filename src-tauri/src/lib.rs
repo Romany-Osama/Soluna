@@ -6189,6 +6189,523 @@ fn last_timestamp_ms(lrc: &str) -> Option<i64> {
     last
 }
 
+/// PR E (Romany's order, 2026-11-27): the plain-YouTube cross-check. When a
+/// synced provider returns lyrics, compare the candidate's words with the
+/// plain YouTube text for the same song and use the match to decide whether
+/// the lyrics are the right ones. The YouTube text is REFERENCE ONLY: it is
+/// never returned as a payload (the only way plain YouTube text reaches the
+/// caller is the existing tier-3 plain fallback, when nothing synced is
+/// correct).
+///
+/// Calibrated on the 13 probe songs (real LrcLib synced text vs real
+/// YouTube text fetched live, no session; see
+/// `~/workspace/reviews/youtube-crosscheck/`): correct pairs score
+/// recall 0.95–1.00 / F1 0.93–1.00; wrong-song pairs score recall ≤ 0.38 /
+/// F1 ≤ 0.27; the KuGou `[ti:June]` placeholder scores 0. The thresholds
+/// below sit in the gaps, with the wide margin on the side that matters:
+/// a correct pair is never near the reject bar, and a wrong pair is never
+/// near the accept bar. Between the bars the verdict is Defer and the
+/// normal matcher decides — the cross-check only overrules on clear
+/// evidence, never on a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum YoutubeCrosscheckVerdict {
+    /// The words match well: keep the synced candidate.
+    Accept,
+    /// The words clearly do not match: reject this candidate and try the
+    /// next provider. Never cached, never returned.
+    Reject,
+    /// Ambiguous, or too little evidence: defer to the normal matcher.
+    Defer,
+}
+
+/// Accept bar: recall at least 0.75 and F1 at least 0.60.
+const YOUTUBE_CROSSCHECK_ACCEPT_RECALL: f64 = 0.75;
+const YOUTUBE_CROSSCHECK_ACCEPT_F1: f64 = 0.60;
+/// Reject bar: recall at most 0.45 — under half the candidate's words
+/// appear in the reference at all.
+const YOUTUBE_CROSSCHECK_REJECT_RECALL: f64 = 0.45;
+/// Minimum filtered tokens on each side for the main decision; below this
+/// the thin-evidence rule applies instead.
+const YOUTUBE_CROSSCHECK_MIN_TOKENS: usize = 10;
+/// Minimum raw candidate tokens for the thin-evidence reject (a total
+/// non-match still needs at least this many words of evidence).
+const YOUTUBE_CROSSCHECK_MIN_RAW_TOKENS: usize = 5;
+/// Minimum raw tokens on EACH side for the script-overlap guard (see
+/// `youtube_crosscheck_verdict`). Below this the guard stays out of the
+/// way, so the KuGou 1-line placeholder (6 raw tokens) still rejects
+/// via the thin-evidence rule.
+const YOUTUBE_CROSSCHECK_SCRIPT_GUARD_MIN_RAW_TOKENS: usize = 10;
+/// How long a synced settle waits for the parallel YouTube reference
+/// fetch before falling back to the normal matcher. The fetch itself
+/// takes ~0.75–1.15s live (two InnerTube POSTs), and it starts with the
+/// chain, so the wait actually added at settle time is usually ~0.2s.
+const YOUTUBE_CROSSCHECK_WAIT: Duration = Duration::from_millis(1000);
+/// Cap on fuzzy word comparisons per score, so a pathological pair
+/// (thousands of leftover words on each side) cannot stall the chain.
+/// Exact matching is uncapped; only the fuzzy pass stops.
+const YOUTUBE_CROSSCHECK_MAX_FUZZY_COMPARISONS: usize = 200_000;
+
+/// English function words and lyric filler, dropped before matching.
+/// They carry no song identity (every English pop song shares them), and
+/// dropping them is what separates wrong-song pairs (worst recall 0.38)
+/// from correct pairs (worst recall 0.95) in the calibration. Content
+/// words — including "love", "heart", "baby" — are never dropped.
+const YOUTUBE_CROSSCHECK_STOPWORDS: &[&str] = &[
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "for", "with", "as", "by", "from",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
+    "will", "would", "can", "could", "shall", "should", "may", "might", "must", "i", "you", "he",
+    "she", "it", "we", "they", "me", "him", "her", "us", "them", "my", "your", "his", "its", "our",
+    "their", "this", "that", "these", "those", "there", "here", "what", "when", "where", "who",
+    "whom", "which", "why", "how", "all", "any", "some", "no", "not", "so", "very", "just", "only",
+    "own", "same", "than", "then", "too", "oh", "yeah", "la", "da",
+];
+
+fn youtube_crosscheck_is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x20000..=0x2A6DF | 0x3040..=0x30FF)
+}
+
+/// Script classes for the script-overlap guard in
+/// `youtube_crosscheck_verdict`. Each class is one bit in a mask over a
+/// side's raw tokens; a character with no class (digits, and anything
+/// outside the classes below) sets no bit.
+const YOUTUBE_CROSSCHECK_SCRIPT_LATIN: u32 = 1 << 0;
+const YOUTUBE_CROSSCHECK_SCRIPT_CJK: u32 = 1 << 1;
+const YOUTUBE_CROSSCHECK_SCRIPT_ARABIC: u32 = 1 << 2;
+const YOUTUBE_CROSSCHECK_SCRIPT_HANGUL: u32 = 1 << 3;
+const YOUTUBE_CROSSCHECK_SCRIPT_CYRILLIC: u32 = 1 << 4;
+const YOUTUBE_CROSSCHECK_SCRIPT_GREEK: u32 = 1 << 5;
+const YOUTUBE_CROSSCHECK_SCRIPT_HEBREW: u32 = 1 << 6;
+
+/// The script class of one character, or 0 when it carries no script
+/// (digits). CJK covers Han ideographs and kana together on purpose:
+/// kanji-vs-kana for the same words is the same script family, and both
+/// sources use standard mixed orthography — see the residual edge noted
+/// on `youtube_crosscheck_verdict`.
+fn youtube_crosscheck_script_of(c: char) -> u32 {
+    let code = c as u32;
+    if youtube_crosscheck_is_cjk(c) {
+        YOUTUBE_CROSSCHECK_SCRIPT_CJK
+    } else if matches!(code, 0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF)
+    {
+        YOUTUBE_CROSSCHECK_SCRIPT_ARABIC
+    } else if matches!(code, 0xAC00..=0xD7AF | 0x1100..=0x11FF) {
+        YOUTUBE_CROSSCHECK_SCRIPT_HANGUL
+    } else if matches!(code, 0x0400..=0x052F) {
+        YOUTUBE_CROSSCHECK_SCRIPT_CYRILLIC
+    } else if matches!(code, 0x0370..=0x03FF | 0x1F00..=0x1FFF) {
+        YOUTUBE_CROSSCHECK_SCRIPT_GREEK
+    } else if matches!(code, 0x0590..=0x05FF) {
+        YOUTUBE_CROSSCHECK_SCRIPT_HEBREW
+    } else if matches!(code, 0x0041..=0x005A | 0x0061..=0x007A | 0x00C0..=0x024F | 0x1E00..=0x1EFF)
+    {
+        YOUTUBE_CROSSCHECK_SCRIPT_LATIN
+    } else {
+        0
+    }
+}
+
+/// Number of script classes in the script classifier (one per
+/// `YOUTUBE_CROSSCHECK_SCRIPT_*` bit).
+const YOUTUBE_CROSSCHECK_SCRIPT_CLASS_COUNT: usize = 7;
+
+/// Per-class raw-token counts over a side's raw tokens, one entry per
+/// script class in the same bit order as the `YOUTUBE_CROSSCHECK_SCRIPT_*`
+/// constants. A token counts once per class it contains — counting
+/// tokens, not characters, so one long Latin word cannot outweigh many
+/// single-character CJK tokens. Digits and unclassified characters count
+/// toward no class.
+fn youtube_crosscheck_script_counts(
+    tokens: &[String],
+) -> [usize; YOUTUBE_CROSSCHECK_SCRIPT_CLASS_COUNT] {
+    let mut counts = [0usize; YOUTUBE_CROSSCHECK_SCRIPT_CLASS_COUNT];
+    for token in tokens {
+        let mut classes = 0u32;
+        for c in token.chars() {
+            classes |= youtube_crosscheck_script_of(c);
+        }
+        for (index, count) in counts.iter_mut().enumerate() {
+            if classes & (1 << index) != 0 {
+                *count += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// The script classes tied for the most raw tokens on one side, as a
+/// bitmask in the `YOUTUBE_CROSSCHECK_SCRIPT_*` bit order. Empty when no
+/// token on the side carries a script class (digits only).
+fn youtube_crosscheck_dominant_scripts(
+    counts: &[usize; YOUTUBE_CROSSCHECK_SCRIPT_CLASS_COUNT],
+) -> u32 {
+    let max = counts.iter().max().copied().unwrap_or(0);
+    if max == 0 {
+        return 0;
+    }
+    counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count == max)
+        .fold(0, |mask, (index, _)| mask | (1 << index))
+}
+
+/// Whether the two sides' dominant scripts leave room for "different
+/// script": true when each side has a dominant class and some pair of
+/// dominants (one per side) differs. A tie for dominant on a side is
+/// handled fail-safe — the guard fires if ANY tied dominant is disjoint
+/// from the other side's dominants, because the tied class might be the
+/// side's real script. This is what makes the guard robust to
+/// minority-script tokens (R4): "yeah baby oh" in an otherwise Chinese
+/// reference does not make it Latin-dominant, so a pinyin candidate
+/// against it still defers instead of rejecting on recall 0.
+fn youtube_crosscheck_dominant_scripts_disjoint(
+    cand: &[usize; YOUTUBE_CROSSCHECK_SCRIPT_CLASS_COUNT],
+    refr: &[usize; YOUTUBE_CROSSCHECK_SCRIPT_CLASS_COUNT],
+) -> bool {
+    let cand_dom = youtube_crosscheck_dominant_scripts(cand);
+    let ref_dom = youtube_crosscheck_dominant_scripts(refr);
+    if cand_dom == 0 || ref_dom == 0 {
+        return false;
+    }
+    // Some dominant pair differs <=> the two dominant sets are not the
+    // same single class.
+    !(cand_dom == ref_dom && cand_dom.is_power_of_two())
+}
+
+/// Normalize one word for comparison: strip Arabic diacritics (which
+/// providers transcribe inconsistently) and fold alef/ta-marbuta/alef
+/// maksura variants to one form. Case folding happens in the tokenizer.
+fn youtube_crosscheck_normalize_word(word: &str) -> String {
+    word.chars()
+        .filter(|c| !matches!(*c as u32, 0x064B..=0x0652 | 0x0670))
+        .map(|c| match c {
+            'أ' | 'إ' | 'آ' => 'ا',
+            'ة' => 'ه',
+            'ى' => 'ي',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Split lyrics text into comparison words. LRC timestamps, inline word
+/// tags and bracketed metadata (`[ti:...]`, `[chorus]`, …) are not sung
+/// words and are stripped; the rest is Unicode-lowercased and split on
+/// anything that is not a letter or digit. CJK ideographs and kana carry
+/// a whole morpheme per character and have no word spaces, so each one is
+/// its own token; every other script splits on spaces and punctuation.
+/// Korean Hangul accumulates into space-separated words, as written.
+fn youtube_crosscheck_tokenize(text: &str) -> Vec<String> {
+    let lowered = text.to_lowercase();
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = lowered.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '[' || c == '<' {
+            // Skip a bracketed span (timestamp, word tag, metadata).
+            let close = if c == '[' { ']' } else { '>' };
+            if !current.is_empty() {
+                tokens.push(youtube_crosscheck_normalize_word(&current));
+                current.clear();
+            }
+            let mut found = false;
+            for inner in chars.by_ref() {
+                if inner == close {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                break;
+            }
+            continue;
+        }
+        if youtube_crosscheck_is_cjk(c) {
+            if !current.is_empty() {
+                tokens.push(youtube_crosscheck_normalize_word(&current));
+                current.clear();
+            }
+            tokens.push(c.to_string());
+        } else if c.is_alphanumeric() {
+            current.push(c);
+        } else if !current.is_empty() {
+            tokens.push(youtube_crosscheck_normalize_word(&current));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(youtube_crosscheck_normalize_word(&current));
+    }
+    tokens.retain(|token| !token.is_empty());
+    tokens
+}
+
+/// Character-level edit distance between two words, with an early exit
+/// when the length gap alone rules a fuzzy match out. Same DP shape as
+/// `lyrics_similarity`, but on chars (not bytes) so multibyte scripts
+/// are measured in characters.
+fn youtube_crosscheck_word_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    if left.len().abs_diff(right.len()) > 2 {
+        return usize::MAX;
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (i, left_char) in left.iter().enumerate() {
+        let mut current = vec![i + 1; right.len() + 1];
+        for (j, right_char) in right.iter().enumerate() {
+            current[j + 1] = if left_char == right_char {
+                previous[j]
+            } else {
+                1 + previous[j].min(previous[j + 1]).min(current[j])
+            };
+        }
+        previous = current;
+    }
+    previous[right.len()]
+}
+
+/// Two words count as the same word allowing for a small spelling or
+/// transcription difference ("colour"/"color", "mornin'"/"morning",
+/// Arabic spelling variants). Tokens shorter than 3 characters match
+/// exactly only: a 1–2 character fuzzy match is meaningless (it is what
+/// let the KuGou placeholder's single CJK characters "match" English
+/// words in the first calibration pass), and single CJK characters are
+/// exact-only by construction.
+fn youtube_crosscheck_fuzzy_match(left: &str, right: &str) -> bool {
+    let left_len = left.chars().count();
+    let right_len = right.chars().count();
+    if left_len < 3 || right_len < 3 {
+        return false;
+    }
+    let max_len = left_len.max(right_len);
+    let distance = youtube_crosscheck_word_distance(left, right);
+    if max_len <= 4 {
+        distance <= 1
+    } else if max_len <= 8 {
+        distance <= 2
+    } else {
+        distance <= max_len / 4
+    }
+}
+
+struct YoutubeCrosscheckScore {
+    /// Words matched (exact + fuzzy) after filtering.
+    matched: usize,
+    /// Filtered token counts on each side.
+    cand_tokens: usize,
+    ref_tokens: usize,
+    /// Raw (unfiltered) token counts, and how many raw candidate tokens
+    /// match the raw reference exactly. Used only by the thin-evidence
+    /// rule (and to tell an empty reference from a thin one).
+    raw_cand_tokens: usize,
+    raw_ref_tokens: usize,
+    raw_matched: usize,
+    /// Per-class raw-token counts over each side's raw tokens (see
+    /// `youtube_crosscheck_script_counts`). Used only by the
+    /// dominant-script guard in the verdict.
+    cand_script_counts: [usize; YOUTUBE_CROSSCHECK_SCRIPT_CLASS_COUNT],
+    ref_script_counts: [usize; YOUTUBE_CROSSCHECK_SCRIPT_CLASS_COUNT],
+}
+
+fn youtube_crosscheck_score(candidate: &str, reference: &str) -> YoutubeCrosscheckScore {
+    let raw_cand = youtube_crosscheck_tokenize(candidate);
+    let raw_ref = youtube_crosscheck_tokenize(reference);
+    let mut ref_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for token in &raw_ref {
+        *ref_counts.entry(token.clone()).or_default() += 1;
+    }
+    let mut raw_matched = 0usize;
+    for token in &raw_cand {
+        if let Some(count) = ref_counts.get_mut(token) {
+            if *count > 0 {
+                *count -= 1;
+                raw_matched += 1;
+            }
+        }
+    }
+    let keep = |token: &String| {
+        // Single CJK characters ARE content: each one carries a whole
+        // morpheme, and dropping them made the cross-check inert for
+        // Chinese/Japanese (every token is one character, so the filtered
+        // counts were always zero). Single characters in other scripts
+        // stay dropped — a 1-letter Latin/Arabic token carries no song
+        // identity. (Single CJK characters still match exactly only:
+        // see `youtube_crosscheck_fuzzy_match`.)
+        (token.chars().count() > 1 || token.chars().any(youtube_crosscheck_is_cjk))
+            && !YOUTUBE_CROSSCHECK_STOPWORDS.contains(&token.as_str())
+    };
+    let cand_tokens: Vec<String> = raw_cand.iter().filter(|t| keep(t)).cloned().collect();
+    let ref_tokens: Vec<String> = raw_ref.iter().filter(|t| keep(t)).cloned().collect();
+    let mut ref_left: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for token in &ref_tokens {
+        *ref_left.entry(token.clone()).or_default() += 1;
+    }
+    let mut matched = 0usize;
+    let mut leftovers: Vec<String> = Vec::new();
+    for token in &cand_tokens {
+        match ref_left.get_mut(token) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                matched += 1;
+            }
+            _ => leftovers.push(token.clone()),
+        }
+    }
+    let mut ref_leftover: Vec<String> = Vec::new();
+    for (token, count) in ref_left {
+        for _ in 0..count {
+            ref_leftover.push(token.clone());
+        }
+    }
+    let mut comparisons = 0usize;
+    'outer: for token in &leftovers {
+        let mut found = None;
+        for (index, other) in ref_leftover.iter().enumerate() {
+            comparisons += 1;
+            if comparisons > YOUTUBE_CROSSCHECK_MAX_FUZZY_COMPARISONS {
+                break 'outer;
+            }
+            if youtube_crosscheck_fuzzy_match(token, other) {
+                found = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = found {
+            ref_leftover.remove(index);
+            matched += 1;
+        }
+    }
+    YoutubeCrosscheckScore {
+        matched,
+        cand_tokens: cand_tokens.len(),
+        ref_tokens: ref_tokens.len(),
+        raw_cand_tokens: raw_cand.len(),
+        raw_ref_tokens: raw_ref.len(),
+        raw_matched,
+        cand_script_counts: youtube_crosscheck_script_counts(&raw_cand),
+        ref_script_counts: youtube_crosscheck_script_counts(&raw_ref),
+    }
+}
+
+/// Compare a synced candidate's words with the plain YouTube reference
+/// text. Accept needs recall ≥ 0.75 and F1 ≥ 0.60; reject needs recall ≤
+/// 0.45; anything between defers to the normal matcher. With too little
+/// evidence on either side, only a total non-match rejects: at least 5
+/// raw candidate words and none of them in the reference at all (the
+/// KuGou 1-line placeholder scores exactly that). An empty candidate or
+/// an empty reference always defers — absence of evidence is never
+/// evidence of a wrong song. When both sides have substantial content
+/// (≥ 10 raw tokens each) but their DOMINANT scripts differ (pinyin vs
+/// Chinese characters, romanized Arabic vs Arabic script, romaji vs
+/// kana), the words carry no comparable evidence, so a total non-match
+/// means "different script", not "wrong song", and the verdict defers.
+/// Dominant (not full-mask) comparison is what makes the guard robust
+/// to minority-script tokens (R4): one English word in an otherwise
+/// Chinese reference ("yeah baby oh") does not make it Latin-dominant.
+/// A wrong-song pair in different dominant scripts therefore Defers
+/// instead of Rejecting — the guard's intended fail-safe tradeoff, the
+/// normal matcher decides. Residual edge, not fixed: within Japanese,
+/// kanji-vs-kana for the same words share the CJK class, so the guard
+/// does not fire there — both sources use standard mixed orthography,
+/// so this is unlikely. Short cross-script pairs below the ≥ 10 floor
+/// (5–9 raw tokens) still Reject via the thin-evidence rule (R5); the
+/// floor is deliberate, the KuGou placeholder is 6 tokens.
+fn youtube_crosscheck_verdict(candidate: &str, reference: &str) -> YoutubeCrosscheckVerdict {
+    let score = youtube_crosscheck_score(candidate, reference);
+    if score.raw_cand_tokens == 0 || score.raw_ref_tokens == 0 {
+        return YoutubeCrosscheckVerdict::Defer;
+    }
+    // Dominant-script guard (R1, R4): different dominant scripts, no
+    // shared word evidence. The ≥ 10 raw-token floor keeps the KuGou
+    // placeholder (6 raw tokens) rejecting via the thin-evidence rule
+    // below — the guard never fires for it.
+    if score.raw_cand_tokens >= YOUTUBE_CROSSCHECK_SCRIPT_GUARD_MIN_RAW_TOKENS
+        && score.raw_ref_tokens >= YOUTUBE_CROSSCHECK_SCRIPT_GUARD_MIN_RAW_TOKENS
+        && youtube_crosscheck_dominant_scripts_disjoint(
+            &score.cand_script_counts,
+            &score.ref_script_counts,
+        )
+    {
+        return YoutubeCrosscheckVerdict::Defer;
+    }
+    if score.cand_tokens >= YOUTUBE_CROSSCHECK_MIN_TOKENS
+        && score.ref_tokens >= YOUTUBE_CROSSCHECK_MIN_TOKENS
+    {
+        let recall = score.matched as f64 / score.cand_tokens as f64;
+        let f1 = 2.0 * score.matched as f64 / (score.cand_tokens + score.ref_tokens) as f64;
+        if recall >= YOUTUBE_CROSSCHECK_ACCEPT_RECALL && f1 >= YOUTUBE_CROSSCHECK_ACCEPT_F1 {
+            YoutubeCrosscheckVerdict::Accept
+        } else if recall <= YOUTUBE_CROSSCHECK_REJECT_RECALL {
+            YoutubeCrosscheckVerdict::Reject
+        } else {
+            YoutubeCrosscheckVerdict::Defer
+        }
+    } else if score.raw_cand_tokens >= YOUTUBE_CROSSCHECK_MIN_RAW_TOKENS && score.raw_matched == 0 {
+        YoutubeCrosscheckVerdict::Reject
+    } else {
+        YoutubeCrosscheckVerdict::Defer
+    }
+}
+
+/// Start the plain-YouTube reference fetch in parallel with the provider
+/// chain. Returns None when there is no video to fetch lyrics for (then
+/// the chain runs exactly as before, with no cross-check). The spawned
+/// task resolves its own visitor data when none is persisted yet, so the
+/// chain itself never waits on it; the only serial cost is the bounded
+/// wait in `youtube_crosscheck_take_reference`.
+fn youtube_crosscheck_reference_task(
+    video_id: Option<&str>,
+    state: &tauri::State<'_, RuntimeState>,
+) -> Option<tauri::async_runtime::JoinHandle<Option<String>>> {
+    let video_id = video_id?.trim();
+    if video_id.is_empty() {
+        return None;
+    }
+    let video_id = video_id.to_owned();
+    let persisted_visitor = {
+        let db = state.db.lock().ok()?;
+        setting_value(&db, "visitorData")
+            .ok()
+            .flatten()
+            .filter(|value| value.starts_with(VISITOR_PREFIX))
+    };
+    let session = auth_session(state).ok().flatten();
+    Some(tauri::async_runtime::spawn(async move {
+        let visitor_data = match persisted_visitor {
+            Some(value) => value,
+            None => match fetch_visitor_data().await {
+                Ok(value) => value,
+                Err(_) => return None,
+            },
+        };
+        youtube_plain_lyrics_fetch_with_session(&video_id, &visitor_data, session.as_ref()).await
+    }))
+}
+
+/// Take the YouTube reference text for one synced settle, waiting at most
+/// `YOUTUBE_CROSSCHECK_WAIT` for the parallel fetch. On timeout the task
+/// keeps running so a later settle in the same call can try again; on
+/// completion (or failure) the handle is dropped. Returns None when there
+/// is no reference to check against — the caller then settles by the
+/// normal matcher, exactly as if YouTube had no text.
+async fn youtube_crosscheck_take_reference(
+    task: &mut Option<tauri::async_runtime::JoinHandle<Option<String>>>,
+) -> Option<String> {
+    let handle = task.as_mut()?;
+    match timeout(YOUTUBE_CROSSCHECK_WAIT, &mut *handle).await {
+        Ok(Ok(text)) => {
+            *task = None;
+            text
+        }
+        Ok(Err(_)) => {
+            *task = None;
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 /// One line of a LrcLib `lyricsfile` document: the line text and time, and
 /// its word timings (empty when the line is line-level only).
 struct LyricsFileLine {
@@ -7299,6 +7816,12 @@ async fn fetch_lyrics_inner(
     // tier the user's stored order is kept. A plain result is only a
     // fallback: the chain keeps going for a synced match, and only falls
     // back to the plain text when no tier yields one.
+    // PR E cross-check: start the plain-YouTube reference fetch in
+    // parallel with the provider chain (reference only — it is never
+    // returned as a payload). It overlaps the chain, so the only serial
+    // cost is the bounded wait at the first synced settle; when there is
+    // no video id, or the fetch fails, the chain runs exactly as before.
+    let mut reference_task = youtube_crosscheck_reference_task(id.as_deref(), &state);
     let mut plain_fallback: Option<LyricsPayload> = None;
     let mut saw_instrumental = false;
     let mut betterlyrics_tried = false;
@@ -7336,7 +7859,8 @@ async fn fetch_lyrics_inner(
                     // a word-synced BetterLyrics record (it won 4/13 probe
                     // songs outright). Probe it once, bound to BetterLyrics
                     // only, before settling.
-                    if !payload_has_word_timings(&payload) {
+                    let mut to_settle = payload;
+                    if !payload_has_word_timings(&to_settle) {
                         if let Some(upgraded) = betterlyrics_word_upgrade(
                             &cleaned_title,
                             &cleaned_artist,
@@ -7347,14 +7871,27 @@ async fn fetch_lyrics_inner(
                         )
                         .await
                         {
-                            let db = state.db.lock().map_err(|_| "database state poisoned")?;
-                            cache_lyrics_payload(&db, &cache_id, &upgraded)?;
-                            return Ok(upgraded);
+                            to_settle = upgraded;
+                        }
+                    }
+                    // PR E cross-check: compare the words that are about to
+                    // settle with the plain YouTube text. Accept keeps the
+                    // synced version; Reject drops this candidate entirely
+                    // (never cached, never returned) and the chain keeps
+                    // walking for the next provider; Defer — or no
+                    // reference at all — settles exactly as before.
+                    if let Some(reference) =
+                        youtube_crosscheck_take_reference(&mut reference_task).await
+                    {
+                        if youtube_crosscheck_verdict(&to_settle.text, &reference)
+                            == YoutubeCrosscheckVerdict::Reject
+                        {
+                            continue;
                         }
                     }
                     let db = state.db.lock().map_err(|_| "database state poisoned")?;
-                    cache_lyrics_payload(&db, &cache_id, &payload)?;
-                    return Ok(payload);
+                    cache_lyrics_payload(&db, &cache_id, &to_settle)?;
+                    return Ok(to_settle);
                 }
                 if plain_fallback.is_none() {
                     plain_fallback = Some(payload);
@@ -13652,6 +14189,1115 @@ mod tests {
     }
 
     // --- M16: silent Spotify token refresh (end) ---
+
+    // --- PR E: YouTube cross-check (begin) ---
+    const VIVA_SYNCED: &str = "[00:13.490]I <00:13.620>used <00:13.850>to <00:14.090>rule <00:15.690>the <00:16.140>world
+[00:17.040]Seas <00:17.170>would <00:17.420>rise <00:17.580>when <00:18.340>I <00:18.650>gave <00:18.970>the <00:19.100>word
+[00:19.790]Now <00:19.920>in <00:20.070>the <00:20.230>mornin', <00:20.920>I <00:21.020>sleep <00:22.320>alone
+[00:24.170]Sweep <00:24.330>the <00:24.550>streets <00:25.050>I <00:25.250>used <00:25.800>to <00:25.900>own
+[00:41.280]I <00:41.340>used <00:41.760>to <00:42.060>roll <00:43.290>the <00:43.760>dice
+[00:45.080]Feel <00:45.580>the <00:45.760>fear <00:46.010>in <00:46.480>my <00:46.680>enemy's <00:47.590>eyes
+[00:48.200]Listen <00:48.510>as <00:48.750>the <00:48.930>crowd <00:50.050>would <00:50.800>sing
+[00:52.130]\"Now <00:52.369>the <00:52.663>old <00:52.901>king <00:53.416>is <00:53.517>dead, <00:53.994>long <00:54.389>live <00:54.757>the <00:54.839>king\"
+[00:55.070]One <00:55.250>minute, <00:55.980>I <00:56.020>held <00:57.050>the <00:57.550>key
+[00:58.960]Next, <00:59.471>the <00:59.548>walls <01:00.079>were <01:00.551>closed <01:01.014>on <01:01.448>me
+[01:01.660]And <01:01.740>I <01:01.770>discovered <01:02.590>that <01:02.690>my <01:02.800>castles <01:04.070>stand
+[01:05.810]Upon <01:06.290>pillars <01:06.810>of <01:06.870>salt <01:07.420>and <01:07.510>pillars <01:08.140>of <01:08.510>sand
+[01:09.640]I <01:09.700>hear <01:09.920>Jerusalem <01:10.800>bells <01:11.130>a-<01:12.050>ringin'
+[01:13.420]Roman <01:13.780>cavalry <01:14.730>choirs <01:15.370>are <01:15.880>singin'
+[01:17.080]Be <01:17.220>my <01:17.930>mirror, <01:18.430>my <01:18.790>sword <01:19.390>and <01:19.780>shield
+[01:20.210]My <01:20.410>missionaries <01:21.440>in <01:21.860>a <01:22.210>foreign <01:22.770>field
+[01:23.750]For <01:24.260>some <01:24.710>reason, <01:25.300>I <01:25.630>can't <01:26.110>explain
+[01:27.480]Once <01:28.065>you'd <01:28.521>gone, <01:28.907>there <01:29.355>was <01:29.742>never
+[01:29.930]Never <01:30.460>an <01:30.940>honest <01:31.960>word
+[01:33.790]And <01:34.120>that <01:34.350>was <01:34.530>when <01:34.970>I <01:35.320>ruled <01:35.820>the <01:36.290>world
+[01:50.350]It <01:50.440>was <01:50.640>a <01:50.730>wicked <01:51.030>and <01:51.300>wild <01:52.850>wind
+[01:54.460]Blew <01:54.670>down <01:55.010>the <01:55.210>doors <01:55.720>to <01:55.870>let <01:56.370>me <01:56.770>in
+[01:57.310]Shattered <01:57.870>windows <01:58.420>and <01:58.540>the <01:58.690>sound <01:59.740>of <02:00.220>drums
+[02:01.780]People <02:02.240>couldn't <02:02.670>believe <02:03.530>what <02:03.960>I'd <02:04.040>become
+[02:04.670]And <02:05.030>revolutionaries <02:07.070>wait
+[02:08.590]For <02:09.039>my <02:09.432>head <02:09.881>on <02:10.255>a <02:10.601>silver <02:11.003>plate
+[02:11.210]Just <02:11.350>a <02:11.560>puppet <02:12.120>on <02:12.210>a <02:12.260>lonely <02:13.590>string
+[02:15.600]Aw, <02:16.310>who <02:16.430>would <02:16.680>ever <02:16.950>wanna <02:17.310>be <02:17.610>king?
+[02:19.220]I <02:19.300>hear <02:19.970>Jerusalem <02:20.600>bells <02:21.400>a-<02:21.780>ringin'
+[02:22.990]Roman <02:23.750>cavalry <02:24.490>choirs <02:25.070>are <02:25.500>singin'
+[02:26.660]Be <02:27.100>my <02:27.520>mirror, <02:27.990>my <02:28.340>sword <02:28.870>and <02:29.310>shield
+[02:29.820]My <02:29.950>missionaries <02:30.850>in <02:31.230>a <02:31.630>foreign <02:32.430>field
+[02:33.330]For <02:33.760>some <02:34.230>reason, <02:34.740>I <02:35.090>can't <02:35.580>explain
+[02:36.750]I <02:37.076>know <02:37.225>Saint <02:37.867>Peter <02:38.263>won't <02:38.688>call <02:39.084>my <02:39.183>name
+[02:39.800]Never <02:40.260>an <02:40.760>honest <02:41.310>word
+[02:43.210]But <02:43.400>that <02:43.750>was <02:43.890>when <02:44.240>I <02:44.790>ruled <02:45.240>the <02:45.650>world
+[02:59.840]Oh-<03:00.150>oh-<03:00.600>oh, <03:01.600>oh-<03:02.040>oh, <03:02.450>oh
+[03:03.300]Oh-<03:03.580>oh-<03:03.850>oh, <03:04.780>oh-<03:05.500>oh, <03:06.060>oh
+[03:06.740]Oh-<03:06.970>oh-<03:07.190>oh, <03:08.220>oh-<03:08.700>oh, <03:09.550>oh
+[03:10.220]Oh-<03:10.500>oh-<03:10.730>oh, <03:11.400>oh-<03:11.630>oh, <03:12.650>oh
+[03:13.870]Oh-<03:14.052>oh-<03:14.155>oh, <03:14.352>oh-<03:14.463>oh, <03:14.605>oh
+[03:14.910]Hear <03:15.060>Jerusalem <03:15.610>bells <03:16.340>a-<03:16.390>ringin' <03:16.660>(oh-<03:16.970>oh-<03:17.140>oh, <03:17.260>oh-<03:17.390>oh, <03:17.910>oh)
+[03:18.630]Roman <03:18.769>cavalry <03:19.635>choirs <03:20.053>are <03:20.203>singin' <03:21.019>(oh-<03:21.148>oh-<03:21.308>oh, <03:21.626>oh-<03:21.825>oh, <03:21.945>oh)
+[03:22.120]Be <03:22.146>my <03:22.200>mirror, <03:22.550>my <03:22.910>sword <03:23.300>and <03:23.510>shield <03:23.980>(oh-<03:24.180>oh-<03:24.320>oh, <03:24.560>oh-<03:24.630>oh, <03:24.710>oh)
+[03:25.430]My <03:25.440>missionaries <03:26.190>in <03:26.340>a <03:26.410>foreign <03:26.870>field <03:27.720>(oh-<03:27.820>oh-<03:27.940>oh, <03:28.160>oh-<03:28.240>oh, <03:28.360>oh)
+[03:29.110]For <03:29.190>some <03:29.500>reason, <03:30.100>I <03:30.410>can't <03:30.540>explain <03:31.320>(oh-<03:31.420>oh-<03:31.510>oh, <03:31.820>oh-<03:31.940>oh, <03:32.020>oh)
+[03:32.340]I <03:32.370>know <03:32.570>Saint <03:32.930>Peter <03:33.580>won't <03:34.000>call <03:34.170>my <03:34.840>name
+[03:35.680]Never <03:36.260>an <03:36.760>honest <03:37.360>word
+[03:38.800]But <03:39.010>that <03:39.250>was <03:39.460>when <03:40.180>I <03:40.530>ruled <03:41.000>the <03:41.430>world";
+    const VIVA_YOUTUBE: &str = "I used to rule the world
+
+Seas would rise when I gave the word
+
+Now in the morning, I sleep alone
+
+Sweep the streets I used to own
+
+
+
+I used to roll the dice
+
+Feel the fear in my enemy's eyes
+
+Listen as the crowd would sing
+
+\"Now the old king is dead, long live the king\"
+
+One minute, I held the key
+
+Next, the walls were closed on me
+
+And I discovered that my castles stand
+
+Upon pillars of salt and pillars of sand
+
+
+
+I hear Jerusalem bells a-ringin'
+
+Roman cavalry choirs are singin'
+
+Be my mirror, my sword and shield
+
+My missionaries in a foreign field
+
+For some reason, I can't explain
+
+Once you'd gone, there was never, never an honest word
+
+And that was when I ruled the world
+
+
+
+It was a wicked and wild wind
+
+Blew down the doors to let me in
+
+Shattered windows and the sound of drums
+
+People couldn't believe what I'd become
+
+Revolutionaries wait
+
+For my head on a silver plate
+
+Just a puppet on a lonely string
+
+Aw, who would ever wanna be king?
+
+
+
+I hear Jerusalem bells a-ringin'
+
+Roman cavalry choirs are singing
+
+Be my mirror, my sword and shield
+
+My missionaries in a foreign field
+
+For some reason, I can't explain
+
+I know Saint Peter won't call my name
+
+Never an honest word
+
+But that was when I ruled the world
+
+
+
+Oh-oh-oh, oh-oh, oh
+
+Oh-oh-oh, oh-oh, oh
+
+Oh-oh-oh, oh-oh, oh
+
+Oh-oh-oh, oh-oh, oh
+
+Oh-oh-oh, oh-oh, oh
+
+
+
+Hear Jerusalem bells a-ringin'
+
+Roman cavalry choirs are singin'
+
+Be my mirror, my sword and shield
+
+My missionaries in a foreign field
+
+For some reason I can't explain
+
+I know Saint Peter won't call my name
+
+Never an honest word
+
+But that was when I ruled the world";
+    const TAMALLY_SYNCED: &str = "[00:45.55] تملي معاك ولو حتى بعيد عني
+[00:51.25] في قلبي هواك، تملي معاك
+[00:57.15] تملي فـ بالي وفـ قلبي ولا بنساك
+[01:02.64] تملي واحشني لو حتى بكون وياك
+[01:08.48] تملي معاك ولو حتى بعيد عني
+[01:14.14] في قلبي هواك تملي معاك
+[01:19.81] تملي فـ بالي وفـ قلبي ولا بنساك
+[01:25.67] تملي واحشني لو حتى بكون وياك
+[01:32.03] تملي حبيبي بأشتاقلك، تملي عينيا تندهلك
+[01:37.82] ولو حواليا كل الكون، بكون يا حبيبي محتاجلك
+[01:43.64] تملي حبيبي بأشتاقلك، تملي عينيا تندهلك
+[01:49.27] ولو حواليا كل الكون، بكون يا حبيبي محتاجلك
+[01:56.98] تملي معاك (معاك)، معاك قلبي معاك روحي يا أغلى حبيب
+[02:05.70] يا أغلى حبيب ومهما تكون بعيد عني لقلبي قريب
+[02:14.08] يا عمري الجاي والحاضر يا أحلى نصيب
+[02:20.02] تملي معاك (معاك)، معاك قلبي معاك عمري يا أغلى حبيب
+[02:28.53] يا أغلى حبيب ومهما تكون بعيد عني لقلبي قريب
+[02:37.09] يا عمري الجاي والحاضر يا أحلى نصيب
+[02:43.69] تملي حبيبي بأشتاقلك، تملي عينيا تندهلك
+[02:49.30] ولو حواليا كل الكون، بكون يا حبيبي محتاجلك
+[02:55.01] تملي حبيبي بأشتاقلك، تملي عينيا تندهلك
+[03:00.76] ولو حواليا كل الكون، بكون يا حبيبي محتاجلك
+[03:06.76]
+[03:43.73] تملي حبيبي بأشتاقلك، تملي عينيا تندهلك
+[03:49.37] ولو حواليا كل الكون، بكون يا حبيبي محتاجلك
+[03:55.13] تملي حبيبي بأشتاقلك، تملي عينيا تندهلك
+[04:00.75] ولو حواليا كل الكون، بكون يا حبيبي محتاجلك
+[04:06.55] تملي حبيبي بأشتاقلك، تملي عينيا تندهلك
+[04:12.18] ولو حواليا كل الكون، بكون يا حبيبي محتاجلك
+[04:17.97] تملي حبيبي بأشتاقلك، تملي عينيا تندهلك
+[04:23.66] ولو حواليا كل الكون، بكون يا حبيبي محتاجلك
+[04:28.77] ";
+    const TAMALLY_YOUTUBE: &str = "تملي معاك
+ولو حتى بعيد عني في قلبي هواك
+تملي معاك
+تملي في بالي وفي قلبي ولا بنساك
+تملي واحشني لو حتى بكون وياك
+
+تملي معاك
+ولو حتى بعيد عني في قلبي هواك
+تملي معاك
+تملي في بالي وفي قلبي ولا بنساك
+تملي واحشني لو حتى بكون وياك
+
+تملي حبيبي بشتاقلك
+تملي عنيا تندهلك
+ولو حواليا كل الكون
+بكون يا حبيبي محتاجلك
+
+تملي حبيبي بشتاقلك
+تملي عنيا تندهلك
+ولو حواليا كل الكون
+بكون يا حبيبي محتاجلك
+
+تملي معاك
+معاك قلبي معاك روحي
+يا أغلى حبيب، يا أغلى حبيب
+ومهما تكون بعيد عني لقلبي قريب
+يا عمري الجاي والحاضر
+يا أحلى نصيب
+
+تملي معاك (معاك)
+معاك قلبي معاك عمري
+يا أغلى حبيب، يا أغلى حبيب
+ومهما تكون بعيد عني لقلبي قريب
+آه، يا عمري الجاي والحاضر
+يا احلى نصيب
+
+تملي حبيبي بشتاقلك
+تملي عنيا تندهلك
+ولو حواليا كل الكون
+بكون يا حبيبي محتاجلك
+
+تملي حبيبي بشتاقلك
+تملي عنيا تندهلك
+ولو حواليا كل الكون
+بكون يا حبيبي محتاجلك
+
+تملي حبيبي بشتاقلك
+تملي عنيا تندهلك
+ولو حواليا كل الكون
+بكون يا حبيبي محتاجلك
+
+تملي حبيبي بشتاقلك
+تملي عنيا تندهلك
+ولو حواليا كل الكون
+بكون يا حبيبي محتاجلك
+
+تملي حبيبي بشتاقلك
+تملي عنيا تندهلك
+ولو حواليا كل الكون
+بكون يا حبيبي محتاجلك
+
+تملي حبيبي بشتاقلك
+تملي عنيا تندهلك
+ولو حواليا كل الكون";
+    const GANGNAM_SYNCED: &str = "[00:06.260]오빤 <00:06.838>강남스타일
+[00:10.290]강남스타일
+[00:14.780]낮에는 <00:15.544>따사로운 <00:16.342>인간적인 <00:17.241>여자
+[00:18.010]커피 <00:18.582>한잔의 <00:19.032>여유를 <00:19.680>아는 <00:20.175>품격 <00:20.526>있는 <00:20.752>여자
+[00:21.790]밤이 <00:22.375>오면 <00:22.802>심장이 <00:23.561>뜨거워지는 <00:24.726>여자
+[00:25.360]그런 <00:25.867>반전 <00:26.723>있는 <00:27.264>여자
+[00:28.940]나는 <00:29.549>사나이
+[00:30.390]낮에는 <00:30.934>너만큼 <00:31.439>따사로운 <00:32.180>그런 <00:32.581>사나이
+[00:34.090]커피 <00:34.610>식기도 <00:35.192>전에 <00:35.670>원샷 <00:36.057>때리는 <00:36.655>사나이
+[00:37.530]밤이 <00:38.115>오면 <00:38.552>심장이 <00:39.244>터져버리는 <00:40.128>사나이
+[00:41.100]그런 <00:41.719>사나이
+[00:43.260]아름다워, <00:44.896>사랑스러워
+[00:46.990]그래, <00:47.587>너 <00:48.064>(hey), <00:49.078>그래, <00:49.248>바로 <00:49.552>너 <00:49.852>(hey)
+[00:50.770]아름다워, <00:52.346>사랑스러워
+[00:54.290]그래, <00:54.911>너 <00:55.506>(hey), <00:56.205>그래, <00:56.495>바로 <00:56.772>너 <00:57.193>(hey)
+[00:57.840]지금부터 <00:58.700>갈 <00:58.961>데까지 <00:59.673>가볼까
+[01:05.900]오빤 <01:07.095>강남스타일 <01:07.880>(uh)
+[01:10.210]강남스타일
+[01:11.090]오, <01:11.831>오, <01:12.435>오, <01:12.877>오, <01:13.409>오빤 <01:13.625>강남스타일 <01:14.278>(uh)
+[01:17.320]강남스타일
+[01:18.520]오, <01:19.114>오, <01:19.555>오, <01:20.065>오, <01:20.741>오빤 <01:21.075>강남스타일
+[01:22.200]Eh, <01:24.006>sexy <01:24.782>lady
+[01:25.730]오, <01:26.377>오, <01:26.992>오, <01:27.640>오, <01:28.112>오빤 <01:28.530>강남스타일
+[01:29.350]Eh, <01:31.165>sexy <01:31.951>lady
+[01:32.800]오, <01:33.468>오, <01:33.839>오, <01:34.406>오 <01:34.906>(eh-<01:35.187>eh-<01:35.486>eh, <01:35.777>eh-<01:36.068>eh-<01:36.289>eh)
+[01:36.620]정숙해 <01:37.377>보이지만, <01:38.467>놀 <01:38.637>땐 <01:38.911>노는 <01:39.235>여자
+[01:39.920]이때다 <01:40.615>싶으면 <01:41.312>묶었던 <01:41.924>머리 <01:42.425>푸는 <01:42.936>여자
+[01:43.750]가렸지만, <01:44.806>웬만한 <01:45.404>노출보다 <01:46.161>야한 <01:46.589>여자
+[01:46.920]그런 <01:47.555>감각적인 <01:48.909>여자
+[01:50.760]나는 <01:51.485>사나이
+[01:52.300]점잖아 <01:52.928>보이지만, <01:53.847>놀 <01:54.074>땐 <01:54.298>노는 <01:54.658>사나이
+[01:55.690]때가 <01:56.255>되면 <01:56.680>완전 <01:57.253>미쳐버리는 <01:58.121>사나이
+[01:59.250]근육보다 <02:00.204>사상이 <02:00.856>울퉁불퉁한 <02:01.864>사나이
+[02:03.180]그런 <02:03.802>사나이
+[02:05.390]아름다워, <02:07.067>사랑스러워
+[02:08.960]그래, <02:09.414>너 <02:09.892>(hey), <02:10.781>그래, <02:11.049>바로 <02:11.476>너 <02:11.716>(hey)
+[02:12.450]아름다워, <02:14.288>사랑스러워
+[02:16.140]그래, <02:16.765>너 <02:17.149>(hey), <02:17.945>그래, <02:18.225>바로 <02:18.763>너 <02:19.022>(hey)
+[02:19.640]지금부터 <02:20.718>갈 <02:20.966>데까지 <02:21.697>가볼까
+[02:27.940]오빤 <02:28.537>강남스타일 <02:29.221>(uh)
+[02:32.180]강남스타일
+[02:32.940]오, <02:33.585>오, <02:34.061>오, <02:34.670>오, <02:35.141>오빤 <02:35.467>강남스타일 <02:36.128>(uh)
+[02:39.120]강남스타일
+[02:40.170]오, <02:40.811>오, <02:41.207>오, <02:41.768>오, <02:42.347>오빤 <02:42.807>강남스타일
+[02:43.920]Eh, <02:45.685>sexy <02:46.733>lady
+[02:47.620]오, <02:48.154>오, <02:48.742>오, <02:49.303>오, <02:49.919>오빤 <02:50.352>강남스타일
+[02:51.040]Eh, <02:53.053>sexy <02:53.836>lady
+[02:54.860]오, <02:55.407>오, <02:55.785>오, <02:56.436>오 <02:56.835>(eh-<02:57.039>eh-<02:57.315>eh, <02:57.656>eh-<02:57.846>eh-<02:58.100>eh)
+[02:58.570]뛰는 <02:59.042>놈, <02:59.760>그 <03:00.003>위에 <03:00.478>나는 <03:00.893>놈
+[03:01.490]Baby, <03:02.122>baby, <03:02.733>나는 <03:03.061>뭘 <03:03.491>좀 <03:03.645>아는 <03:04.076>놈
+[03:05.680]뛰는 <03:06.301>놈, <03:06.899>그 <03:07.126>위에 <03:07.587>나는 <03:08.022>놈
+[03:08.920]Baby, <03:09.505>baby, <03:10.207>나는 <03:10.541>뭘 <03:10.708>좀 <03:10.992>아는 <03:11.302>놈
+[03:11.620]You <03:11.948>know <03:12.161>what <03:12.402>I'm <03:12.525>saying
+[03:13.480]오빤 <03:13.790>강남스타일 <03:14.391>(eh-<03:14.910>eh-<03:15.184>eh, <03:15.607>eh-<03:15.807>eh-<03:16.078>eh)
+[03:16.580]Eh, <03:18.496>sexy <03:19.275>lady
+[03:20.400]오, <03:21.021>오, <03:21.520>오, <03:22.093>오, <03:22.756>오빤 <03:23.173>강남스타일
+[03:23.800]Eh, <03:25.625>sexy <03:26.505>lady
+[03:27.560]오, <03:28.107>오, <03:28.545>오, <03:28.953>오 <03:29.283>(eh-<03:29.762>eh-<03:30.112>eh, <03:30.390>eh-<03:30.634>eh-<03:30.918>eh)
+[03:31.530]오빤 <03:32.108>강남스타일 <03:33.110>(uh)";
+    const GANGNAM_YOUTUBE: &str = "오빤 강남스타일
+
+강남스타일
+
+
+
+낮에는 따사로운 인간적인 여자
+
+커피 한잔의 여유를 아는 품격 있는 여자
+
+밤이 오면 심장이 뜨거워지는 여자
+
+그런 반전 있는 여자
+
+
+
+나는 사나이
+
+낮에는 너만큼 따사로운 그런 사나이
+
+커피 식기도 전에 원샷 때리는 사나이
+
+밤이 오면 심장이 터져버리는 사나이
+
+그런 사나이
+
+
+
+아름다워, 사랑스러워
+
+그래, 너 (hey)
+
+그래, 바로 너 (hey)
+
+
+
+아름다워, 사랑스러워
+
+그래, 너 (hey)
+
+그래, 바로 너 (hey)
+
+지금부터 갈 때까지 가볼까
+
+
+
+오빤 강남스타일 (uh)
+
+강남스타일
+
+옵-옵-옵-옵 오빤 강남스타일 (uh)
+
+강남스타일
+
+옵-옵-옵-옵 오빤 강남스타일
+
+
+
+Eh, sexy lady
+
+옵-옵-옵-옵 오빤 강남스타일
+
+Eh, sexy lady
+
+옵-옵-옵-옵
+
+Eh-eh-eh, eh-eh-eh
+
+
+
+정숙해 보이지만 놀 땐 노는 여자
+
+이때다 싶으면 묶었던 머리 푸는 여자
+
+가렸지만 웬만한 노출보다 야한 여자
+
+그런 감각적인 여자
+
+
+
+나는 사나이
+
+점잖아 보이지만 놀 땐 노는 사나이
+
+때가 되면 완전 미쳐버리는 사나이
+
+근육보다 사상이 울퉁불퉁한 사나이
+
+그런 사나이
+
+
+
+아름다워, 사랑스러워
+
+그래, 너 (hey)
+
+그래, 바로 너 (hey)
+
+
+
+아름다워, 사랑스러워
+
+그래, 너 (hey)
+
+그래, 바로 너 (hey)
+
+지금부터 갈 때까지 가볼까
+
+
+
+오빤 강남스타일 (uh)
+
+강남스타일
+
+옵-옵-옵-옵 오빤 강남스타일 (uh)
+
+강남스타일
+
+옵-옵-옵-옵 오빤 강남스타일
+
+
+
+Eh, sexy lady
+
+옵-옵-옵-옵 오빤 강남스타일
+
+Eh, sexy lady
+
+옵-옵-옵-옵
+
+Eh-eh-eh, eh-eh-eh
+
+
+
+뛰는 놈, 그 위에 나는 놈
+
+Baby, baby 나는 뭘 좀 아는 놈
+
+뛰는 놈, 그 위에 나는 놈
+
+Baby, baby 나는 뭘 좀 아는 놈
+
+You know what I'm sayin'?
+
+
+
+오빤 강남스타일
+
+Eh-eh-eh, eh-eh-eh
+
+Eh, sexy lady
+
+옵-옵-옵-옵 오빤 강남스타일
+
+Eh, sexy lady
+
+옵-옵-옵-옵
+
+Eh-eh-eh, eh-eh-eh
+
+
+
+오빤 강남스타일
+
+Uh";
+    const SHAPE_SYNCED: &str = "[00:09.83] The club isn't the best place to find a lover
+[00:12.16] So the bar is where I go (mm-mm)
+[00:14.90] Me and my friends at the table doing shots
+[00:17.19] Drinking fast, and then we talk slow (mm-mm)
+[00:19.76] You come over and start up a conversation with just me
+[00:22.38] And trust me, I'll give it a chance now (mm-mm)
+[00:24.69] Take my hand, stop, put \"Van the Man\" on the jukebox
+[00:27.45] And then we start to dance
+[00:28.94] And now I'm singing like
+[00:29.94] Girl, you know I want your love
+[00:32.54] Your love was handmade for somebody like me
+[00:35.64] Come on now, follow my lead
+[00:37.58] I may be crazy, don't mind me
+[00:39.54] Say, \"Boy, let's not talk too much
+[00:42.41] Grab on my waist and put that body on me\"
+[00:45.67] Come on now, follow my lead
+[00:47.12] Come, come on now, follow my lead
+[00:49.12] (Mm-mm)
+[00:50.94] I'm in love with the shape of you
+[00:53.36] We push and pull like a magnet do
+[00:55.87] Although my heart is falling too
+[00:58.49] I'm in love with your body
+[01:00.98] Last night you were in my room
+[01:03.32] And now my bed sheets smell like you
+[01:05.32] Every day discovering something brand new
+[01:08.38] Oh, I'm in love with your body
+[01:10.08] Oh I, oh I, oh I, oh I
+[01:13.40] Oh, I'm in love with your body
+[01:15.00] Oh I, oh I, oh I, oh I
+[01:18.46] Oh, I'm in love with your body
+[01:20.04] Oh I, oh I, oh I, oh I
+[01:23.46] Oh, I'm in love with your body
+[01:25.32] Every day discovering something brand new
+[01:28.45] I'm in love with the shape of you
+[01:30.15] One week in we let the story begin
+[01:32.08] We're going out on our first date (mm-mm)
+[01:34.57] But you and me are thrifty, so go all-you-can-eat
+[01:37.06] Fill up your bag, and I fill up a plate (mm-mm)
+[01:39.57] We talk for hours and hours about the sweet and the sour
+[01:42.06] And how your family is doing okay (mm-mm)
+[01:44.42] And leave and get in a taxi, then kiss in the back seat
+[01:47.11] Tell the driver make the radio play
+[01:48.95] And I'm singing like
+[01:49.94] Girl, you know I want your love
+[01:52.58] Your love was handmade for somebody like me
+[01:55.65] Come on now, follow my lead
+[01:57.59] I may be crazy, don't mind me
+[01:59.52] Say, \"Boy, let's not talk too much
+[02:02.48] Grab on my waist and put that body on me\"
+[02:05.63] Come on now, follow my lead
+[02:07.18] Come, come on now, follow my lead
+[02:09.15] (Mm-mm)
+[02:10.94] I'm in love with the shape of you
+[02:13.37] We push and pull like a magnet do
+[02:15.87] Although my heart is falling too
+[02:18.46] I'm in love with your body
+[02:20.96] Last night you were in my room
+[02:23.36] And now my bed sheets smell like you
+[02:25.35] Every day discovering something brand new
+[02:28.46] Oh, I'm in love with your body
+[02:30.02] Oh I, oh I, oh I, oh I
+[02:33.50] Oh, I'm in love with your body
+[02:35.13] Oh I, oh I, oh I, oh I
+[02:38.45] Oh, I'm in love with your body
+[02:40.25] Oh I, oh I, oh I, oh I
+[02:43.58] Oh, I'm in love with your body
+[02:45.33] Every day discovering something brand new
+[02:48.42] I'm in love with the shape of you
+[02:50.24] Come on, be my baby, come on
+[02:52.80] Come on, be my baby, come on
+[02:55.28] Come on, be my baby, come on
+[02:57.87] Come on, be my baby, come on
+[03:00.22] Come on, be my baby, come on
+[03:02.73] Come on, be my baby, come on
+[03:05.22] Come on, be my baby, come on
+[03:07.81] Come on, be my baby, come on
+[03:10.99] I'm in love with the shape of you
+[03:13.31] We push and pull like a magnet do
+[03:15.83] Although my heart is falling too
+[03:18.47] I'm in love with your body
+[03:20.95] Last night you were in my room
+[03:23.32] And now my bed sheets smell like you
+[03:25.32] Every day discovering something brand new
+[03:28.48] Oh, I'm in love with your body
+[03:30.39] Come on, be my baby, come on
+[03:33.00] Come on, be my baby, come on (I'm in love with your body)
+[03:35.13] Come on, be my baby, come on
+[03:37.36] Come on, be my baby, come on (oh, I'm in love with your body)
+[03:40.26] Come on, be my baby, come on
+[03:43.19] Come on, be my baby, come on (I'm in love with your body)
+[03:45.32] Every day discovering something brand new
+[03:48.48] I'm in love with the shape of you
+[03:49.94] ";
+    const SHAPE_YOUTUBE: &str = "The club isn't the best place to find a lover
+So the bar is where I go, mm
+Me and my friends at the table doin' shots
+Drinkin' fast and then we talk slow, mm
+And you come over and start up a conversation with just me
+And trust me, I'll give it a chance now, mm
+Take my hand, stop, put Van the Man on the jukebox
+And then we start to dance, and now I'm singin' like
+
+\"Girl, you know I want your love
+Your love was handmade for somebody like me
+Come on now, follow my lead
+I may be crazy, don't mind me\"
+Say, \"Boy, let's not talk too much
+Grab on my waist and put that body on me
+Come on now, follow my lead\"
+Come, come on now, follow my lead, mm
+
+I'm in love with the shape of you
+We push and pull like a magnet do
+Although my heart is fallin' too
+I'm in love with your body
+And last night, you were in my room
+And now my bedsheets smell like you
+Every day, discoverin' somethin' brand new
+Well, I'm in love with your body
+
+Oh, I, oh, I, oh, I, oh, I
+Well, I'm in love with your body
+Oh, I, oh, I, oh, I, oh, I
+Well, I'm in love with your body
+Oh, I, oh, I, oh, I, oh, I
+Well, I'm in love with your body
+Every day, discoverin' somethin' brand new
+I'm in love with the shape of you
+
+One week in, we let the story begin
+We're goin' out on our first date, mm
+You and me are thrifty, so go all-you-can-eat
+Fill up your bag and I fill up a plate, mm
+We talk for hours and hours about the sweet and the sour
+And how your family is doin' okay, mm
+And leave and get in a taxi, and kiss in the back seat
+Tell the driver, \"Make the radio play,\" and I'm singin' like
+
+\"Girl, you know I want your love
+Your love was handmade for somebody like me
+Come on now, follow my lead
+I may be crazy, don't mind me\"
+Say, \"Boy, let's not talk too much
+Grab on my waist and put that body on me
+Come on now, follow my lead\"
+Come, come on now, follow my lead, mm
+
+I'm in love with the shape of you
+We push and pull like a magnet do
+Although my heart is fallin' too
+I'm in love with your body
+And last night, you were in my room
+And now my bedsheets smell like you
+Every day, discoverin' somethin' brand new
+Well, I'm in love with your body
+
+Oh, I, oh, I, oh, I, oh, I
+Well, I'm in love with your body
+Oh, I, oh, I, oh, I, oh, I
+Well, I'm in love with your body
+Oh, I, oh, I, oh, I, oh, I
+Well, I'm in love with your body
+Every day, discoverin' somethin' brand new
+I'm in love with the shape of you
+
+Come on, be my baby, come on
+Come on, be my baby, come on
+Come on, be my baby, come on
+Come on, be my baby, come on
+Come on, be my baby, come on
+Come on, be my baby, come on
+Come on, be my baby, come on
+Come on, be my baby, come on
+
+I'm in love with the shape of you
+We push and pull like a magnet do
+Although my heart is fallin' too
+I'm in love with your body
+And last night, you were in my room
+And now my bedsheets smell like you
+Every day, discoverin' somethin' brand new
+Well, I'm in love with your body
+
+Come on, be my baby, come on
+Come on, be my baby, come on (I'm in love with your body)
+Come on, be my baby, come on
+Come on, be my baby, come on (oh, I'm in love with your body)
+Come on, be my baby, come on
+Come on, be my baby, come on (I'm in love with your body)
+Every day, discoverin' somethin' brand new
+I'm in love with the shape of you";
+    const KUGOU_PLACEHOLDER: &str = "[id:$00000000]
+[ar:arkady sevidov]
+[ti:June]
+[00:01.58]纯音乐，请欣赏";
+    // --- PR E re-fix (R1/R2): Tong Hua in two scripts + a wrong CJK song.
+    //
+    // TONG_HUA_PINYIN is the real LrcLib synced text for Tong Hua
+    // (Michael Wong), exactly as it appears in the PR C probe data
+    // (~/workspace/reviews/youtube-crosscheck/lrclib_candidates.jsonl):
+    // the provider returns the lyrics romanized in pinyin, with LRC
+    // timestamps. TONG_HUA_CHARS is the same lyrics in Chinese
+    // characters — the form a YouTube lyrics tab normally carries for
+    // this song. The line-by-line word counts match exactly (329 tokens
+    // each side), so the pair is the same song in two scripts.
+    // MOON_CHARS is a different Chinese song (月亮代表我的心, Teresa
+    // Teng) for the wrong-song CJK test; QINGHUACI_CHARS is another
+    // (青花瓷, Jay Chou) — the two bracket the reject bar from either
+    // side (see the wrong-Chinese-song test).
+    const TONG_HUA_PINYIN: &str = "[00:13.28] Wang le you duo jiu
+[00:16.33] Zai mei ting dao ni
+[00:20.03] Dui wo shuo ni zui ai de gu shi
+[00:26.98] Wo xiang le hen jiu
+[00:30.46] Wo kai shi wang le
+[00:33.82] Shi bu shi wo you zuo cuo le shen me
+[00:41.07] Ni ku zhe dui wo shuo
+[00:44.32] Tong hua li dou shi pian ren de
+[00:47.76] Wo bu ke neng shi ni de wang zi
+[00:54.80] Ye xu ni bu hui dong
+[00:58.57] Cong ni shuo ai wo yi hou
+[01:01.93] Wo de tian kong xing xing dou liang le
+[01:09.07] Wo yuan bian cheng tong hua li
+[01:12.96] Ni ai de na ge tian shi
+[01:16.11] Zhang kai shuang shou
+[01:18.39] Bian cheng chi bang shou hu ni
+[01:23.03] Ni yao xiang xin
+[01:25.12] Xiang xin wo men hui xiang tong hua gu shi li
+[01:30.27] Xing fu he kuai le shi jie ju
+[01:36.61]
+[01:48.22] Ni ku zhe dui wo shuo
+[01:51.53] Tong hua li dou shi pian ren de
+[01:54.84] Wo bu ke neng shi ni de wang zi
+[02:01.93] Ye xu ni bu hui dong
+[02:05.49] Cong ni shuo ai wo yi hou
+[02:08.79] Wo de tian kong xing xing dou liang le
+[02:16.39] Wo yuan bian cheng tong hua li
+[02:19.97] Ni ai de na ge tian shi
+[02:23.26] Zhang kai shuang shou
+[02:25.43] Bian cheng chi bang shou hu ni
+[02:30.04] Ni yao xiang xin
+[02:32.24] Xiang xin wo men hui xiang tong hua gu shi li
+[02:37.42] Xing fu he kuai le shi jie ju
+[02:44.47] Wo yao bian cheng tong hua li
+[02:48.18] Ni ai de na ge tian shi
+[02:51.30] Zhang kai shuang shou
+[02:53.34] Bian cheng chi bang shou hu ni
+[02:58.30] Ni yao xiang xin
+[03:00.27] Xiang xin wo men hui xiang tong hua gu shi li
+[03:05.86] Xing fu he kuai le shi jie ju
+[03:12.37] Wo hui bian cheng tong hua li
+[03:16.17] Ni ai de na ge tian shi
+[03:19.43] Zhang kai shuang shou
+[03:21.70] Bian cheng chi bang shou hu ni
+[03:26.33] Ni yao xiang xin
+[03:28.20] Xiang xin wo men hui xiang tong hua gu shi li
+[03:33.42] Xing fu he kuai le shi jie ju
+[03:36.50]
+[03:44.43] Yi qi xie wo men de jie ju
+[03:47.26] ";
+    const TONG_HUA_CHARS: &str = "忘了有多久
+再没听到你
+对我说你最爱的故事
+我想了很久
+我开始慌了
+是不是我又做错了什么
+你哭着对我说
+童话里都是骗人的
+我不可能是你的王子
+也许你不会懂
+从你说爱我以后
+我的天空星星都亮了
+我愿变成童话里
+你爱的那个天使
+张开双手
+变成翅膀守护你
+你要相信
+相信我们会像童话故事里
+幸福和快乐是结局
+你哭着对我说
+童话里都是骗人的
+我不可能是你的王子
+也许你不会懂
+从你说爱我以后
+我的天空星星都亮了
+我愿变成童话里
+你爱的那个天使
+张开双手
+变成翅膀守护你
+你要相信
+相信我们会像童话故事里
+幸福和快乐是结局
+我要变成童话里
+你爱的那个天使
+张开双手
+变成翅膀守护你
+你要相信
+相信我们会像童话故事里
+幸福和快乐是结局
+我会变成童话里
+你爱的那个天使
+张开双手
+变成翅膀守护你
+你要相信
+相信我们会像童话故事里
+幸福和快乐是结局
+一起写我们的结局";
+    const MOON_CHARS: &str = "你问我爱你有多深
+我爱你有几分
+我的情也真
+我的爱也真
+月亮代表我的心
+你问我爱你有多深
+我爱你有几分
+我的情不移
+我的爱不变
+月亮代表我的心
+轻轻的一个吻
+已经打动我的心
+深深的一段情
+教我思念到如今
+你问我爱你有多深
+我爱你有几分
+你去想一想
+你去看一看
+月亮代表我的心";
+    const QINGHUACI_CHARS: &str = "素胚勾勒出青花笔锋浓转淡
+瓶身描绘的牡丹一如你初妆
+冉冉檀香透过窗心事我了然
+宣纸上走笔至此搁一半
+釉色渲染仕女图韵味被私藏
+而你嫣然的一笑如含苞待放
+你的美一缕飘散去到我去不了的地方";
+
+    //
+    // Fixtures are REAL excerpts (first 8 lines): LrcLib synced text vs
+    // the plain YouTube text for the same song, fetched live during
+    // calibration (see ~/workspace/reviews/youtube-crosscheck/). The
+    // synced sides keep their LRC timestamps and inline word tags; the
+    // tokenizer must strip them.
+
+    #[test]
+    fn youtube_crosscheck_tokenize_strips_tags_and_splits_multilingual() {
+        assert_eq!(
+            youtube_crosscheck_tokenize("[00:13.49]I <00:13.62>used to rule the world!"),
+            vec!["i", "used", "to", "rule", "the", "world"]
+        );
+        assert_eq!(
+            youtube_crosscheck_tokenize("[ti:June] [00:01.58]纯音乐，请欣赏"),
+            vec!["纯", "音", "乐", "请", "欣", "赏"]
+        );
+        assert_eq!(
+            youtube_crosscheck_tokenize("오빤 강남스타일"),
+            vec!["오빤", "강남스타일"]
+        );
+        // Arabic diacritics and alef variants fold to one form.
+        assert_eq!(
+            youtube_crosscheck_tokenize("تَمَلَّي مَعَاك أَحَبُّكِ"),
+            vec!["تملي", "معاك", "احبك"]
+        );
+        // Case and punctuation do not matter.
+        assert_eq!(
+            youtube_crosscheck_tokenize("Hello, WORLD... it's ME!"),
+            vec!["hello", "world", "it", "s", "me"]
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_word_distance_uses_characters() {
+        assert_eq!(youtube_crosscheck_word_distance("color", "color"), 0);
+        assert_eq!(youtube_crosscheck_word_distance("colour", "color"), 1);
+        assert_eq!(youtube_crosscheck_word_distance("mornin", "morning"), 1);
+        assert_eq!(youtube_crosscheck_word_distance("doin", "doing"), 1);
+        // A length gap over 2 rules a fuzzy match out without the DP.
+        assert_eq!(
+            youtube_crosscheck_word_distance("a", "antidisestablishmentarianism"),
+            usize::MAX
+        );
+        // Multibyte scripts are measured in characters, not bytes.
+        assert_eq!(youtube_crosscheck_word_distance("تملي", "تملى"), 1);
+    }
+
+    #[test]
+    fn youtube_crosscheck_fuzzy_match_only_short_tokens_exact() {
+        assert!(youtube_crosscheck_fuzzy_match("colour", "color"));
+        assert!(youtube_crosscheck_fuzzy_match("favourite", "favorite"));
+        assert!(youtube_crosscheck_fuzzy_match("mornin", "morning"));
+        // Short tokens never fuzzy-match: "a" vs "i" is not evidence, and
+        // single CJK characters are exact-only by construction.
+        assert!(!youtube_crosscheck_fuzzy_match("a", "i"));
+        assert!(!youtube_crosscheck_fuzzy_match("纯", "乐"));
+        assert!(!youtube_crosscheck_fuzzy_match("to", "do"));
+        // "gonna" vs "going" is a legitimate colloquial variant (distance
+        // 2, within the bar for a 5-letter word) and does fuzzy-match.
+        assert!(youtube_crosscheck_fuzzy_match("gonna", "going"));
+        assert!(!youtube_crosscheck_fuzzy_match("cat", "dog"));
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_accepts_real_correct_pairs() {
+        // English (word-tagged LRC vs plain YouTube text).
+        assert_eq!(
+            youtube_crosscheck_verdict(VIVA_SYNCED, VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Accept
+        );
+        // Arabic.
+        assert_eq!(
+            youtube_crosscheck_verdict(TAMALLY_SYNCED, TAMALLY_YOUTUBE),
+            YoutubeCrosscheckVerdict::Accept
+        );
+        // Korean.
+        assert_eq!(
+            youtube_crosscheck_verdict(GANGNAM_SYNCED, GANGNAM_YOUTUBE),
+            YoutubeCrosscheckVerdict::Accept
+        );
+        // Shape of You: "doin'"/"drink in'" vs "doing"/"drinking" and
+        // "(mm-mm)" vs "mm" — transcription differences, same song.
+        assert_eq!(
+            youtube_crosscheck_verdict(SHAPE_SYNCED, SHAPE_YOUTUBE),
+            YoutubeCrosscheckVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_rejects_wrong_song() {
+        // One song's synced lyrics against another song's YouTube text.
+        assert_eq!(
+            youtube_crosscheck_verdict(SHAPE_SYNCED, VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Reject
+        );
+        assert_eq!(
+            youtube_crosscheck_verdict(VIVA_SYNCED, SHAPE_YOUTUBE),
+            YoutubeCrosscheckVerdict::Reject
+        );
+        // A wrong song in a DIFFERENT dominant script Defers instead of
+        // Rejecting: Gangnam is Hangul-dominant, Viva is Latin-dominant,
+        // so the dominant-script guard fires and the normal matcher
+        // decides. That is the guard's intended fail-safe tradeoff (R4)
+        // — the cross-check only Rejects wrong songs within one
+        // dominant script.
+        assert_eq!(
+            youtube_crosscheck_verdict(GANGNAM_SYNCED, VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Defer
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_rejects_kugou_placeholder() {
+        // The 1-line KuGou placeholder ("pure music, please enjoy") has
+        // nothing in common with any reference: 6 raw words, 0 matched.
+        // (The chain's <5-line KuGou floor would also reject it; the
+        // cross-check catches the same shape from any provider.)
+        assert_eq!(
+            youtube_crosscheck_verdict(KUGOU_PLACEHOLDER, VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Reject
+        );
+        assert_eq!(
+            youtube_crosscheck_verdict(KUGOU_PLACEHOLDER, TAMALLY_YOUTUBE),
+            YoutubeCrosscheckVerdict::Reject
+        );
+    }
+    #[test]
+    fn youtube_crosscheck_verdict_defers_across_scripts() {
+        // R1: the same song in two scripts must never Reject. Before the
+        // script-overlap guard, both directions Rejected (thin-evidence
+        // rule: 329 raw tokens, 0 matched) — the same song, wrongly
+        // thrown away. A total non-match across disjoint scripts means
+        // "different script", not "wrong song".
+        assert_eq!(
+            youtube_crosscheck_verdict(TONG_HUA_PINYIN, TONG_HUA_CHARS),
+            YoutubeCrosscheckVerdict::Defer
+        );
+        assert_eq!(
+            youtube_crosscheck_verdict(TONG_HUA_CHARS, TONG_HUA_PINYIN),
+            YoutubeCrosscheckVerdict::Defer
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_accepts_cjk_same_script() {
+        // R2: with single CJK characters kept as content tokens, a
+        // correct Chinese-vs-Chinese pair goes through the main branch
+        // (recall 1.0) and Accepts. Before the keep-change the filtered
+        // counts were 0/0 and this only ever Deferred.
+        let score = youtube_crosscheck_score(TONG_HUA_CHARS, TONG_HUA_CHARS);
+        assert_eq!(score.cand_tokens, 329);
+        assert_eq!(score.ref_tokens, 329);
+        assert_eq!(score.matched, 329);
+        assert_eq!(
+            youtube_crosscheck_verdict(TONG_HUA_CHARS, TONG_HUA_CHARS),
+            YoutubeCrosscheckVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_rejects_wrong_chinese_song() {
+        // R2: the cross-check can now catch a wrong Chinese song on the
+        // main branch — 青花瓷 against Tong Hua scores recall 0.17 /
+        // F1 0.07 (15 of 86 characters shared), far under the 0.45
+        // reject bar. Single CJK characters match exactly only, so the
+        // score is deterministic.
+        let score = youtube_crosscheck_score(QINGHUACI_CHARS, TONG_HUA_CHARS);
+        assert_eq!(score.matched, 15);
+        assert_eq!(
+            youtube_crosscheck_verdict(QINGHUACI_CHARS, TONG_HUA_CHARS),
+            YoutubeCrosscheckVerdict::Reject
+        );
+        // The near miss: 月亮代表我的心 shares far more common
+        // characters (你/我/爱/的/月/亮/心) and scores recall 0.47 /
+        // F1 0.25 — one hair above the reject bar, so it Defers and the
+        // normal matcher decides. Before the fix both pairs Deferred
+        // with 0/0 filtered tokens (no evidence at all); now both carry
+        // a real measured score.
+        let near = youtube_crosscheck_score(MOON_CHARS, TONG_HUA_CHARS);
+        assert_eq!(near.matched, 56);
+        assert_eq!(
+            youtube_crosscheck_verdict(MOON_CHARS, TONG_HUA_CHARS),
+            YoutubeCrosscheckVerdict::Defer
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_defers_without_reference() {
+        // No YouTube text (5 of the 13 songs have no lyrics tab): absence
+        // of evidence is never evidence of a wrong song.
+        assert_eq!(
+            youtube_crosscheck_verdict(VIVA_SYNCED, ""),
+            YoutubeCrosscheckVerdict::Defer
+        );
+        assert_eq!(
+            youtube_crosscheck_verdict("", VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Defer
+        );
+        assert_eq!(
+            youtube_crosscheck_verdict("", ""),
+            YoutubeCrosscheckVerdict::Defer
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_defers_on_thin_evidence() {
+        // Three words cannot prove a match or a mismatch either way.
+        assert_eq!(
+            youtube_crosscheck_verdict("hello darkness my", VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Defer
+        );
+        // Six words that DO all appear in the reference are not a
+        // mismatch either — thin evidence defers, it never rejects.
+        assert_eq!(
+            youtube_crosscheck_verdict("I used to rule the world", VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Defer
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_never_rejects_partial_lyrics() {
+        // Only the first half of the synced lyrics: the right song with
+        // half the words. It must not be rejected (recall stays ~1.0 even
+        // though F1 drops); Accept or Defer are both safe outcomes.
+        let lines: Vec<&str> = VIVA_SYNCED.lines().collect();
+        let half = lines[..lines.len() / 2].join("\n");
+        assert_ne!(
+            youtube_crosscheck_verdict(&half, VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Reject
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_defers_mixed_script() {
+        // R4: the dominant-script guard must fire even when a minority
+        // of tokens share a script. Before it, the full-mask guard only
+        // fired on fully disjoint masks, so one English word in an
+        // otherwise Chinese reference defeated it and the same song
+        // wrongly Rejected (pinyin vs chars + "yeah baby oh" scored
+        // recall 0). The dominant scripts still differ, so all three
+        // shapes Defer.
+        let chars_plus_filler = format!("{TONG_HUA_CHARS}\nyeah baby oh");
+        assert_eq!(
+            youtube_crosscheck_verdict(TONG_HUA_PINYIN, &chars_plus_filler),
+            YoutubeCrosscheckVerdict::Defer
+        );
+        let chars_plus_filler_cand = format!("{TONG_HUA_CHARS}\nyeah baby");
+        assert_eq!(
+            youtube_crosscheck_verdict(&chars_plus_filler_cand, TONG_HUA_PINYIN),
+            YoutubeCrosscheckVerdict::Defer
+        );
+        // Romaji vs kana + English filler: the same shape for Japanese.
+        // ("Sakura Sakura" — romaji on one side, kana on the other.)
+        let romaji = "sakura sakura yayoi no sora wa miwatasu kagiri kasumi ka kumo ka";
+        let kana_plus_filler =
+            "さくら さくら やよいの そら は 見渡す 限り かすみ か くも か yeah baby";
+        assert_eq!(
+            youtube_crosscheck_verdict(romaji, kana_plus_filler),
+            YoutubeCrosscheckVerdict::Defer
+        );
+        // And the guard must NOT fire when the dominant scripts match:
+        // Gangnam's YouTube reference is 24% Latin, but both sides are
+        // Hangul-dominant (206 Hangul vs 65 Latin tokens each), so the
+        // same-song pair still Accepts.
+        assert_eq!(
+            youtube_crosscheck_verdict(GANGNAM_SYNCED, GANGNAM_YOUTUBE),
+            YoutubeCrosscheckVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_dominant_tie_is_fail_safe() {
+        // A tie for dominant on one side must not hide a disjoint
+        // dominant: this candidate is 10 Latin words + 10 CJK
+        // characters (a tie), the reference is Chinese-dominant, so the
+        // guard fires on the tied Latin dominant and the verdict Defers
+        // instead of rejecting on the (near-zero) recall.
+        let tied = "one two three four five six seven eight nine ten 一二三四五六七八九十";
+        assert_eq!(
+            youtube_crosscheck_verdict(tied, TONG_HUA_CHARS),
+            YoutubeCrosscheckVerdict::Defer
+        );
+    }
+
+    #[test]
+    fn youtube_crosscheck_verdict_is_order_invariant() {
+        // Line order carries no signal for a bag-of-words match: the same
+        // lyrics in a different order must still accept.
+        let mut lines: Vec<&str> = VIVA_SYNCED.lines().collect();
+        lines.reverse();
+        assert_eq!(
+            youtube_crosscheck_verdict(&lines.join("\n"), VIVA_YOUTUBE),
+            YoutubeCrosscheckVerdict::Accept
+        );
+    }
+
+    // --- PR E: YouTube cross-check (end) ---
 
     // --- regression tests for the review fixes (end) ---
 }
