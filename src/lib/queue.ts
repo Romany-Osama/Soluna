@@ -14,6 +14,30 @@ export function shuffleInPlace<T>(values: T[], random: Random = Math.random): T[
 
 export type ShuffleOptions = { shuffle: boolean; playlistFirst: boolean; random?: Random };
 
+/** Repeat mode from the queue (`useQueue`): off, repeat the whole queue, repeat one song. */
+export type RepeatMode = "off" | "all" | "one";
+
+/**
+ * The next song a lyrics prefetch may warm (PR 1): exactly one song ahead in the
+ * arranged queue. Returns null when there is nothing safe to prefetch: end of
+ * queue, single-item queue, repeat-one (the next song is the current one, so its
+ * lyrics are already being fetched for this play), the next item is a local file,
+ * or the next item is the same song as the current one (same id).
+ */
+export function nextLyricsPrefetchTarget<T extends Keyed & { localPath?: string | null }>(
+  items: T[],
+  currentIndex: number,
+  repeatMode: RepeatMode,
+): T | null {
+  if (repeatMode === "one") return null;
+  if (currentIndex < 0 || currentIndex >= items.length) return null;
+  const next = items[currentIndex + 1];
+  if (!next) return null;
+  if (next.localPath) return null;
+  if (next.id === items[currentIndex].id) return null;
+  return next;
+}
+
 /**
  * Order a freshly started queue for the shuffle setting. The current item always moves to the front.
  * With "shuffle playlist first", the original items (indexes below `originalQueueSize`) play before radio additions.

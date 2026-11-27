@@ -4,6 +4,7 @@ import {
   arrangeQueue,
   mergeFailedPlayQueue,
   moveItem,
+  nextLyricsPrefetchTarget,
   removeAt,
   resolveFailedPlayRollback,
   shuffleAfterCurrent,
@@ -43,6 +44,46 @@ describe("arrangeQueue (QUEUE-001)", () => {
       expect([...ids(arranged.items.slice(1, 3))].sort()).toEqual(["p1", "p3"]);
       expect([...ids(arranged.items.slice(3))].sort()).toEqual(["r1", "r2", "r3"]);
     }
+  });
+});
+
+describe("nextLyricsPrefetchTarget (PR 1)", () => {
+  const local = (id: string) => ({ id, videoId: `v-${id}`, localPath: `/music/${id}.mp3` });
+
+  it("returns the next song in the arranged queue", () => {
+    const queue = songs("a", "b", "c");
+    expect(nextLyricsPrefetchTarget(queue, 0, "off")).toBe(queue[1]);
+    expect(nextLyricsPrefetchTarget(queue, 1, "off")).toBe(queue[2]);
+    expect(nextLyricsPrefetchTarget(queue, 1, "all")).toBe(queue[2]);
+  });
+
+  it("returns null at the end of the queue, for a single-item queue, or for an empty queue", () => {
+    expect(nextLyricsPrefetchTarget(songs("a", "b", "c"), 2, "off")).toBeNull();
+    expect(nextLyricsPrefetchTarget(songs("a"), 0, "off")).toBeNull();
+    expect(nextLyricsPrefetchTarget([], 0, "off")).toBeNull();
+  });
+
+  it("returns null on repeat-one: the next song is the current one", () => {
+    const queue = songs("a", "b", "c");
+    expect(nextLyricsPrefetchTarget(queue, 0, "one")).toBeNull();
+    expect(nextLyricsPrefetchTarget(queue, 1, "one")).toBeNull();
+  });
+
+  it("returns null when the next item is a local file, but not when the current one is", () => {
+    expect(nextLyricsPrefetchTarget([songs("a")[0], local("b"), songs("c")[0]], 0, "off")).toBeNull();
+    const queue = [local("a"), songs("b")[0]];
+    expect(nextLyricsPrefetchTarget(queue, 0, "off")).toBe(queue[1]);
+  });
+
+  it("returns null when the next item is the same song as the current one", () => {
+    const queue = songs("a", "a");
+    expect(nextLyricsPrefetchTarget(queue, 0, "off")).toBeNull();
+  });
+
+  it("returns null for an out-of-range index", () => {
+    const queue = songs("a", "b");
+    expect(nextLyricsPrefetchTarget(queue, -1, "off")).toBeNull();
+    expect(nextLyricsPrefetchTarget(queue, 5, "off")).toBeNull();
   });
 });
 

@@ -155,7 +155,7 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 
 | Command | Risk | Callers |
 | --- | --- | --- |
-| `fetch_lyrics` | remote-read | `features/lyrics/useLyrics.ts` |
+| `fetch_lyrics` | remote-read | `App.tsx`, `features/lyrics/lyricsPrefetch.ts`, `features/lyrics/useLyrics.ts` |
 | `fetch_lyrics_fresh` | remote-read | `features/lyrics/useLyrics.ts` |
 | `fetch_lyrics_from_provider` | remote-read | `features/lyrics/useLyrics.ts` |
 

@@ -22,6 +22,9 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
   const activeLyricRef = useRef<HTMLButtonElement | null>(null);
   // One lookup at a time (S5-009): a new song or provider cancels the lookup still running for the previous one.
   const lyricsRequestRef = useRef<AbortController | null>(null);
+  // Lyrics prefetch gate (PR 1): true once lyrics have been opened this session,
+  // whether by the expanded player or by the user tapping a lyrics button anywhere.
+  const lyricsOpenedThisSessionRef = useRef(false);
   useEffect(() => () => lyricsRequestRef.current?.abort(), []);
 
   const moveLyricsProvider = async (provider: string, direction: -1 | 1) => {
@@ -102,6 +105,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
   };
 
   const openLyrics = async (item: YtItem) => {
+    lyricsOpenedThisSessionRef.current = true;
     setLyricsItem(item);
     setLyricsProviderSelection("auto");
     await requestLyrics(item);
@@ -123,6 +127,7 @@ export function useLyrics({ setNotice, settings }: LyricsDeps) {
     setLyricsAutoScrollEnabled,
     lyricsContainerRef,
     activeLyricRef,
+    lyricsOpenedThisSessionRef,
     moveLyricsProvider,
     openLyrics,
     changeLyricsProvider,
