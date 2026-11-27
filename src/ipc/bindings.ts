@@ -189,6 +189,10 @@ export type IpcCommandMap = {
     args: { videoId: VideoId; playlistId?: YtId | null; audioQuality?: Keyword | null };
     result: ResolveModel<PlayerPayload>;
   };
+  player_cache_prefetch: {
+    args: { videoId: VideoId; playlistId?: YtId | null; audioQuality?: Keyword | null; requestId?: Token | null };
+    result: ResolveModel<void>;
+  };
   ytm_report_stream_failure: { args: { videoId: VideoId; streamUrl: LongText }; result: ResolveModel<void> };
   ytm_playback_report: { args: { videoId: VideoId }; result: ResolveModel<string> };
   history_add: { args: { item: YtItem }; result: ResolveModel<number> };

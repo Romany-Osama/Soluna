@@ -445,3 +445,266 @@ pub async fn ytm_player(
     }
     Ok(payload)
 }
+
+/// Prefetches the next song's audio into the playback cache (PR 2). Audio only: it resolves the
+/// stream and fills the cache file, and never fetches or writes lyrics — the fill's lyrics step
+/// would overwrite PR 1's cross-checked lyrics with an unchecked fill-loop lyric
+/// (`cache_fetched_lyrics` unconditionally upserts the primary row). It also never fetches
+/// artwork and never touches player state: the song-start path is unchanged, and a prefetched
+/// song is simply a cache hit when it starts. The fill runs in a non-cancelling job slot
+/// (`start_prefetch`): it never cancels the current song's fill, and a skip aborts the resolve
+/// via `request_cancel` while a fill already running keeps draining (bounded by
+/// `MAX_ACTIVE_JOBS`, cancelled by the next play's normal fill or by the app exiting).
+#[tauri::command]
+pub async fn player_cache_prefetch(
+    video_id: VideoId,
+    playlist_id: Opt<YtId>,
+    audio_quality: Opt<Keyword>,
+    state: tauri::State<'_, RuntimeState>,
+    request_id: Opt<Token>,
+) -> IpcResult<()> {
+    cancellable(
+        request_id.into_string(),
+        "Player cache prefetch",
+        player_cache_prefetch_body(video_id, playlist_id, audio_quality, &state),
+    )
+    .await
+}
+
+async fn player_cache_prefetch_body(
+    video_id: VideoId,
+    playlist_id: Opt<YtId>,
+    audio_quality: Opt<Keyword>,
+    state: &tauri::State<'_, RuntimeState>,
+) -> IpcResult<()> {
+    let video_id = video_id.into_inner();
+    let playlist_id = playlist_id.into_string();
+    let audio_quality = audio_quality.into_string();
+    let id = video_id.trim().to_owned();
+    if id.is_empty() {
+        return Err(IpcError::from("video id is empty".to_owned()));
+    }
+    let quality = normalize_audio_quality(audio_quality.as_deref());
+    // A song the user removed from the cache stays removed: unlike a play, a prefetch
+    // never un-blocks it.
+    if player_cache_is_blocked(&id) {
+        return Ok(());
+    }
+    let (cached, limit_mb) = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "database state poisoned".to_owned())?;
+        (
+            cached_player_file(&db, &id, quality)?,
+            player_cache_limit_mb(&db),
+        )
+    };
+    // Cache off (limit 0) or already cached: nothing to do, and no resolve is started.
+    if limit_mb == 0 || cached.is_some() {
+        return Ok(());
+    }
+    // Resolve the stream (same resolver as a play). This is the cancellable part: a skip
+    // aborts it via request_cancel before any fill starts, so no fill is ever spawned for
+    // a song that is no longer next.
+    let payload = resolve_player_payload(&id, playlist_id.as_deref(), quality, state).await?;
+    let cache_url = payload.stream_url;
+    let cache_id = id.clone();
+    let cache_path = player_cache_path(&cache_id);
+    // The song may have been cached by a play while the resolve was in flight: re-check
+    // before claiming a slot, so the same stream is never downloaded twice.
+    let cached_after_resolve = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "database state poisoned".to_owned())?;
+        cached_player_file(&db, &cache_id, quality)?
+    };
+    if cached_after_resolve.is_some() {
+        return Ok(());
+    }
+    // Claim a NON-CANCELLING job slot. AlreadyActive (this song's fill is already running)
+    // or Busy (both slots taken) means the song simply streams without caching.
+    let started = player_cache_jobs()
+        .lock()
+        .map_err(|_| "player cache state poisoned".to_owned())?
+        .start_prefetch(&cache_id);
+    if let player_cache::Start::Started(cancel) = started {
+        tokio::spawn(async move {
+            let part_path = PathBuf::from(format!("{}.part", cache_path.to_string_lossy()));
+            let result: Result<(), String> = async {
+                let bytes = player_cache::fill(
+                    http(),
+                    &cache_url,
+                    &part_path,
+                    &cancel,
+                    STALL_TIMEOUT,
+                    TRANSFER_TIMEOUT,
+                )
+                .await?;
+                if player_cache_is_blocked(&cache_id) {
+                    return Err("player cache was removed".to_owned());
+                }
+                fs::rename(&part_path, &cache_path)
+                    .map_err(|error| format!("player cache finalize failed: {error}"))?;
+                if player_cache_is_blocked(&cache_id) {
+                    let _ = fs::remove_file(&cache_path);
+                    return Err("player cache was removed".to_owned());
+                }
+                let db = Connection::open(database_path())
+                    .map_err(|error| format!("player cache database open failed: {error}"))?;
+                // Audio only: no lyrics fetch, no lyrics cache write, no artwork. The
+                // fill's lyrics step would overwrite PR 1's cross-checked lyrics with an
+                // unchecked fill-loop lyric, and a never-played song has no library row
+                // for the artwork step to read anyway.
+                commit_prefetch_cache_entry(
+                    &db,
+                    &cache_id,
+                    &cache_path.to_string_lossy(),
+                    bytes,
+                    quality,
+                )?;
+                Ok(())
+            }
+            .await;
+            if result.is_err() {
+                let _ = fs::remove_file(&part_path);
+            }
+            if let Ok(mut jobs) = player_cache_jobs().lock() {
+                jobs.finish(&cache_id);
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Commits a prefetched song's audio to the playback cache (audio row only) and applies the
+/// cache quota. No lyrics or artwork is written: `artwork_path` is NULL here, and the
+/// `COALESCE` keeps any artwork a previous play's fill already cached for this song.
+fn commit_prefetch_cache_entry(
+    db: &Connection,
+    song_id: &str,
+    path: &str,
+    bytes: i64,
+    quality: &str,
+) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality, artwork_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(song_id) DO UPDATE SET path=excluded.path, bytes=excluded.bytes, cached_at=excluded.cached_at, quality=excluded.quality, artwork_path=COALESCE(excluded.artwork_path, player_cache.artwork_path)",
+        params![song_id, path, bytes, now_seconds(), quality, None::<String>],
+    )
+    .map_err(|error| format!("player cache state write failed: {error}"))?;
+    enforce_player_cache_quota(db)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SCHEMA_SQL;
+
+    fn test_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA_SQL).unwrap();
+        db
+    }
+
+    fn lyrics_row_count(db: &Connection) -> i64 {
+        db.query_row("SELECT COUNT(*) FROM lyrics", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn lyrics_variant_count(db: &Connection) -> i64 {
+        db.query_row("SELECT COUNT(*) FROM lyrics_variants", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn prefetch_commit_writes_audio_only_no_lyrics_rows() {
+        // PR 2: the prefetch commit must never write lyrics — the fill's lyrics step
+        // would overwrite PR 1's cross-checked lyrics with an unchecked fill-loop lyric.
+        let db = test_db();
+        // A cross-checked lyrics row for this song already exists (PR 1's prefetch wrote it).
+        db.execute(
+            "INSERT INTO lyrics (song_id, provider, text, synced, fetched_at) VALUES (?1, 'LrcLib', '[00:01.00]la', 1, ?2)",
+            params!["song-a", now_seconds()],
+        )
+        .unwrap();
+        commit_prefetch_cache_entry(&db, "song-a", "/cache/song-a.audio", 4_194_304, "auto")
+            .unwrap();
+        let row: (String, i64, String) = db
+            .query_row(
+                "SELECT path, bytes, quality FROM player_cache WHERE song_id = ?1",
+                params!["song-a"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "/cache/song-a.audio".to_owned(),
+                4_194_304,
+                "auto".to_owned()
+            )
+        );
+        // The lyrics row is untouched (same provider, same text) and no variant appeared.
+        let lyrics: (String, String) = db
+            .query_row(
+                "SELECT provider, text FROM lyrics WHERE song_id = ?1",
+                params!["song-a"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(lyrics.0, "LrcLib");
+        assert_eq!(lyrics.1, "[00:01.00]la");
+        assert_eq!(lyrics_row_count(&db), 1);
+        assert_eq!(lyrics_variant_count(&db), 0);
+    }
+
+    #[test]
+    fn prefetch_commit_keeps_existing_artwork_on_recommit() {
+        // A play's fill cached artwork for this song; a later prefetch commit (artwork NULL)
+        // must not wipe it.
+        let db = test_db();
+        db.execute(
+            "INSERT INTO player_cache (song_id, path, bytes, cached_at, quality, artwork_path) VALUES (?1, '/cache/song-b.audio', 1024, ?2, 'auto', '/cache/song-b.jpg')",
+            params!["song-b", now_seconds()],
+        )
+        .unwrap();
+        commit_prefetch_cache_entry(&db, "song-b", "/cache/song-b.audio", 2_048, "auto").unwrap();
+        let artwork: Option<String> = db
+            .query_row(
+                "SELECT artwork_path FROM player_cache WHERE song_id = ?1",
+                params!["song-b"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artwork.as_deref(), Some("/cache/song-b.jpg"));
+        let bytes: i64 = db
+            .query_row(
+                "SELECT bytes FROM player_cache WHERE song_id = ?1",
+                params!["song-b"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bytes, 2_048);
+        assert_eq!(lyrics_row_count(&db), 0);
+        assert_eq!(lyrics_variant_count(&db), 0);
+    }
+
+    #[test]
+    fn prefetch_commit_applies_the_cache_quota() {
+        // With the cache turned off (limit 0) the quota evicts the row the commit just wrote.
+        let db = test_db();
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES ('playerCacheLimitMb', '0')",
+            [],
+        )
+        .unwrap();
+        commit_prefetch_cache_entry(&db, "song-c", "/cache/song-c.audio", 1_024, "auto").unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM player_cache", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(lyrics_row_count(&db), 0);
+    }
+}

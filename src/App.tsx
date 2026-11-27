@@ -37,6 +37,7 @@ import { HistoryScreen } from "./features/history/HistoryScreen";
 import { SearchScreen } from "./features/search/SearchScreen";
 import { LyricsPanel } from "./features/lyrics/LyricsPanel";
 import { createLyricsPrefetch, type LyricsPrefetch } from "./features/lyrics/lyricsPrefetch";
+import { createAudioPrefetch, shouldPrefetchAudio, type AudioPrefetch } from "./features/player/audioPrefetch";
 import { ExpandedPlayer } from "./features/player/ExpandedPlayer";
 import { QueuePanel } from "./features/queue/QueuePanel";
 import { PlayerBar } from "./features/player/PlayerBar";
@@ -183,6 +184,13 @@ function App() {
   // aborted on the next play or queue clear; never touches lyrics UI state.
   const lyricsPrefetchRef = useRef<LyricsPrefetch | null>(null);
   if (lyricsPrefetchRef.current === null) lyricsPrefetchRef.current = createLyricsPrefetch();
+  // Next-song audio prefetch (PR 2): one background `player_cache_prefetch` at a time,
+  // fired once per playback session near the end of the song, aborted on the next play
+  // or queue clear; disk cache only, never touches player state.
+  const audioPrefetchRef = useRef<AudioPrefetch | null>(null);
+  if (audioPrefetchRef.current === null) audioPrefetchRef.current = createAudioPrefetch();
+  // The playback session the audio prefetch already fired for (null = none yet).
+  const audioPrefetchFiredRef = useRef<number | null>(null);
   const [historySource, setHistorySource] = useState<HistorySource>("local");
   const [historyQuery, setHistoryQuery] = useState("");
   const [statsPeriod, setStatsPeriod] = useState<StatsPeriod>("all");
@@ -1694,6 +1702,7 @@ function App() {
   const clearQueue = () => {
     playRequestIdRef.current += 1;
     lyricsPrefetchRef.current?.abort();
+    audioPrefetchRef.current?.abort();
     activePlayerIdRef.current = null;
     audioRef.current?.pause();
     setQueueItems([]);
@@ -1759,6 +1768,8 @@ function App() {
     const requestId = ++playRequestIdRef.current;
     // A new play supersedes the previous song's lyrics prefetch (PR 1).
     lyricsPrefetchRef.current?.abort();
+    // ... and its audio prefetch (PR 2).
+    audioPrefetchRef.current?.abort();
     if (sourceQueue !== queueItems) autoMixEnabledRef.current = autoMixStart;
     if (item.localPath) {
       setNotice("");
@@ -1868,6 +1879,20 @@ function App() {
         setLyricsAutoScrollEnabled((current) => (current ? lyricsAutoScrollEnabled : current));
       }
       setNotice(`Playback unavailable: ${errorMessage(error)}`, "error");
+    }
+  };
+
+  // Next-song audio prefetch (PR 2): near the end of the current song, warm the next
+  // song's audio into the disk cache. Fires once per playback session; the module gates
+  // on online/cache-on and picks the target from the live queue, so a "play next" edit
+  // made mid-song is respected. Never touches player state. A plain callback (not an
+  // Effect Event): PlayerAudio re-renders with every App render, so the closure always
+  // sees the latest queue, and Effect Events cannot be passed down as props.
+  const handleAudioPrefetchTick = (currentTime: number, duration: number) => {
+    if (!shouldPrefetchAudio(currentTime, duration)) return;
+    if (audioPrefetchFiredRef.current === playbackSessionRef.current) return;
+    if (audioPrefetchRef.current?.prefetch(queueItems, queueIndex, repeatMode, audioQuality, sleepTimerEndOfSong)) {
+      audioPrefetchFiredRef.current = playbackSessionRef.current;
     }
   };
 
@@ -3020,6 +3045,7 @@ function App() {
         lyrics={lyrics}
         openLyrics={openLyrics}
         openPlayerMenu={openPlayerMenu}
+        onNearEnd={handleAudioPrefetchTick}
         playbackSeconds={playbackSeconds}
         player={player}
         playerItemState={playerItemState}

@@ -29,6 +29,7 @@ export type PlayerAudioProps = Pick<
   | "setQueueItems"
   | "settings"
   | "sleepTimerEndOfSong"
+  | "onNearEnd"
 >;
 
 export function PlayerAudio({
@@ -56,6 +57,7 @@ export function PlayerAudio({
   setQueueItems,
   settings,
   sleepTimerEndOfSong,
+  onNearEnd,
 }: PlayerAudioProps) {
   if (!player) return null;
   return (
@@ -69,6 +71,7 @@ export function PlayerAudio({
       onTimeUpdate={(event) => {
         setPlaybackSeconds(event.currentTarget.currentTime);
         recordPlaytime(event.currentTarget.currentTime);
+        onNearEnd?.(event.currentTarget.currentTime, event.currentTarget.duration);
       }}
       onPlay={() => {
         setIsPlaying(true);
