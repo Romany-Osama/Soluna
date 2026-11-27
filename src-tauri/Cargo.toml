@@ -16,7 +16,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+# The "test" feature is empty (no extra dependencies): it only exposes
+# tauri::test::mock_app, which the live YouTube cross-check chain test
+# uses to run the real on-demand chain with managed state. Without it the
+# test module is unavailable to downstream crates.
+tauri = { version = "2", features = ["protocol-asset", "test"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli", "deflate", "stream"] }
