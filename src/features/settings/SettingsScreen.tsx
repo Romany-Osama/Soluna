@@ -222,7 +222,7 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Enable Better Lyrics</strong>
-                        <small>Use the source TTML lyrics provider first when enabled.</small>
+                        <small>Use the source TTML lyrics provider (word-synced) when enabled.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -233,18 +233,20 @@ export function SettingsScreen({
                     <label className="setting-row">
                       <span>
                         <strong>Enable Paxsenix</strong>
-                        <small>Use the source Apple Music lyrics fallback after Better Lyrics when enabled.</small>
+                        <small>
+                          Use the source Apple Music lyrics fallback when enabled. Off by default until proven working.
+                        </small>
                       </span>
                       <input
                         type="checkbox"
-                        checked={settings.enablePaxsenix !== false}
+                        checked={settings.enablePaxsenix === true}
                         onChange={(event) => void setSetting("enablePaxsenix", event.target.checked)}
                       />
                     </label>
                     <label className="setting-row">
                       <span>
                         <strong>Enable LRCLIB</strong>
-                        <small>Use the source LRCLIB matching fallback when enabled.</small>
+                        <small>Use LRCLIB, the first official lyrics source, when enabled.</small>
                       </span>
                       <input
                         type="checkbox"
@@ -254,13 +256,46 @@ export function SettingsScreen({
                     </label>
                     <label className="setting-row">
                       <span>
+                        <strong>Enable Lyrics.ovh</strong>
+                        <small>Use Lyrics.ovh, the second official lyrics source (plain text), when enabled.</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={settings.enableLyricsOvh !== false}
+                        onChange={(event) => void setSetting("enableLyricsOvh", event.target.checked)}
+                      />
+                    </label>
+                    <label className="setting-row">
+                      <span>
                         <strong>Enable KuGou</strong>
-                        <small>Use the source KuGou LRC fallback after LRCLIB when enabled.</small>
+                        <small>Use the source KuGou LRC fallback when enabled.</small>
                       </span>
                       <input
                         type="checkbox"
                         checked={settings.enableKugou !== false}
                         onChange={(event) => void setSetting("enableKugou", event.target.checked)}
+                      />
+                    </label>
+                    <label className="setting-row">
+                      <span>
+                        <strong>Enable QQ Music</strong>
+                        <small>Use the source QQ Music LRC fallback when enabled.</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={settings.enableQQMusic !== false}
+                        onChange={(event) => void setSetting("enableQQMusic", event.target.checked)}
+                      />
+                    </label>
+                    <label className="setting-row">
+                      <span>
+                        <strong>Enable NetEase</strong>
+                        <small>Use the source NetEase Cloud Music LRC fallback when enabled.</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={settings.enableNetEase !== false}
+                        onChange={(event) => void setSetting("enableNetEase", event.target.checked)}
                       />
                     </label>
                     <label className="setting-row">

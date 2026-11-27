@@ -123,11 +123,14 @@ async fn fetch_lyrics_from_provider_body(
     let album = album.into_string();
     let id = id.into_string();
     let provider = provider.into_inner();
-    const PROVIDERS: [&str; 8] = [
-        "BetterLyrics",
-        "Paxsenix",
+    const PROVIDERS: [&str; 11] = [
         "LrcLib",
+        "LyricsOvh",
+        "BetterLyrics",
+        "QQMusic",
+        "NetEase",
         "KuGou",
+        "Paxsenix",
         "LyricsPlus",
         "Musixmatch",
         "YouTubeSubtitle",

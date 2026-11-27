@@ -35,6 +35,10 @@ const WEB_REMIX_ID: &str = "67";
 const YOUTUBE_API_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX3";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0";
+/// The identifying User-Agent sent to LRCLIB (PR C). LRCLIB rate-limits
+/// generic browser UAs into its lowest bucket (~45 requests/min); an
+/// identified client gets a higher one (~90-180/min).
+const LRCLIB_USER_AGENT: &str = "Soluna/0.5.0 (github.com/Romany-Osama/Soluna)";
 const VISITOR_PREFIX: &str = "Cg";
 
 mod download_resume;
@@ -4744,6 +4748,11 @@ struct LrcLibTrack {
     duration: f64,
     plain_lyrics: Option<String>,
     synced_lyrics: Option<String>,
+    /// Per-word timings as YAML (`lines:` with `start_ms`/`end_ms` and a
+    /// `words:` list per line). LrcLib ships this in the search response;
+    /// when present with words it makes the first hit word-synced (PR C).
+    #[serde(default)]
+    lyricsfile: Option<String>,
     #[serde(default)]
     instrumental: bool,
 }
@@ -5528,6 +5537,40 @@ fn kugou_lrc_matches(text: &str, title: &str, artist: &str) -> bool {
     true
 }
 
+/// KuGou sometimes returns a wrong-song placeholder file for a hash it
+/// cannot match: a single timestamped line ("[ti:June] 纯音乐，请欣赏",
+/// 167 chars) for a different instrumental track. The probe saw it for
+/// 2/13 songs, and the old code accepted and cached it as a 1-line synced
+/// hit. Reject any payload too thin to trust (under five timestamped
+/// lines) and the known placeholder by name.
+fn kugou_payload_is_usable(text: &str) -> bool {
+    let mut timed_lines = 0;
+    let mut lyric_lines: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(tag) = trimmed
+            .strip_prefix('[')
+            .and_then(|rest| rest.split(']').next())
+        {
+            if parse_provider_time(tag).is_some() {
+                timed_lines += 1;
+                lyric_lines.push(trimmed);
+            }
+        }
+    }
+    if timed_lines < 5 {
+        return false;
+    }
+    // The known placeholder is a single line even when it somehow arrives
+    // padded; name it explicitly so a future variant is caught too.
+    !(lyric_lines.len() == 1
+        && (lyric_lines[0].contains("纯音乐")
+            || lyric_lines[0].to_lowercase().contains("pure music")))
+}
+
 async fn kugou_fetch(
     title: &str,
     artist: &str,
@@ -5600,7 +5643,7 @@ async fn kugou_fetch(
             continue;
         }
         let normalized = kugou_normalize_lrc(&raw);
-        if !normalized.is_empty() {
+        if !normalized.is_empty() && kugou_payload_is_usable(&normalized) {
             return Some(normalized);
         }
     }
@@ -5641,7 +5684,7 @@ async fn kugou_fetch(
         return None;
     }
     let normalized = kugou_normalize_lrc(&raw);
-    (!normalized.is_empty()).then_some(normalized)
+    (!normalized.is_empty() && kugou_payload_is_usable(&normalized)).then_some(normalized)
 }
 
 /// A token.get answer worth using: non-empty, not the "UpgradeOnly" denial,
@@ -5877,6 +5920,7 @@ async fn lrclib_search(
     }
     let response = match http()
         .get("https://lrclib.net/api/search")
+        .header("User-Agent", LRCLIB_USER_AGENT)
         .query(&params)
         .send()
         .await
@@ -5898,9 +5942,92 @@ fn duration_delta(track: &LrcLibTrack, duration: i32) -> i32 {
     (track.duration.round() as i32 - duration).abs()
 }
 
+/// Fold common traditional Chinese characters to their simplified form so
+/// that a traditional-script record (童話) and a simplified one (童话) score
+/// as the same song. The probe measured a 20-point identity loss from this
+/// difference alone. The table is deliberately small (~100 high-frequency
+/// variants); it is a similarity aid, not a transliterator — a romanized
+/// query ("Tong Hua") still scores 0 against native script, as it should.
+fn fold_cjk_variants(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| match c {
+            '話' => '话',
+            '說' => '说',
+            '學' => '学',
+            '國' => '国',
+            '會' => '会',
+            '時' => '时',
+            '間' => '间',
+            '東' => '东',
+            '長' => '长',
+            '樂' => '乐',
+            '愛' => '爱',
+            '親' => '亲',
+            '對' => '对',
+            '發' => '发',
+            '無' => '无',
+            '與' => '与',
+            '還' => '还',
+            '這' => '这',
+            '個' => '个',
+            '們' => '们',
+            '麼' => '么',
+            '後' => '后',
+            '裡' => '里',
+            '處' => '处',
+            '從' => '从',
+            '來' => '来',
+            '過' => '过',
+            '進' => '进',
+            '遠' => '远',
+            '聽' => '听',
+            '見' => '见',
+            '讀' => '读',
+            '寫' => '写',
+            '開' => '开',
+            '關' => '关',
+            '門' => '门',
+            '車' => '车',
+            '馬' => '马',
+            '鳥' => '鸟',
+            '魚' => '鱼',
+            '龍' => '龙',
+            '鳳' => '凤',
+            '雲' => '云',
+            '電' => '电',
+            '風' => '风',
+            '夢' => '梦',
+            '記' => '记',
+            '憶' => '忆',
+            '歡' => '欢',
+            '淚' => '泪',
+            '聲' => '声',
+            '畫' => '画',
+            '書' => '书',
+            '紙' => '纸',
+            '筆' => '笔',
+            '錢' => '钱',
+            '買' => '买',
+            '賣' => '卖',
+            '價' => '价',
+            '廣' => '广',
+            '歲' => '岁',
+            '萬' => '万',
+            '億' => '亿',
+            '點' => '点',
+            '線' => '线',
+            '麵' => '面',
+            '頭' => '头',
+            '體' => '体',
+            _ => c,
+        })
+        .collect()
+}
+
 fn lyrics_similarity(left: &str, right: &str) -> f64 {
-    let left = left.trim().to_lowercase();
-    let right = right.trim().to_lowercase();
+    let left = fold_cjk_variants(&left.trim().to_lowercase());
+    let right = fold_cjk_variants(&right.trim().to_lowercase());
     if left == right {
         return 1.0;
     }
@@ -5927,6 +6054,400 @@ fn lyrics_similarity(left: &str, right: &str) -> f64 {
     1.0 - (previous[right_bytes.len()] as f64 / left_bytes.len().max(right_bytes.len()) as f64)
 }
 
+/// Romany's matcher rule (2026-11-27): title and artist must match closely,
+/// a small duration difference (about 10s) is accepted with the closest
+/// length winning, and past 10s a candidate is accepted only when the title
+/// and artist match exactly AND the last lyric timestamp fits the song's
+/// length. When unsure, reject — no lyrics beats wrong lyrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LyricsCandidateVerdict {
+    /// The candidate matches within the 10s duration window.
+    Accept,
+    /// Title and artist match exactly but the duration is past 10s: the
+    /// caller must check the lyrics' last timestamp before accepting.
+    AcceptIfLyricsFit,
+    /// Not this song (or not provably this song): never use it.
+    Reject,
+}
+
+/// Identity score: title counts 40, artist 30, duration 30/25/10 for a
+/// difference within 2s / 5s / 10s, and −20 past that. A candidate needs
+/// 70 to be accepted inside the window, so a weak title or artist alone
+/// can never carry it (the probe used the same weights).
+fn lyrics_identity_score(title_sim: f64, artist_sim: f64, duration_diff_secs: Option<i64>) -> f64 {
+    let duration_points = match duration_diff_secs {
+        Some(diff) if diff <= 2 => 30.0,
+        Some(diff) if diff <= 5 => 25.0,
+        Some(diff) if diff <= 10 => 10.0,
+        Some(_) => -20.0,
+        None => 0.0,
+    };
+    title_sim * 40.0 + artist_sim * 30.0 + duration_points
+}
+
+/// Whole-token markers for a different version of the same song (live,
+/// remix, cover, acoustic, instrumental, karaoke, …). Token-based, so a
+/// title like "Alive" — which merely contains "live" — is not rejected.
+fn lyrics_title_is_bad_version(title: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "live",
+        "remix",
+        "cover",
+        "acoustic",
+        "instrumental",
+        "karaoke",
+        "remaster",
+        "demo",
+        "tribute",
+        "nightcore",
+        "8d",
+    ];
+    let tokens: Vec<String> = title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if tokens.iter().any(|token| MARKERS.contains(&token.as_str())) {
+        return true;
+    }
+    tokens.windows(2).any(|pair| {
+        (pair[0] == "sped" && pair[1] == "up") || (pair[0] == "slowed" && pair[1] == "down")
+    })
+}
+
+/// The first artist of a possibly multi-artist string ("Abu, Yousra" →
+/// "Abu"), using the same separators the lyrics artist cleaning uses.
+fn lyrics_first_artist(artist: &str) -> String {
+    clean_lyrics_artist(artist)
+}
+
+fn lyrics_candidate_verdict(
+    title: &str,
+    artist: &str,
+    duration: i32,
+    cand_title: &str,
+    cand_artist: &str,
+    cand_duration: Option<i64>,
+) -> LyricsCandidateVerdict {
+    if lyrics_title_is_bad_version(cand_title) {
+        return LyricsCandidateVerdict::Reject;
+    }
+    let title_sim = lyrics_similarity(title, cand_title);
+    let artist_sim = lyrics_similarity(artist, cand_artist);
+    if title_sim < 0.7 || artist_sim < 0.5 {
+        return LyricsCandidateVerdict::Reject;
+    }
+    let diff = match (duration >= 0, cand_duration) {
+        (true, Some(cand)) => Some((cand - i64::from(duration)).abs()),
+        _ => None,
+    };
+    if let Some(diff) = diff {
+        if diff > 10 {
+            // Past the window: only an exact title + exact first artist
+            // may proceed, and only if the lyrics themselves fit.
+            let title_exact = fold_cjk_variants(&title.trim().to_lowercase())
+                == fold_cjk_variants(&cand_title.trim().to_lowercase());
+            let artist_exact = fold_cjk_variants(&artist.trim().to_lowercase())
+                == fold_cjk_variants(&lyrics_first_artist(cand_artist).trim().to_lowercase());
+            return if title_exact && artist_exact {
+                LyricsCandidateVerdict::AcceptIfLyricsFit
+            } else {
+                LyricsCandidateVerdict::Reject
+            };
+        }
+    }
+    if lyrics_identity_score(title_sim, artist_sim, diff) >= 70.0 {
+        LyricsCandidateVerdict::Accept
+    } else {
+        LyricsCandidateVerdict::Reject
+    }
+}
+
+/// The last lyric timestamp must not run past the song's end by more than
+/// 5s. A file that ends early (outro) fits; a longer master whose lyrics
+/// run 30s past the song (NetEase 3 Daqat: lyrics to 308s, song 275s)
+/// does not.
+fn lyrics_last_timestamp_fits(last_ts_ms: i64, song_duration_secs: i32) -> bool {
+    song_duration_secs < 0 || last_ts_ms <= i64::from(song_duration_secs) * 1000 + 5000
+}
+
+/// The latest `[mm:ss.xx]` timestamp in an LRC payload, if any.
+fn last_timestamp_ms(lrc: &str) -> Option<i64> {
+    let mut last: Option<i64> = None;
+    for line in lrc.lines() {
+        let mut rest = line;
+        while let Some(open) = rest.find('[') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find(']') else { break };
+            if let Some(ms) = parse_provider_time(&after[..close]) {
+                last = Some(last.map_or(ms, |current: i64| current.max(ms)));
+            }
+            rest = &after[close + 1..];
+        }
+    }
+    last
+}
+
+/// One line of a LrcLib `lyricsfile` document: the line text and time, and
+/// its word timings (empty when the line is line-level only).
+struct LyricsFileLine {
+    text: String,
+    start_ms: i64,
+    end_ms: i64,
+    words: Vec<(i64, String)>,
+}
+
+/// Parse a LrcLib `lyricsfile` YAML document by hand (no serde_yaml in the
+/// crate, and the shape is small and fixed). Real shape, verified live:
+/// a `version:`/`metadata:` header, then `lines:` with `- text:` at column
+/// 0, `start_ms:`/`end_ms:` at column 2, `words:` at column 2, word
+/// `- text:` at column 2 and word `start_ms:` at column 4. Word text is
+/// single-quoted and keeps its trailing space (`'I '`); `''` is an escaped
+/// apostrophe. A trailing plain-text block after the lines is ignored — the
+/// parse stops at the first column-0 line that is not a `- text:` line once
+/// inside `lines:`. Lines without times are skipped, never invented.
+fn parse_lrclib_lyricsfile(value: &str) -> Vec<LyricsFileLine> {
+    fn yaml_value(line: &str) -> Option<String> {
+        let value = line.split_once(':')?.1.trim();
+        if value.is_empty() {
+            return None;
+        }
+        let value = value
+            .strip_prefix('\'')
+            .and_then(|v| v.strip_suffix('\''))
+            .map_or(value, |v| v);
+        // Single-quoted YAML doubles a quote to escape it.
+        Some(value.replace("''", "'"))
+    }
+
+    let mut lines = Vec::new();
+    let mut in_lines = false;
+    let mut current: Option<LyricsFileLine> = None;
+    let mut in_words = false;
+    let mut word_text: Option<String> = None;
+    let finish_line = |current: &mut Option<LyricsFileLine>, lines: &mut Vec<LyricsFileLine>| {
+        if let Some(line) = current.take() {
+            lines.push(line);
+        }
+    };
+    for raw in value.lines() {
+        let indent = raw.len() - raw.trim_start().len();
+        let line = raw.trim_start();
+        if !in_lines {
+            if line == "lines:" {
+                in_lines = true;
+            }
+            continue;
+        }
+        if indent == 0 {
+            // End of the `lines:` block (the trailing plain-text block).
+            if line.starts_with("- text:") {
+                finish_line(&mut current, &mut lines);
+                let Some(text) = yaml_value(line) else {
+                    continue;
+                };
+                current = Some(LyricsFileLine {
+                    text,
+                    start_ms: -1,
+                    end_ms: -1,
+                    words: Vec::new(),
+                });
+                in_words = false;
+            } else {
+                break;
+            }
+            continue;
+        }
+        if indent == 2 {
+            if in_words && line.starts_with("- text:") {
+                // A word entry: same indent as the line's own fields, but
+                // inside the `words:` list.
+                word_text = yaml_value(line);
+            } else if line.starts_with("- text:") {
+                finish_line(&mut current, &mut lines);
+                let Some(text) = yaml_value(line) else {
+                    continue;
+                };
+                current = Some(LyricsFileLine {
+                    text,
+                    start_ms: -1,
+                    end_ms: -1,
+                    words: Vec::new(),
+                });
+                in_words = false;
+            } else if line == "words:" {
+                in_words = true;
+            } else if let Some(rest) = line.strip_prefix("start_ms:") {
+                if let Some(current) = current.as_mut() {
+                    if !in_words {
+                        if let Ok(ms) = rest.trim().parse::<i64>() {
+                            current.start_ms = ms;
+                        }
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("end_ms:") {
+                if let Some(current) = current.as_mut() {
+                    if !in_words {
+                        if let Ok(ms) = rest.trim().parse::<i64>() {
+                            current.end_ms = ms;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if indent == 4 && in_words {
+            if line.starts_with("- text:") {
+                word_text = yaml_value(line);
+            } else if let Some(rest) = line.strip_prefix("start_ms:") {
+                if let (Some(text), Some(current)) = (word_text.take(), current.as_mut()) {
+                    if let Ok(ms) = rest.trim().parse::<i64>() {
+                        current.words.push((ms, text));
+                    }
+                }
+            }
+        }
+    }
+    finish_line(&mut current, &mut lines);
+    lines.retain(|line| line.start_ms >= 0);
+    lines
+}
+
+/// How many word timings a `lyricsfile` document carries.
+fn lyricsfile_word_count(value: &str) -> usize {
+    parse_lrclib_lyricsfile(value)
+        .iter()
+        .map(|line| line.words.len())
+        .sum()
+}
+
+fn format_lrc_time(ms: i64) -> String {
+    format!("{:02}:{:05.2}", ms / 60_000, (ms % 60_000) as f64 / 1000.0)
+}
+
+/// Render parsed `lyricsfile` lines as enhanced LRC with inline word tags
+/// (`[00:13.49]I <00:13.62>used …`), the same shape `betterlyrics_to_lrc`
+/// produces, so the shared `parse_lyric_lines` gives the words back.
+/// Lines without words stay plain line-level LRC.
+fn lyricsfile_to_lrc(lines: &[LyricsFileLine]) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            if line.words.is_empty() {
+                format!("[{}]{}", format_lrc_time(line.start_ms), line.text)
+            } else {
+                let mut out = format!("[{}]", format_lrc_time(line.start_ms));
+                for (index, (start_ms, text)) in line.words.iter().enumerate() {
+                    if index == 0 {
+                        out.push_str(text);
+                    } else {
+                        out.push_str(&format!("<{}>{}", format_lrc_time(*start_ms), text));
+                    }
+                }
+                out
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The lyrics text for an LrcLib track, preferring the `lyricsfile`
+/// word-timings when they yield any words, then line-level synced lyrics,
+/// then plain lyrics. Returns the text and whether it is synced.
+fn lrclib_track_lyrics(track: &LrcLibTrack) -> Option<(String, bool)> {
+    if let Some(lyricsfile) = &track.lyricsfile {
+        let lines = parse_lrclib_lyricsfile(lyricsfile);
+        if lines.iter().any(|line| !line.words.is_empty()) {
+            return Some((lyricsfile_to_lrc(&lines), true));
+        }
+    }
+    if let Some(synced) = &track.synced_lyrics {
+        return Some((synced.clone(), true));
+    }
+    track.plain_lyrics.clone().map(|text| (text, false))
+}
+
+/// The last lyric timestamp of an LrcLib track (from its chosen lyrics
+/// text), for the beyond-10s fit check.
+fn lrclib_track_last_timestamp_ms(track: &LrcLibTrack) -> Option<i64> {
+    lrclib_track_lyrics(track).and_then(|(text, _)| last_timestamp_ms(&text))
+}
+
+/// Pick the best LrcLib track for a song under Romany's matcher rule.
+/// Ranked by identity score, then word-sync over line-sync, then most
+/// words/lines, then smallest duration difference. A beyond-10s exact
+/// match is only picked when its lyrics fit the song's length.
+fn select_lrclib_track<'a>(
+    tracks: &'a [LrcLibTrack],
+    title: &str,
+    artist: &str,
+    duration: i32,
+) -> Option<&'a LrcLibTrack> {
+    let mut best: Option<(&LrcLibTrack, f64, bool, usize, i64)> = None;
+    for track in tracks {
+        if track.instrumental {
+            continue;
+        }
+        let cand_duration = Some(track.duration.round() as i64);
+        let verdict = lyrics_candidate_verdict(
+            title,
+            artist,
+            duration,
+            &track.track_name,
+            &track.artist_name,
+            cand_duration,
+        );
+        let title_sim = lyrics_similarity(title, &track.track_name);
+        let artist_sim = lyrics_similarity(artist, &track.artist_name);
+        let diff = match (duration >= 0, cand_duration) {
+            (true, Some(cand)) => Some((cand - i64::from(duration)).abs()),
+            _ => None,
+        };
+        let score = lyrics_identity_score(title_sim, artist_sim, diff);
+        let accepted = match verdict {
+            LyricsCandidateVerdict::Accept => true,
+            LyricsCandidateVerdict::AcceptIfLyricsFit => lrclib_track_last_timestamp_ms(track)
+                .map(|last| lyrics_last_timestamp_fits(last, duration))
+                .unwrap_or(false),
+            LyricsCandidateVerdict::Reject => false,
+        };
+        if !accepted {
+            continue;
+        }
+        let word_count = track
+            .lyricsfile
+            .as_deref()
+            .map(lyricsfile_word_count)
+            .unwrap_or(0);
+        let has_words = word_count > 0;
+        let line_count = lrclib_track_lyrics(track)
+            .map(|(text, _)| text.lines().count())
+            .unwrap_or(0);
+        let size = if has_words { word_count } else { line_count };
+        let diff = diff.unwrap_or(i64::MAX);
+        let candidate = (track, score, has_words, size, diff);
+        let better = match &best {
+            None => true,
+            Some((_, best_score, best_words, best_size, best_diff)) => {
+                candidate.1 > *best_score
+                    || (candidate.1 == *best_score && candidate.2 && !*best_words)
+                    || (candidate.1 == *best_score
+                        && candidate.2 == *best_words
+                        && candidate.3 > *best_size)
+                    || (candidate.1 == *best_score
+                        && candidate.2 == *best_words
+                        && candidate.3 == *best_size
+                        && candidate.4 < *best_diff)
+            }
+        };
+        if better {
+            best = Some(candidate);
+        }
+    }
+    best.map(|(track, _, _, _, _)| track)
+}
+
 fn lyric_setting_enabled(db: &Connection, key: &str, default: bool) -> Result<bool, String> {
     Ok(setting_value(db, key)?
         .map(|value| value == "true")
@@ -5934,11 +6455,19 @@ fn lyric_setting_enabled(db: &Connection, key: &str, default: bool) -> Result<bo
 }
 
 fn ordered_lyrics_providers(db: &Connection) -> Result<Vec<String>, String> {
-    const REGISTRY_ORDER: [&str; 8] = [
-        "BetterLyrics",
-        "Paxsenix",
+    // PR C canonical order (Romany's decision): official providers first
+    // (LrcLib, LyricsOvh), then the unofficial group (BetterLyrics,
+    // QQMusic, NetEase, KuGou, Paxsenix, LyricsPlus, Musixmatch), then
+    // the video providers. The frontend's `lyricsProviderNames` must
+    // match this list from a fresh install.
+    const REGISTRY_ORDER: [&str; 11] = [
         "LrcLib",
+        "LyricsOvh",
+        "BetterLyrics",
+        "QQMusic",
+        "NetEase",
         "KuGou",
+        "Paxsenix",
         "LyricsPlus",
         "Musixmatch",
         "YouTubeSubtitle",
@@ -5946,19 +6475,10 @@ fn ordered_lyrics_providers(db: &Connection) -> Result<Vec<String>, String> {
     ];
     let stored = setting_value(db, "lyricsProviderOrder")?.unwrap_or_default();
     if stored.trim().is_empty() {
-        // LyricsHelper's backward-compatible blank-order path defaults to LRCLIB.
-        return Ok(vec![
-            "LrcLib",
-            "BetterLyrics",
-            "Paxsenix",
-            "KuGou",
-            "LyricsPlus",
-            "YouTubeSubtitle",
-            "YouTube",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect());
+        return Ok(REGISTRY_ORDER
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect());
     }
     let mut result = Vec::new();
     for provider in stored.split(',').map(str::trim) {
@@ -6033,6 +6553,223 @@ fn make_lyrics_payload(
     }
 }
 
+/// Strip leading credit lines (producer / lyricist / composer / arranger)
+/// from the head of a lyrics payload. Only the head is stripped: a
+/// credit-style line mid-song is a lyric, not a credit, and is kept.
+fn strip_leading_credit_lines(value: &str) -> String {
+    const CREDIT_PREFIXES: &[&str] = &[
+        "制作人",
+        "作词",
+        "作曲",
+        "编曲",
+        "演唱",
+        "混音",
+        "录音",
+        "监制",
+        "出品",
+        "producer",
+        "lyrics",
+        "lyricist",
+        "composer",
+        "arranger",
+        "written by",
+        "produced by",
+        "music by",
+        "words by",
+        "mixed by",
+        "recorded by",
+    ];
+    let mut start = 0;
+    for (index, line) in value.lines().enumerate() {
+        let text = line
+            .split_once(']')
+            .map(|(_, rest)| rest.trim_start())
+            .unwrap_or(line)
+            .trim_start();
+        let lowered = text.to_lowercase();
+        let is_credit = CREDIT_PREFIXES.iter().any(|prefix| {
+            lowered.starts_with(prefix)
+                && lowered[prefix.len()..]
+                    .trim_start()
+                    .starts_with([':', '：'])
+        });
+        if is_credit {
+            start = index + 1;
+        } else {
+            break;
+        }
+    }
+    value.lines().skip(start).collect::<Vec<_>>().join("\n")
+}
+
+/// Fetch a NetEase song's lyrics by its search-result id. Only the
+/// line-level `lrc` field is read — the word-synced `yrc` field never
+/// appeared in the probe (11/11 songs).
+async fn netease_lyrics_by_id(id: &Value) -> Option<String> {
+    let id = id.to_string();
+    let response: Value = provider_json(
+        http()
+            .get("https://music.163.com/api/song/lyric")
+            .header("Referer", "https://music.163.com/")
+            .query(&[("id", id.as_str()), ("lv", "-1"), ("tv", "-1")]),
+    )
+    .await?;
+    let lyric = response.pointer("/lrc/lyric").and_then(Value::as_str)?;
+    let stripped = strip_leading_credit_lines(lyric);
+    (!stripped.trim().is_empty()).then_some(stripped)
+}
+
+/// NetEase Cloud Music (unofficial tier): search, then fetch the song's
+/// lyrics. Line-level only. The search and lyric endpoints are NetEase's
+/// own internal APIs (no permission granted); the Referer header is
+/// required. Candidates go through Romany's matcher rule: the best
+/// candidate inside the 10s window first; if none, the best exact-name
+/// candidate past the window, whose lyrics must then fit the song.
+async fn netease_fetch(title: &str, artist: &str, duration: i32) -> Option<String> {
+    let search: Value = provider_json(
+        http()
+            .get("https://music.163.com/api/cloudsearch/pc")
+            .header("Referer", "https://music.163.com/")
+            .query(&[
+                ("s", format!("{title} {artist}")),
+                ("type", "1".to_owned()),
+                ("limit", "10".to_owned()),
+                ("offset", "0".to_owned()),
+            ]),
+    )
+    .await?;
+    let songs = search.pointer("/result/songs").and_then(Value::as_array)?;
+    let mut exact_fallback: Option<&Value> = None;
+    for song in songs {
+        let name = song.get("name").and_then(Value::as_str).unwrap_or("");
+        let artists = song
+            .get("ar")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.get("name").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let song_duration = song.get("dt").and_then(Value::as_i64).map(|ms| ms / 1000);
+        match lyrics_candidate_verdict(title, artist, duration, name, &artists, song_duration) {
+            LyricsCandidateVerdict::Accept => {
+                let Some(id) = song.get("id") else { continue };
+                return netease_lyrics_by_id(id).await;
+            }
+            LyricsCandidateVerdict::AcceptIfLyricsFit => {
+                if exact_fallback.is_none() {
+                    exact_fallback = Some(song);
+                }
+            }
+            LyricsCandidateVerdict::Reject => {}
+        }
+    }
+    let song = exact_fallback?;
+    let id = song.get("id")?;
+    let text = netease_lyrics_by_id(id).await?;
+    let last = last_timestamp_ms(&text)?;
+    lyrics_last_timestamp_fits(last, duration).then_some(text)
+}
+
+/// Fetch a QQ Music song's lyrics by its `songmid`. The lyric endpoint
+/// returns base64 LRC; the [ti:]/[ar:] tag check is the same one KuGou
+/// uses, so a wrong-song payload is rejected here too.
+async fn qqmusic_lyrics_by_mid(songmid: &str, title: &str, artist: &str) -> Option<String> {
+    let response: Value = provider_json(
+        http()
+            .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
+            .header("Referer", "https://y.qq.com/")
+            .query(&[("g_tk", "5381"), ("format", "json"), ("songmid", songmid)]),
+    )
+    .await?;
+    if response.get("retcode").and_then(Value::as_i64) != Some(0) {
+        return None;
+    }
+    let encoded = response.get("lyric").and_then(Value::as_str)?;
+    let decoded = BASE64.decode(encoded).ok()?;
+    let raw = String::from_utf8_lossy(&decoded).into_owned();
+    if !kugou_lrc_matches(&raw, title, artist) {
+        return None;
+    }
+    let normalized = kugou_normalize_lrc(&raw);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+/// QQ Music (unofficial tier): search, then fetch the song's lyrics.
+/// Line-level only — no working QRC (word-synced) endpoint was found in
+/// the probe, so nothing here builds on word timings. The `g_tk=5381`
+/// parameter and Referer header are required. Candidates go through
+/// Romany's matcher rule, as in `netease_fetch`.
+async fn qqmusic_fetch(title: &str, artist: &str, duration: i32) -> Option<String> {
+    let keyword = format!("{title} {artist}");
+    let search: Value = provider_json(
+        http()
+            .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
+            .header("Referer", "https://y.qq.com/")
+            .query(&[
+                ("g_tk", "5381"),
+                ("format", "json"),
+                ("w", keyword.as_str()),
+                ("n", "10"),
+                ("p", "1"),
+                ("t", "0"),
+            ]),
+    )
+    .await?;
+    let songs = search
+        .pointer("/data/song/list")
+        .and_then(Value::as_array)?;
+    let mut exact_fallback: Option<&Value> = None;
+    for song in songs {
+        let name = song.get("songname").and_then(Value::as_str).unwrap_or("");
+        let singer = song
+            .get("singer")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.get("name").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let song_duration = song.get("interval").and_then(Value::as_i64);
+        match lyrics_candidate_verdict(title, artist, duration, name, &singer, song_duration) {
+            LyricsCandidateVerdict::Accept => {
+                let Some(songmid) = song.get("songmid").and_then(Value::as_str) else {
+                    continue;
+                };
+                return qqmusic_lyrics_by_mid(songmid, title, artist).await;
+            }
+            LyricsCandidateVerdict::AcceptIfLyricsFit => {
+                if exact_fallback.is_none() {
+                    exact_fallback = Some(song);
+                }
+            }
+            LyricsCandidateVerdict::Reject => {}
+        }
+    }
+    let song = exact_fallback?;
+    let songmid = song.get("songmid").and_then(Value::as_str)?;
+    let text = qqmusic_lyrics_by_mid(songmid, title, artist).await?;
+    let last = last_timestamp_ms(&text)?;
+    lyrics_last_timestamp_fits(last, duration).then_some(text)
+}
+
+/// Lyrics.ovh (official tier, plain text only): a direct lookup by artist
+/// and title — no candidates, so no matcher is involved. A 404 (or any
+/// error) is simply "no lyrics here", not an error worth surfacing.
+async fn lyricsovh_fetch(title: &str, artist: &str) -> Option<String> {
+    let mut url = url::Url::parse("https://api.lyrics.ovh/v1/").ok()?;
+    url.path_segments_mut().ok()?.push(artist).push(title);
+    let response: Value = provider_json(http().get(url)).await?;
+    let lyrics = response.get("lyrics").and_then(Value::as_str)?;
+    (!lyrics.trim().is_empty()).then(|| lyrics.to_owned())
+}
+
 /// Fetch lyrics from one provider without a live `tauri::State`, for the background
 /// player-cache fill (a detached task cannot hold `State`). `youtube` carries the
 /// visitor data and auth session the YouTube watch-page provider needs, resolved from
@@ -6073,7 +6810,9 @@ async fn fetch_lyrics_provider_for_cache(
             let valid = |tracks: Vec<LrcLibTrack>| {
                 tracks
                     .into_iter()
-                    .filter(|track| track.synced_lyrics.is_some() || track.plain_lyrics.is_some())
+                    .filter(|track| {
+                        lrclib_track_lyrics(track).is_some_and(|(text, _)| !text.is_empty())
+                    })
                     .collect::<Vec<_>>()
             };
             // Same four attempts as before, in order, stopping at the first
@@ -6100,55 +6839,20 @@ async fn fetch_lyrics_provider_for_cache(
                 }
             }
             instrumental = lrclib_instrumental_match(&instrumental_tracks, title, artist, duration);
-            let best = if duration < 0 {
-                tracks
-                    .iter()
-                    .filter(|track| {
-                        let score = (lyrics_similarity(title, &track.track_name)
-                            + lyrics_similarity(artist, &track.artist_name))
-                            / 2.0;
-                        score > 0.6
-                    })
-                    .max_by(|left, right| {
-                        let score = |track: &&LrcLibTrack| {
-                            let mut value = (lyrics_similarity(title, &track.track_name)
-                                + lyrics_similarity(artist, &track.artist_name))
-                                / 2.0;
-                            if track.synced_lyrics.is_some() {
-                                value += 0.1;
-                            }
-                            value
-                        };
-                        score(left)
-                            .partial_cmp(&score(right))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .or_else(|| tracks.iter().find(|track| track.synced_lyrics.is_some()))
-                    .or_else(|| tracks.first())
-            } else {
-                let synced_match = tracks
-                    .iter()
-                    .filter(|track| track.synced_lyrics.is_some())
-                    .min_by_key(|track| duration_delta(track, duration))
-                    .filter(|track| duration_delta(track, duration) <= 5);
-                synced_match.or_else(|| {
-                    tracks
-                        .iter()
-                        .min_by_key(|track| duration_delta(track, duration))
-                        .filter(|track| duration_delta(track, duration) <= 5)
-                })
-            };
+            // Romany's matcher rule (PR C): title and artist must match
+            // closely, ~10s duration window with the closest length
+            // winning, and past 10s only an exact match whose lyrics fit.
+            // Word-synced records win ties, so the first hit is word-synced
+            // where the record has words.
+            let best = select_lrclib_track(&tracks, title, artist, duration);
             Ok(LyricsProviderOutcome {
                 payload: best
                     .and_then(|track| {
-                        let text = track
-                            .synced_lyrics
-                            .clone()
-                            .or_else(|| track.plain_lyrics.clone())?;
+                        let (text, synced) = lrclib_track_lyrics(track)?;
                         Some(make_lyrics_payload(
                             provider,
                             text,
-                            track.synced_lyrics.is_some(),
+                            synced,
                             track.track_name.clone(),
                             track.artist_name.clone(),
                         ))
@@ -6157,11 +6861,40 @@ async fn fetch_lyrics_provider_for_cache(
                 instrumental,
             })
         }
+        "LyricsOvh" => Ok(LyricsProviderOutcome {
+            payload: lyricsovh_fetch(title, artist)
+                .await
+                .map(|text| {
+                    make_lyrics_payload(provider, text, false, title.to_owned(), artist.to_owned())
+                })
+                .filter(|payload| !payload.text.is_empty()),
+            instrumental,
+        }),
         "KuGou" => Ok(LyricsProviderOutcome {
             payload: kugou_fetch(title, artist, duration, album)
                 .await
                 .map(|text| {
                     make_lyrics_payload(provider, text, true, title.to_owned(), artist.to_owned())
+                })
+                .filter(|payload| !payload.text.is_empty()),
+            instrumental,
+        }),
+        "NetEase" => Ok(LyricsProviderOutcome {
+            payload: netease_fetch(title, artist, duration)
+                .await
+                .map(|text| {
+                    let synced = !parse_lyric_lines(&text).is_empty();
+                    make_lyrics_payload(provider, text, synced, title.to_owned(), artist.to_owned())
+                })
+                .filter(|payload| !payload.text.is_empty()),
+            instrumental,
+        }),
+        "QQMusic" => Ok(LyricsProviderOutcome {
+            payload: qqmusic_fetch(title, artist, duration)
+                .await
+                .map(|text| {
+                    let synced = !parse_lyric_lines(&text).is_empty();
+                    make_lyrics_payload(provider, text, synced, title.to_owned(), artist.to_owned())
                 })
                 .filter(|payload| !payload.text.is_empty()),
             instrumental,
@@ -6327,14 +7060,49 @@ fn cached_lyrics_provider(
 fn lyric_provider_enabled(db: &Connection, provider: &str) -> Result<bool, String> {
     Ok(match provider {
         "BetterLyrics" => lyric_setting_enabled(db, "enableBetterLyrics", true)?,
-        "Paxsenix" => lyric_setting_enabled(db, "enablePaxsenix", true)?,
+        // PR C: Paxsenix stays off until it is proven working (it returned
+        // Cloudflare 403 for all 13 probe songs).
+        "Paxsenix" => lyric_setting_enabled(db, "enablePaxsenix", false)?,
         "LrcLib" => lyric_setting_enabled(db, "enableLrclib", true)?,
+        "LyricsOvh" => lyric_setting_enabled(db, "enableLyricsOvh", true)?,
+        "NetEase" => lyric_setting_enabled(db, "enableNetEase", true)?,
+        "QQMusic" => lyric_setting_enabled(db, "enableQQMusic", true)?,
         "KuGou" => lyric_setting_enabled(db, "enableKugou", true)?,
         "LyricsPlus" => lyric_setting_enabled(db, "enableLyricsPlus", false)?,
         "Musixmatch" => lyric_setting_enabled(db, "enableMusixmatch", false)?,
         "YouTubeSubtitle" | "YouTube" => true,
         _ => false,
     })
+}
+
+/// Which tier a provider belongs to (PR C chain): 1 is official
+/// (LrcLib, LyricsOvh), 2 is unofficial (BetterLyrics, QQMusic, NetEase,
+/// KuGou, Paxsenix, LyricsPlus, Musixmatch), 3 is the video providers.
+/// Tier 2 only runs when tier 1 found nothing or only plain text.
+fn lyrics_tier(provider: &str) -> u8 {
+    match provider {
+        "LrcLib" | "LyricsOvh" => 1,
+        "YouTubeSubtitle" | "YouTube" => 3,
+        _ => 2,
+    }
+}
+
+/// Does this payload carry word-level timings (inline `<mm:ss.xx>` tags)?
+fn payload_has_word_timings(payload: &LyricsPayload) -> bool {
+    payload.lines.iter().any(|line| !line.words.is_empty())
+}
+
+/// Move a word-synced payload to the front of a provider result list,
+/// keeping the remaining order stable. Used by the cache-fill and download
+/// paths so cached/downloaded lyrics match the on-demand outcome, where
+/// the Fix 5 second pass prefers word-synced lyrics.
+fn prefer_word_synced_first(results: &mut Vec<LyricsPayload>) {
+    if let Some(index) = results.iter().position(payload_has_word_timings) {
+        if index > 0 {
+            let payload = results.remove(index);
+            results.insert(0, payload);
+        }
+    }
 }
 
 async fn fetch_all_enabled_lyrics(
@@ -6375,6 +7143,9 @@ async fn fetch_all_enabled_lyrics(
             }
         }
     }
+    // The first payload becomes the primary cached entry: prefer a
+    // word-synced one so the cache matches the on-demand second pass.
+    prefer_word_synced_first(&mut results);
     Ok(results)
 }
 
@@ -6423,7 +7194,46 @@ async fn fetch_all_enabled_lyrics_for_cache(
             }
         }
     }
+    prefer_word_synced_first(&mut results);
     results
+}
+
+/// Fix 5 second pass: when the settled hit is synced but wordless, probe
+/// BetterLyrics once for a word-synced upgrade. Bound to BetterLyrics
+/// only (Paxsenix is off); a 401/404 from BetterLyrics is "not cached",
+/// not an error worth retrying — `betterlyrics_fetch` already returns
+/// None on those. Returns the upgraded payload only when it carries word
+/// timings; otherwise None and the caller settles the original hit.
+async fn betterlyrics_word_upgrade(
+    title: &str,
+    artist: &str,
+    duration: i32,
+    album: Option<&str>,
+    state: &tauri::State<'_, RuntimeState>,
+    already_tried: bool,
+) -> Option<LyricsPayload> {
+    if already_tried {
+        return None;
+    }
+    let enabled = {
+        let db = state.db.lock().ok()?;
+        lyric_provider_enabled(&db, "BetterLyrics").ok()?
+    };
+    if !enabled {
+        return None;
+    }
+    let text = betterlyrics_fetch(title, artist, duration, album).await?;
+    let payload = make_lyrics_payload(
+        "BetterLyrics",
+        text,
+        true,
+        title.to_owned(),
+        artist.to_owned(),
+    );
+    if payload.text.is_empty() || !payload_has_word_timings(&payload) {
+        return None;
+    }
+    Some(payload)
 }
 
 async fn fetch_lyrics_inner(
@@ -6483,51 +7293,72 @@ async fn fetch_lyrics_inner(
         let db = state.db.lock().map_err(|_| "database state poisoned")?;
         ordered_lyrics_providers(&db)?
     };
-    // Liner ranks lyrics candidates and prefers a synced match over a plain
-    // one. Soluna used to stop at the first provider that returned anything,
-    // so a plain-text hit hid a synced one further down the order. A plain
-    // result is now only a fallback: the chain keeps going for a synced
-    // match, and only falls back to the plain text when none is found.
+    // PR C chain (Romany's decision): tier 1 is official (LrcLib,
+    // LyricsOvh); tier 2 is unofficial and only runs when tier 1 found
+    // nothing or only plain text; tier 3 is the video providers. Within a
+    // tier the user's stored order is kept. A plain result is only a
+    // fallback: the chain keeps going for a synced match, and only falls
+    // back to the plain text when no tier yields one.
     let mut plain_fallback: Option<LyricsPayload> = None;
     let mut saw_instrumental = false;
-    for provider in order {
-        let enabled = {
-            let db = state.db.lock().map_err(|_| "database state poisoned")?;
-            match provider.as_str() {
-                "BetterLyrics" => lyric_setting_enabled(&db, "enableBetterLyrics", true)?,
-                "Paxsenix" => lyric_setting_enabled(&db, "enablePaxsenix", true)?,
-                "LrcLib" => lyric_setting_enabled(&db, "enableLrclib", true)?,
-                "KuGou" => lyric_setting_enabled(&db, "enableKugou", true)?,
-                "LyricsPlus" => lyric_setting_enabled(&db, "enableLyricsPlus", false)?,
-                "Musixmatch" => lyric_setting_enabled(&db, "enableMusixmatch", false)?,
-                "YouTubeSubtitle" | "YouTube" => true,
-                _ => false,
-            }
-        };
-        if !enabled {
-            continue;
-        }
-        let outcome = fetch_lyrics_provider(
-            &provider,
-            &cleaned_title,
-            &cleaned_artist,
-            duration,
-            album_name,
-            id.as_deref(),
-            &state,
-        )
-        .await?;
-        if outcome.instrumental {
-            saw_instrumental = true;
-        }
-        if let Some(payload) = outcome.payload {
-            if payload.synced {
+    let mut betterlyrics_tried = false;
+    for tier in [1u8, 2, 3] {
+        for provider in order
+            .iter()
+            .filter(|name| lyrics_tier(name.as_str()) == tier)
+        {
+            let enabled = {
                 let db = state.db.lock().map_err(|_| "database state poisoned")?;
-                cache_lyrics_payload(&db, &cache_id, &payload)?;
-                return Ok(payload);
+                lyric_provider_enabled(&db, provider)?
+            };
+            if !enabled {
+                continue;
             }
-            if plain_fallback.is_none() {
-                plain_fallback = Some(payload);
+            if provider == "BetterLyrics" {
+                betterlyrics_tried = true;
+            }
+            let outcome = fetch_lyrics_provider(
+                provider,
+                &cleaned_title,
+                &cleaned_artist,
+                duration,
+                album_name,
+                id.as_deref(),
+                &state,
+            )
+            .await?;
+            if outcome.instrumental {
+                saw_instrumental = true;
+            }
+            if let Some(payload) = outcome.payload {
+                if payload.synced {
+                    // Fix 5 second pass: a synced-but-wordless hit may have
+                    // a word-synced BetterLyrics record (it won 4/13 probe
+                    // songs outright). Probe it once, bound to BetterLyrics
+                    // only, before settling.
+                    if !payload_has_word_timings(&payload) {
+                        if let Some(upgraded) = betterlyrics_word_upgrade(
+                            &cleaned_title,
+                            &cleaned_artist,
+                            duration,
+                            album_name,
+                            &state,
+                            betterlyrics_tried,
+                        )
+                        .await
+                        {
+                            let db = state.db.lock().map_err(|_| "database state poisoned")?;
+                            cache_lyrics_payload(&db, &cache_id, &upgraded)?;
+                            return Ok(upgraded);
+                        }
+                    }
+                    let db = state.db.lock().map_err(|_| "database state poisoned")?;
+                    cache_lyrics_payload(&db, &cache_id, &payload)?;
+                    return Ok(payload);
+                }
+                if plain_fallback.is_none() {
+                    plain_fallback = Some(payload);
+                }
             }
         }
     }
@@ -7726,6 +8557,9 @@ fn allowed_setting(key: &str) -> bool {
             | "enableBetterLyrics"
             | "enablePaxsenix"
             | "enableLrclib"
+            | "enableLyricsOvh"
+            | "enableNetEase"
+            | "enableQQMusic"
             | "enableKugou"
             | "enableLyricsPlus"
             | "enableMusixmatch"
@@ -8865,6 +9699,7 @@ mod tests {
             duration: 201.6,
             plain_lyrics: None,
             synced_lyrics: Some("[00:01.00]line".to_owned()),
+            lyricsfile: None,
             instrumental: false,
         };
         assert_eq!(duration_delta(&track, 202), 0);
@@ -8879,6 +9714,7 @@ mod tests {
             duration,
             plain_lyrics: None,
             synced_lyrics: None,
+            lyricsfile: None,
             instrumental: true,
         }
     }
@@ -8934,6 +9770,791 @@ mod tests {
             "[00:00.00]作词: Someone\n[00:01.00]Real line\n[00:02.00]Next line",
         );
         assert_eq!(normalized, "[00:01.00]Real line\n[00:02.00]Next line");
+    }
+
+    // --- PR C: lyrics provider chain + matcher (Romany's decisions) ---
+
+    // Real LrcLib `lyricsfile` head for "Viva La Vida" (fetched live
+    // 2026-11-27): version/metadata header, then `lines:` with per-line
+    // `start_ms`/`end_ms` and per-word `start_ms`. Word text is
+    // single-quoted and keeps its trailing space; the last line has no
+    // `words:` key at all (line-level fallback).
+    const VIVA_LYRICSFILE: &str = "version: '1.0'\nmetadata:\n  title: Viva la Vida\n  artist: Coldplay/Coldplay\n  album: Viva la Vida or Death and All His Friends\n  duration_ms: 242000\n  instrumental: false\n  language: en\nlines:\n- text: I used to rule the world\n  start_ms: 13490\n  end_ms: 16607\n  words:\n  - text: 'I '\n    start_ms: 13490\n  - text: 'used '\n    start_ms: 13620\n  - text: 'to '\n    start_ms: 13850\n  - text: 'rule '\n    start_ms: 14090\n  - text: 'the '\n    start_ms: 15690\n  - text: world\n    start_ms: 16140\n- text: Seas would rise when I gave the word\n  start_ms: 17040\n  end_ms: 19355\n  words:\n  - text: 'Seas '\n    start_ms: 17040\n  - text: 'would '\n    start_ms: 17170\n  - text: 'rise '\n    start_ms: 17420\n  - text: 'when '\n    start_ms: 17580\n  - text: 'I '\n    start_ms: 18340\n  - text: 'gave '\n    start_ms: 18650\n  - text: 'the '\n    start_ms: 18970\n  - text: word\n    start_ms: 19100\n- text: Now in the mornin', I sleep alone\n  start_ms: 19790\n  end_ms: 23339\n";
+
+    #[test]
+    fn lrclib_lyricsfile_parses_real_shape_and_emits_word_tags() {
+        let lines = parse_lrclib_lyricsfile(VIVA_LYRICSFILE);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "I used to rule the world");
+        assert_eq!(lines[0].start_ms, 13_490);
+        assert_eq!(lines[0].end_ms, 16_607);
+        assert_eq!(lines[0].words.len(), 6);
+        assert_eq!(lines[0].words[0], (13_490, "I ".to_owned()));
+        assert_eq!(lines[0].words[5], (16_140, "world".to_owned()));
+        assert_eq!(lines[1].words.len(), 8);
+        // The third line carries no words: line-level fallback, not dropped.
+        assert_eq!(lines[2].text, "Now in the mornin', I sleep alone");
+        assert_eq!(lines[2].start_ms, 19_790);
+        assert!(lines[2].words.is_empty());
+        assert_eq!(lyricsfile_word_count(VIVA_LYRICSFILE), 14);
+
+        let lrc = lyricsfile_to_lrc(&lines);
+        assert_eq!(
+            lrc,
+            "[00:13.49]I <00:13.62>used <00:13.85>to <00:14.09>rule <00:15.69>the <00:16.14>world\n[00:17.04]Seas <00:17.17>would <00:17.42>rise <00:17.58>when <00:18.34>I <00:18.65>gave <00:18.97>the <00:19.10>word\n[00:19.79]Now in the mornin', I sleep alone"
+        );
+        let parsed = parse_lyric_lines(&lrc);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].words.len(), 6);
+        assert_eq!(parsed[0].words[0].time_ms, 13_490);
+        assert_eq!(parsed[0].words[5].time_ms, 16_140);
+        assert_eq!(parsed[0].words[5].text, "world");
+        assert!(parsed[2].words.is_empty());
+    }
+
+    #[test]
+    fn lrclib_lyricsfile_partial_word_sync_keeps_wordless_lines() {
+        // Tong Hua shape: one line has words, the next has none. Both
+        // lines survive; the wordless one stays line-level.
+        let value = "lines:\n- text: Line one\n  start_ms: 1000\n  end_ms: 2000\n  words:\n  - text: 'Line '\n    start_ms: 1000\n  - text: one\n    start_ms: 1500\n- text: Line two\n  start_ms: 3000\n  end_ms: 4000\n";
+        let lines = parse_lrclib_lyricsfile(value);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].words.len(), 2);
+        assert!(lines[1].words.is_empty());
+        assert_eq!(lyricsfile_word_count(value), 2);
+        let parsed = parse_lyric_lines(&lyricsfile_to_lrc(&lines));
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].words.len(), 2);
+        assert!(parsed[1].words.is_empty());
+        // Garbage in, nothing out — never a panic, never a phantom line.
+        assert!(parse_lrclib_lyricsfile("").is_empty());
+        assert!(parse_lrclib_lyricsfile("not yaml at all\n").is_empty());
+        assert!(parse_lrclib_lyricsfile("lines:\n- text: No times here\n").is_empty());
+    }
+
+    #[test]
+    fn lrclib_track_lyrics_prefers_word_timings_then_synced_then_plain() {
+        let worded = LrcLibTrack {
+            track_name: "Song".to_owned(),
+            artist_name: "Artist".to_owned(),
+            duration: 242.0,
+            plain_lyrics: Some("plain".to_owned()),
+            synced_lyrics: Some("[00:01.00]line".to_owned()),
+            lyricsfile: Some(VIVA_LYRICSFILE.to_owned()),
+            instrumental: false,
+        };
+        let (text, synced) = lrclib_track_lyrics(&worded).expect("lyrics");
+        assert!(synced);
+        assert!(text.starts_with("[00:13.49]I <00:13.62>used"));
+        let line_only = LrcLibTrack {
+            lyricsfile: None,
+            ..worded.clone()
+        };
+        let (text, synced) = lrclib_track_lyrics(&line_only).expect("lyrics");
+        assert!(synced);
+        assert_eq!(text, "[00:01.00]line");
+        let plain_only = LrcLibTrack {
+            synced_lyrics: None,
+            lyricsfile: None,
+            ..worded.clone()
+        };
+        let (text, synced) = lrclib_track_lyrics(&plain_only).expect("lyrics");
+        assert!(!synced);
+        assert_eq!(text, "plain");
+        let empty = LrcLibTrack {
+            plain_lyrics: None,
+            synced_lyrics: None,
+            lyricsfile: None,
+            ..worded
+        };
+        assert!(lrclib_track_lyrics(&empty).is_none());
+    }
+
+    #[test]
+    fn cjk_variants_fold_before_similarity() {
+        // Simplified vs traditional must not cost similarity: the probe
+        // measured a 20-point loss on 童話 vs 童话.
+        assert_eq!(fold_cjk_variants("童話"), "童话");
+        assert_eq!(fold_cjk_variants("學國會時間"), "学国会时间");
+        assert_eq!(lyrics_similarity("童話", "童话"), 1.0);
+        assert_eq!(lyrics_similarity("光良", "光良"), 1.0);
+        // Different scripts share nothing: a romanized query must never
+        // match a native-script record by text alone.
+        assert_eq!(lyrics_similarity("Tong Hua", "童話"), 0.0);
+        assert_eq!(lyrics_similarity("Michael Wong", "光良"), 0.0);
+    }
+
+    #[test]
+    fn romany_matcher_rule_scores_and_thresholds() {
+        // Exact match, duration 1s off: full score.
+        assert_eq!(lyrics_identity_score(1.0, 1.0, Some(1)), 40.0 + 30.0 + 30.0);
+        // Duration bands: <=2s 30, <=5s 25, <=10s 10, beyond -20.
+        assert_eq!(lyrics_identity_score(1.0, 1.0, Some(4)), 95.0);
+        assert_eq!(lyrics_identity_score(1.0, 1.0, Some(9)), 80.0);
+        assert_eq!(lyrics_identity_score(1.0, 1.0, Some(36)), 50.0);
+        // Close match inside 10s: accepted.
+        assert_eq!(
+            lyrics_candidate_verdict(
+                "Shape of You",
+                "Ed Sheeran",
+                234,
+                "Shape of You",
+                "Ed Sheeran",
+                Some(234)
+            ),
+            LyricsCandidateVerdict::Accept
+        );
+        // A title with a bracketed suffix still matches (contains rule).
+        assert_eq!(
+            lyrics_candidate_verdict(
+                "Shape of You",
+                "Ed Sheeran",
+                234,
+                "Shape of You [Shape of You, 2017]",
+                "Ed Sheeran",
+                Some(234)
+            ),
+            LyricsCandidateVerdict::Accept
+        );
+        // Weak title or artist: rejected.
+        assert_eq!(
+            lyrics_candidate_verdict(
+                "Yesterday",
+                "The Beatles",
+                125,
+                "Shape of You",
+                "Ed Sheeran",
+                Some(234)
+            ),
+            LyricsCandidateVerdict::Reject
+        );
+        assert_eq!(
+            lyrics_candidate_verdict(
+                "Shape of You",
+                "Ed Sheeran",
+                234,
+                "Shape of You",
+                "Someone Else",
+                Some(234)
+            ),
+            LyricsCandidateVerdict::Reject
+        );
+        // Unknown duration on either side: similarity only, no duration points.
+        assert_eq!(
+            lyrics_candidate_verdict(
+                "Shape of You",
+                "Ed Sheeran",
+                -1,
+                "Shape of You",
+                "Ed Sheeran",
+                None
+            ),
+            LyricsCandidateVerdict::Accept
+        );
+        assert_eq!(
+            lyrics_candidate_verdict(
+                "Shape of You",
+                "Ed Sheeran",
+                -1,
+                "Shape of You",
+                "Different",
+                None
+            ),
+            LyricsCandidateVerdict::Reject
+        );
+    }
+
+    #[test]
+    fn romany_matcher_rejects_wrong_version_titles() {
+        for title in [
+            "Dynamite (Cover）",
+            "Dynamite (Live)",
+            "Dynamite (Live At SBS 2020/12/25)",
+            "3 Daqat (AlRawabi Cover)",
+            "Song (Remaster)",
+            "Song (Acoustic)",
+            "Song (Instrumental)",
+            "Song (Karaoke)",
+            "Song [Remix]",
+            "Song (Demo)",
+            "Song (Tribute)",
+            "Song (Nightcore)",
+            "Song (Sped Up)",
+        ] {
+            assert!(
+                lyrics_title_is_bad_version(title),
+                "{title} must be rejected as a wrong version"
+            );
+            assert_eq!(
+                lyrics_candidate_verdict("Dynamite", "BTS", 199, title, "BTS", Some(199)),
+                LyricsCandidateVerdict::Reject,
+                "{title} must not pass the matcher"
+            );
+        }
+        // "Alive" contains "live" as a substring but is not a live version.
+        assert!(!lyrics_title_is_bad_version("Alive"));
+        assert!(!lyrics_title_is_bad_version("Dynamite"));
+        assert!(!lyrics_title_is_bad_version("3 Daqat"));
+    }
+
+    #[test]
+    fn romany_matcher_beyond_10s_needs_exact_match_and_fitting_lyrics() {
+        // NetEase 3 Daqat (probe): right song, 36s-longer master. Title and
+        // artist match exactly, so the verdict defers to the lyric fit —
+        // and the lyrics run to 308s for a 275s song, which does not fit.
+        assert_eq!(
+            lyrics_candidate_verdict("3 Daqat", "Abu", 275, "3 Daqat", "Abu, Yousra", Some(311)),
+            LyricsCandidateVerdict::AcceptIfLyricsFit
+        );
+        assert!(!lyrics_last_timestamp_fits(308_000, 275));
+        // A file whose last line lands within a few seconds of the song
+        // end fits, and is accepted.
+        assert!(lyrics_last_timestamp_fits(273_000, 275));
+        assert!(lyrics_last_timestamp_fits(279_000, 275));
+        // Exact names are required past 10s: a near miss is not enough.
+        assert_eq!(
+            lyrics_candidate_verdict("3 Daqat", "Abu", 275, "3 Daqat 2", "Abu", Some(311)),
+            LyricsCandidateVerdict::Reject
+        );
+        assert_eq!(
+            lyrics_candidate_verdict("3 Daqat", "Abu", 275, "3 Daqat", "Noor Taher", Some(311)),
+            LyricsCandidateVerdict::Reject
+        );
+    }
+
+    #[test]
+    fn romany_matcher_rejects_when_unsure() {
+        // Duration far off and no exact match: reject, never guess.
+        assert_eq!(
+            lyrics_candidate_verdict("Song", "Artist", 200, "Song 2", "Artist", Some(260)),
+            LyricsCandidateVerdict::Reject
+        );
+        // Exact names far off: the verdict defers to the lyric fit, it
+        // does not accept outright — and lyrics running past the song end
+        // do not fit.
+        assert_eq!(
+            lyrics_candidate_verdict("Song", "Artist", 200, "Song", "Artist", Some(260)),
+            LyricsCandidateVerdict::AcceptIfLyricsFit
+        );
+        assert!(!lyrics_last_timestamp_fits(258_000, 200));
+        // No duration at all and only a vague name match: reject.
+        assert_eq!(
+            lyrics_candidate_verdict("Song", "Artist", -1, "Song-ish", "Artist", None),
+            LyricsCandidateVerdict::Reject
+        );
+        // A last timestamp far past the song end never fits.
+        assert!(!lyrics_last_timestamp_fits(308_000, 275));
+        assert!(!lyrics_last_timestamp_fits(200_000, 100));
+    }
+
+    #[test]
+    fn kugou_guard_rejects_short_and_placeholder_payloads() {
+        // The exact probe placeholder (167 chars): one timestamped line
+        // for a different instrumental track ("June"). The guard rejects
+        // it even before the [ti:]/[ar:] tag check runs.
+        let placeholder =
+            "[id:$00000000]\n[ar:arkady sevidov]\n[ti:June]\n[00:01.58]纯音乐，请欣赏";
+        assert!(!kugou_payload_is_usable(placeholder));
+        // Any payload under five timestamped lines is too thin to trust.
+        let four = "[00:01.00]one\n[00:02.00]two\n[00:03.00]three\n[00:04.00]four";
+        assert!(!kugou_payload_is_usable(four));
+        let five = "[00:01.00]one\n[00:02.00]two\n[00:03.00]three\n[00:04.00]four\n[00:05.00]five";
+        assert!(kugou_payload_is_usable(five));
+        assert!(!kugou_payload_is_usable(""));
+        // The tag check already rejected this placeholder before the guard
+        // existed (belt and braces, not a new behaviour).
+        assert!(!kugou_lrc_matches(
+            placeholder,
+            "Shape of You",
+            "Ed Sheeran"
+        ));
+        assert!(kugou_lrc_matches(
+            "[ti:Shape of You]\n[ar:Ed Sheeran]\n[00:09.69]The club isn't",
+            "Shape of You",
+            "Ed Sheeran"
+        ));
+    }
+
+    #[test]
+    fn lyrics_tiers_put_official_providers_first() {
+        assert_eq!(lyrics_tier("LrcLib"), 1);
+        assert_eq!(lyrics_tier("LyricsOvh"), 1);
+        for provider in [
+            "BetterLyrics",
+            "QQMusic",
+            "NetEase",
+            "KuGou",
+            "Paxsenix",
+            "LyricsPlus",
+            "Musixmatch",
+        ] {
+            assert_eq!(lyrics_tier(provider), 2, "{provider} is unofficial");
+        }
+        assert_eq!(lyrics_tier("YouTubeSubtitle"), 3);
+        assert_eq!(lyrics_tier("YouTube"), 3);
+    }
+
+    #[test]
+    fn ordered_lyrics_providers_blank_order_is_tiered_and_defaults() {
+        let db = fresh_db();
+        let order = ordered_lyrics_providers(&db).expect("order");
+        assert_eq!(
+            order,
+            vec![
+                "LrcLib",
+                "LyricsOvh",
+                "BetterLyrics",
+                "QQMusic",
+                "NetEase",
+                "KuGou",
+                "Paxsenix",
+                "LyricsPlus",
+                "Musixmatch",
+                "YouTubeSubtitle",
+                "YouTube",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        );
+        // A stored order is kept, with missing providers appended in
+        // canonical order (the old BetterLyrics-first order still works).
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES ('lyricsProviderOrder', 'BetterLyrics,LrcLib')",
+            [],
+        )
+        .expect("seed order");
+        let order = ordered_lyrics_providers(&db).expect("order");
+        assert_eq!(order[0], "BetterLyrics");
+        assert_eq!(order[1], "LrcLib");
+        assert_eq!(order[2], "LyricsOvh");
+        // Defaults: the new providers are on, Paxsenix is off until it is
+        // proven working (Romany's decision), Musixmatch/LyricsPlus stay off.
+        assert!(lyric_provider_enabled(&db, "NetEase").expect("flag"));
+        assert!(lyric_provider_enabled(&db, "QQMusic").expect("flag"));
+        assert!(lyric_provider_enabled(&db, "LyricsOvh").expect("flag"));
+        assert!(lyric_provider_enabled(&db, "LrcLib").expect("flag"));
+        assert!(lyric_provider_enabled(&db, "BetterLyrics").expect("flag"));
+        assert!(lyric_provider_enabled(&db, "KuGou").expect("flag"));
+        assert!(!lyric_provider_enabled(&db, "Paxsenix").expect("flag"));
+        assert!(!lyric_provider_enabled(&db, "LyricsPlus").expect("flag"));
+        assert!(!lyric_provider_enabled(&db, "Musixmatch").expect("flag"));
+        assert!(lyric_provider_enabled(&db, "YouTubeSubtitle").expect("flag"));
+        assert!(lyric_provider_enabled(&db, "YouTube").expect("flag"));
+    }
+
+    #[test]
+    fn prefer_word_synced_first_moves_word_payload_to_front() {
+        let line = make_lyrics_payload(
+            "LrcLib",
+            "[00:01.00]line".to_owned(),
+            true,
+            "Song".into(),
+            "Artist".into(),
+        );
+        let word = make_lyrics_payload(
+            "BetterLyrics",
+            "[00:01.00]Hello <00:01.50>world".to_owned(),
+            true,
+            "Song".into(),
+            "Artist".into(),
+        );
+        let plain = make_lyrics_payload(
+            "LyricsOvh",
+            "plain text".to_owned(),
+            false,
+            "Song".into(),
+            "Artist".into(),
+        );
+        assert!(!payload_has_word_timings(&line));
+        assert!(payload_has_word_timings(&word));
+        assert!(!payload_has_word_timings(&plain));
+        let mut results = vec![line, plain, word];
+        prefer_word_synced_first(&mut results);
+        assert_eq!(results[0].provider, "BetterLyrics");
+        // Nothing word-synced: order is untouched.
+        let mut results = vec![
+            make_lyrics_payload(
+                "LrcLib",
+                "[00:01.00]line".to_owned(),
+                true,
+                "Song".into(),
+                "Artist".into(),
+            ),
+            make_lyrics_payload(
+                "LyricsOvh",
+                "plain".to_owned(),
+                false,
+                "Song".into(),
+                "Artist".into(),
+            ),
+        ];
+        prefer_word_synced_first(&mut results);
+        assert_eq!(results[0].provider, "LrcLib");
+    }
+
+    #[test]
+    fn select_lrclib_track_prefers_word_sync_then_closest_duration() {
+        let line_only = LrcLibTrack {
+            track_name: "Tong Hua".to_owned(),
+            artist_name: "光良".to_owned(),
+            duration: 245.0,
+            plain_lyrics: None,
+            synced_lyrics: Some("[00:01.00]line".to_owned()),
+            lyricsfile: None,
+            instrumental: false,
+        };
+        let worded = LrcLibTrack {
+            track_name: "童話".to_owned(),
+            artist_name: "光良".to_owned(),
+            duration: 245.0,
+            plain_lyrics: None,
+            synced_lyrics: Some("[00:01.00]line".to_owned()),
+            lyricsfile: Some("lines:\n- text: Line\n  start_ms: 1000\n  end_ms: 2000\n  words:\n  - text: 'Li'\n    start_ms: 1000\n  - text: ne\n    start_ms: 1500\n".to_owned()),
+            instrumental: false,
+        };
+        // Same identity score, same duration: the word-synced record wins.
+        let tracks = [line_only.clone(), worded.clone()];
+        let picked = select_lrclib_track(&tracks, "童話", "光良", 245).expect("pick");
+        assert!(picked.lyricsfile.is_some());
+        // Closest duration wins among equals.
+        let near = LrcLibTrack {
+            duration: 245.0,
+            ..worded.clone()
+        };
+        let far = LrcLibTrack {
+            duration: 242.0,
+            ..worded.clone()
+        };
+        let tracks = [far, near];
+        let picked = select_lrclib_track(&tracks, "童話", "光良", 245).expect("pick");
+        assert_eq!(picked.duration, 245.0);
+        // A wrong-version record never wins, even with a close duration.
+        let cover = LrcLibTrack {
+            track_name: "Tong Hua (Cover)".to_owned(),
+            duration: 245.0,
+            ..worded.clone()
+        };
+        let tracks = [cover, line_only.clone()];
+        let picked = select_lrclib_track(&tracks, "Tong Hua", "光良", 245).expect("pick");
+        assert_eq!(picked.track_name, "Tong Hua");
+        // Nothing acceptable: no pick, not a guess.
+        let tracks = [line_only.clone()];
+        assert!(select_lrclib_track(&tracks, "Yesterday", "The Beatles", 125).is_none());
+        // Beyond 10s with exact names but lyrics running past the song:
+        // not selected (the NetEase 3 Daqat shape).
+        let long_master = LrcLibTrack {
+            track_name: "3 Daqat".to_owned(),
+            artist_name: "Abu".to_owned(),
+            duration: 311.0,
+            plain_lyrics: None,
+            synced_lyrics: Some("[00:01.00]line\n[05:08.00]last".to_owned()),
+            lyricsfile: None,
+            instrumental: false,
+        };
+        assert!(select_lrclib_track(&[long_master], "3 Daqat", "Abu", 275).is_none());
+    }
+
+    #[test]
+    fn netease_credit_lines_are_stripped_from_the_head_only() {
+        // Real NetEase head for "Shape of You": credits first, lyrics after.
+        let lrc = "[00:00.000] 制作人 : Steve Mac\n[00:01.000] 作词 : Ed Sheeran/Johnny McDaid\n[00:02.000] 作曲 : Ed Sheeran/Johnny McDaid\n[00:09.65] The club isn't the best place to find a lover\n[00:12.10] So the bar is where I go";
+        assert_eq!(
+            strip_leading_credit_lines(lrc),
+            "[00:09.65] The club isn't the best place to find a lover\n[00:12.10] So the bar is where I go"
+        );
+        // A credit-style line mid-song is a lyric, not a credit: keep it.
+        let mid = "[00:09.65] The club isn't\n[00:12.10] Producer : someone\n[00:14.81] Me and my friends";
+        assert_eq!(strip_leading_credit_lines(mid), mid);
+        // No credits at all: untouched.
+        let plain = "[00:09.65] The club isn't";
+        assert_eq!(strip_leading_credit_lines(plain), plain);
+    }
+
+    /// The 13 probe songs (REPORT.md §1; durations from iTunes). Each case
+    /// is one provider candidate from the probe's raw records
+    /// (raw/results.jsonl): the verdict Romany's matcher must give it, and
+    /// whether the candidate is the correct song. The totals at the end are
+    /// the numbers Romany asked for: songs left with no lyrics (false
+    /// rejects) and wrong songs let through (false accepts).
+    #[test]
+    fn romany_matcher_rule_on_13_probe_songs() {
+        // song, artist, duration_s, candidate title, candidate artist,
+        // candidate duration_s, expected verdict, candidate is the right song.
+        struct ProbeCase<'a> {
+            song: &'a str,
+            artist: &'a str,
+            duration: i32,
+            cand_title: &'a str,
+            cand_artist: &'a str,
+            cand_duration: Option<i64>,
+            expected: LyricsCandidateVerdict,
+            correct: bool,
+        }
+        let cases: &[ProbeCase] = &[
+            ProbeCase {
+                song: "Viva La Vida",
+                artist: "Coldplay",
+                duration: 241,
+                cand_title: "Viva La Vida",
+                cand_artist: "Coldplay",
+                cand_duration: Some(242),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Shape of You",
+                artist: "Ed Sheeran",
+                duration: 234,
+                cand_title: "Shape of You [Shape of You, 2017]",
+                cand_artist: "Ed Sheeran",
+                cand_duration: Some(234),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Blinding Lights",
+                artist: "The Weeknd",
+                duration: 200,
+                cand_title: "Blinding Lights",
+                cand_artist: "The Weeknd",
+                cand_duration: Some(200),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Bohemian Rhapsody",
+                artist: "Queen",
+                duration: 354,
+                cand_title: "Bohemian Rhapsody",
+                cand_artist: "Queen",
+                cand_duration: Some(355),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Hotel California",
+                artist: "Eagles",
+                duration: 391,
+                cand_title: "Hotel California [Hotel California , 2006]",
+                cand_artist: "Eagles",
+                cand_duration: Some(391),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Tamally Maak",
+                artist: "Amr Diab",
+                duration: 269,
+                cand_title: "Tamally Maak",
+                cand_artist: "Amr Diab",
+                cand_duration: Some(269),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Tamally Maak",
+                artist: "Amr Diab",
+                duration: 269,
+                cand_title: "Tamally Maak",
+                cand_artist: "Amr Diab",
+                cand_duration: Some(272),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "3 Daqat",
+                artist: "Abu",
+                duration: 275,
+                cand_title: "3 Daqat",
+                cand_artist: "Abu",
+                cand_duration: Some(275),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            // NetEase 3 Daqat: exact names, 36s-longer master — defers to
+            // the lyric fit, which fails (lyrics run to 308s, song is 275s).
+            ProbeCase {
+                song: "3 Daqat",
+                artist: "Abu",
+                duration: 275,
+                cand_title: "3 Daqat",
+                cand_artist: "Abu, Yousra",
+                cand_duration: Some(311),
+                expected: LyricsCandidateVerdict::AcceptIfLyricsFit,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Ya Lili",
+                artist: "Balti",
+                duration: 201,
+                cand_title: "Ya Lili",
+                cand_artist: "Balti, Hamouda",
+                cand_duration: Some(200),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Ya Lili",
+                artist: "Balti",
+                duration: 201,
+                cand_title: "Ya lili(feat. Hamouda)",
+                cand_artist: "Balti, Hamouda",
+                cand_duration: Some(200),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Dynamite",
+                artist: "BTS",
+                duration: 199,
+                cand_title: "Dynamite",
+                cand_artist: "BTS",
+                cand_duration: Some(199),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Dynamite",
+                artist: "BTS",
+                duration: 199,
+                cand_title: "Dynamite (Cover）",
+                cand_artist: "Ailee",
+                cand_duration: Some(196),
+                expected: LyricsCandidateVerdict::Reject,
+                correct: false,
+            },
+            ProbeCase {
+                song: "Dynamite",
+                artist: "BTS",
+                duration: 199,
+                cand_title: "Dynamite (Live)",
+                cand_artist: "BTS (防弹少年团)",
+                cand_duration: Some(232),
+                expected: LyricsCandidateVerdict::Reject,
+                correct: false,
+            },
+            ProbeCase {
+                song: "Gangnam Style",
+                artist: "PSY",
+                duration: 220,
+                cand_title: "Gangnam Style",
+                cand_artist: "PSY",
+                cand_duration: Some(219),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            // Tong Hua: romanized text can never match native-script text —
+            // rejected, not guessed. The native-script query accepts.
+            ProbeCase {
+                song: "Tong Hua",
+                artist: "Michael Wong",
+                duration: 245,
+                cand_title: "童話",
+                cand_artist: "光良",
+                cand_duration: Some(245),
+                expected: LyricsCandidateVerdict::Reject,
+                correct: true,
+            },
+            ProbeCase {
+                song: "童話",
+                artist: "光良",
+                duration: 245,
+                cand_title: "童話",
+                cand_artist: "光良",
+                cand_duration: Some(245),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "童話",
+                artist: "光良",
+                duration: 245,
+                cand_title: "童话",
+                cand_artist: "光良",
+                cand_duration: Some(245),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Casimir Pulaski Day",
+                artist: "Sufjan Stevens",
+                duration: 354,
+                cand_title: "Casimir Pulaski Day",
+                cand_artist: "Sufjan Stevens",
+                cand_duration: Some(354),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+            ProbeCase {
+                song: "Nantes",
+                artist: "Beirut",
+                duration: 230,
+                cand_title: "Nantes",
+                cand_artist: "Beirut",
+                cand_duration: Some(230),
+                expected: LyricsCandidateVerdict::Accept,
+                correct: true,
+            },
+        ];
+        let mut false_accepts = 0;
+        let mut accepted_songs: Vec<&str> = Vec::new();
+        for case in cases {
+            let verdict = lyrics_candidate_verdict(
+                case.song,
+                case.artist,
+                case.duration,
+                case.cand_title,
+                case.cand_artist,
+                case.cand_duration,
+            );
+            assert_eq!(
+                verdict, case.expected,
+                "{}: {} / {}",
+                case.song, case.cand_title, case.cand_artist
+            );
+            if verdict == LyricsCandidateVerdict::Accept && !case.correct {
+                false_accepts += 1;
+            }
+            if verdict == LyricsCandidateVerdict::Accept
+                && case.correct
+                && !accepted_songs.contains(&case.song)
+            {
+                accepted_songs.push(case.song);
+            }
+        }
+        // The NetEase 3 Daqat deferral resolves to a rejection: its lyrics
+        // run to 308s for a 275s song, so they do not fit.
+        assert!(!lyrics_last_timestamp_fits(308_000, 275));
+        // No wrong song is let through by any case above.
+        assert_eq!(false_accepts, 0);
+        // Every one of the 13 songs has at least one accepted candidate
+        // (the romanized Tong Hua query is the one exception: it is
+        // rejected by text alone, and the song is covered by the
+        // native-script query case above — see the report for why the app
+        // can only match it when YouTube Music supplies native text).
+        let songs = [
+            "Viva La Vida",
+            "Shape of You",
+            "Blinding Lights",
+            "Bohemian Rhapsody",
+            "Hotel California",
+            "Tamally Maak",
+            "3 Daqat",
+            "Ya Lili",
+            "Dynamite",
+            "Gangnam Style",
+            "童話",
+            "Casimir Pulaski Day",
+            "Nantes",
+        ];
+        for song in songs {
+            assert!(
+                accepted_songs.contains(&song),
+                "{song} has no accepted candidate"
+            );
+        }
+        assert_eq!(accepted_songs.len(), 13);
     }
 
     #[test]
