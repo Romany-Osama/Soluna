@@ -36,6 +36,7 @@ import { StatsScreen } from "./features/stats/StatsScreen";
 import { HistoryScreen } from "./features/history/HistoryScreen";
 import { SearchScreen } from "./features/search/SearchScreen";
 import { LyricsPanel } from "./features/lyrics/LyricsPanel";
+import { createLyricsPrefetch, type LyricsPrefetch } from "./features/lyrics/lyricsPrefetch";
 import { ExpandedPlayer } from "./features/player/ExpandedPlayer";
 import { QueuePanel } from "./features/queue/QueuePanel";
 import { PlayerBar } from "./features/player/PlayerBar";
@@ -178,6 +179,10 @@ function App() {
   const [searchFocused, setSearchFocused] = useState(false);
   const searchBoxRef = useRef<HTMLDivElement>(null);
   const playQueueIndexRef = useRef<(index: number) => void>(() => undefined);
+  // Next-song lyrics prefetch (PR 1): one background `fetch_lyrics` at a time,
+  // aborted on the next play or queue clear; never touches lyrics UI state.
+  const lyricsPrefetchRef = useRef<LyricsPrefetch | null>(null);
+  if (lyricsPrefetchRef.current === null) lyricsPrefetchRef.current = createLyricsPrefetch();
   const [historySource, setHistorySource] = useState<HistorySource>("local");
   const [historyQuery, setHistoryQuery] = useState("");
   const [statsPeriod, setStatsPeriod] = useState<StatsPeriod>("all");
@@ -304,6 +309,7 @@ function App() {
     setLyricsAutoScrollEnabled,
     lyricsContainerRef,
     activeLyricRef,
+    lyricsOpenedThisSessionRef,
     moveLyricsProvider,
     openLyrics,
     changeLyricsProvider,
@@ -1687,6 +1693,7 @@ function App() {
 
   const clearQueue = () => {
     playRequestIdRef.current += 1;
+    lyricsPrefetchRef.current?.abort();
     activePlayerIdRef.current = null;
     audioRef.current?.pause();
     setQueueItems([]);
@@ -1750,6 +1757,8 @@ function App() {
     sourceContinuationKind: "next" | "playlist" = "next",
   ) => {
     const requestId = ++playRequestIdRef.current;
+    // A new play supersedes the previous song's lyrics prefetch (PR 1).
+    lyricsPrefetchRef.current?.abort();
     if (sourceQueue !== queueItems) autoMixEnabledRef.current = autoMixStart;
     if (item.localPath) {
       setNotice("");
@@ -1841,6 +1850,14 @@ function App() {
       playbackSessionRef.current = occurrence.session;
       setPlayer(occurrence);
       if (keepInlineLyrics) void openLyrics(item);
+      // Lyrics prefetch (PR 1): warm the next song's lyrics while this one plays,
+      // but only for listeners who actually read lyrics — the expanded player is
+      // open, or lyrics were opened at least once this session. The prefetch writes
+      // the settled lyrics into the SQLite `lyrics` table, so the next song's
+      // on-demand lookup is a cache hit; it never touches lyrics UI state.
+      if (keepInlineLyrics || lyricsOpenedThisSessionRef.current) {
+        lyricsPrefetchRef.current?.prefetch(nextQueue, nextIndex, repeatMode);
+      }
       void beginPlaytime(item);
     } catch (error) {
       // M4: roll back to the song still playing; a superseded failure must not clobber a newer play.

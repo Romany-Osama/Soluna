@@ -1421,3 +1421,199 @@ it("keeps lyrics opened for another song while the next song fails to resolve (M
   expect(screen.queryByText("First song lyric line")).toBeNull();
   expect(container.querySelector(".player-dock")?.textContent).toContain("First song");
 });
+
+it("prefetches the next song's lyrics once lyrics were opened this session (PR 1)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.fetch_lyrics = async () => ({
+    provider: "Test",
+    text: "First song lyric line",
+    synced: false,
+    matchedTitle: "First song",
+    matchedArtist: "Artist",
+    lines: [],
+  });
+  const { default: App } = await import("./App");
+  await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song, then open its lyrics: that sets the session flag, so the
+  // gate is open from here on.
+  await click(playButtons()[0]);
+  await click(screen.getByRole("button", { name: "Open synchronized lyrics" }));
+  await screen.findByText("First song lyric line");
+
+  // Re-play the first song. The gated fire in playItem must now prefetch the
+  // second song's lyrics through fetch_lyrics. Filtering by "Second song" makes
+  // the assertion unambiguous: only the prefetch can produce it (the on-demand
+  // call for the first song has title "First song").
+  invoke.mockClear();
+  await click(playButtons()[0]);
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith(
+      "fetch_lyrics",
+      expect.objectContaining({
+        title: "Second song",
+        artist: "Artist",
+        duration: -1,
+        album: null,
+        id: "vid_second",
+        requestId: expect.any(String),
+      }),
+    ),
+  );
+});
+
+it("does not prefetch the next song's lyrics when lyrics were never opened (PR 1)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.fetch_lyrics = async () => ({
+    provider: "Test",
+    text: "First song lyric line",
+    synced: false,
+    matchedTitle: "First song",
+    matchedArtist: "Artist",
+    lines: [],
+  });
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song with the gate closed (lyrics never opened), then re-play
+  // it. The second play's ytm_player call proves the replay ran; the waitFor poll
+  // runs on a macrotask, so by the time it observes the call, the playItem
+  // continuation — setPlayer and the gate evaluation — has already run.
+  await click(playButtons()[0]);
+  await waitFor(() => expect(container.querySelector(".player-dock")?.textContent).toContain("First song"));
+  invoke.mockClear();
+  await click(playButtons()[0]);
+  await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "ytm_player")).toHaveLength(1));
+  expect(
+    invoke.mock.calls.filter(
+      ([command, args]) => command === "fetch_lyrics" && (args as { title?: string })?.title === "Second song",
+    ),
+  ).toHaveLength(0);
+});
+
+it("aborts the in-flight lyrics prefetch when the next song is played (PR 1)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const prefetchLyrics = deferred<unknown>();
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.fetch_lyrics = async () => ({
+    provider: "Test",
+    text: "First song lyric line",
+    synced: false,
+    matchedTitle: "First song",
+    matchedArtist: "Artist",
+    lines: [],
+  });
+  const { default: App } = await import("./App");
+  await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the first song and open its lyrics, so the gate is open.
+  await click(playButtons()[0]);
+  await click(screen.getByRole("button", { name: "Open synchronized lyrics" }));
+  await screen.findByText("First song lyric line");
+
+  // Hold the next prefetch in flight, then re-play the first song: the gate is
+  // open, so the prefetch for the second song fires and stays pending.
+  overrides.fetch_lyrics = async () => prefetchLyrics.promise;
+  invoke.mockClear();
+  await click(playButtons()[0]);
+  let prefetchRequestId = "";
+  await waitFor(() => {
+    const call = invoke.mock.calls.find(
+      ([command, args]) => command === "fetch_lyrics" && (args as { title?: string })?.title === "Second song",
+    );
+    expect(call).toBeTruthy();
+    prefetchRequestId = (call![1] as { requestId: string }).requestId;
+  });
+  expect(typeof prefetchRequestId).toBe("string");
+  expect(prefetchRequestId.length).toBeGreaterThan(0);
+
+  // Playing the second song aborts the in-flight prefetch at the top of playItem.
+  await click(playButtons()[1]);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("request_cancel", { requestId: prefetchRequestId }));
+
+  // Let the held prefetch settle so nothing is left pending.
+  await act(async () => prefetchLyrics.resolve(undefined));
+});
