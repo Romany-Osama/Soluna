@@ -12,14 +12,14 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | --- | --- | --- |
 | `read-local` | Reads Soluna's own database, settings or files. | 28 |
 | `write-local` | Changes Soluna's own data; the change can be reversed. | 20 |
-| `remote-read` | Calls YouTube Music, Spotify or a lyrics/update server; reads only (may cache the answer). | 33 |
+| `remote-read` | Calls YouTube Music, Spotify or a lyrics/update server; reads only (may cache the answer). | 34 |
 | `remote-write` | Changes the signed-in YouTube Music or Spotify account; the change can be reversed. | 9 |
 | `destructive-local` | Deletes or replaces Soluna data (history, cache, downloads, a backup restore). | 8 |
 | `remote-destructive` | Deletes something from the signed-in YouTube Music or Spotify account. | 4 |
 | `system` | Reaches outside the app: file dialogs, opening a browser, installing an update, writing a backup file. | 4 |
 | `credentials` | Opens a login window or creates, refreshes or deletes a stored session. | 5 |
 
-## Commands (111)
+## Commands (112)
 
 ### account (8)
 
@@ -136,14 +136,15 @@ module the command belongs to (S5-003). **Callers** are found in `src/` (tests e
 | `playlist_download_status` | read-local | `features/downloads/usePlaylistDownloads.ts` |
 | `playlist_downloads` | read-local | `features/downloads/usePlaylistDownloads.ts` |
 
-### player (10)
+### player (11)
 
 | Command | Risk | Callers |
 | --- | --- | --- |
 | `library_player_cache` | read-local | `features/library/useLibraryData.ts` |
 | `player_cache_clear` | destructive-local | `PlaybackCachePanel.tsx` |
+| `player_cache_prefetch` | remote-read | `App.tsx`, `features/player/audioPrefetch.ts` |
 | `player_cache_remove` | destructive-local | `App.tsx` |
-| `player_cache_usage` | read-local | `PlaybackCachePanel.tsx` |
+| `player_cache_usage` | read-local | `PlaybackCachePanel.tsx`, `features/player/audioPrefetch.ts` |
 | `ytm_next` | remote-read | `App.tsx`, `features/queue/useQueue.ts` |
 | `ytm_playback_report` | read-local | `App.tsx` |
 | `ytm_player` | remote-read | `App.tsx`, `features/player/usePlayer.ts` |

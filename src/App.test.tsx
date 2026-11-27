@@ -1617,3 +1617,223 @@ it("aborts the in-flight lyrics prefetch when the next song is played (PR 1)", a
   // Let the held prefetch settle so nothing is left pending.
   await act(async () => prefetchLyrics.resolve(undefined));
 });
+
+// Shared helper for the PR 2 wiring tests: fire a timeupdate on the <audio> element with
+// the given position, as the browser does ~4 times a second while a song plays. jsdom has
+// no real media, so currentTime/duration are defined on the element for the event.
+const fireTimeUpdate = async (container: HTMLElement, currentTime: number, duration: number) => {
+  const audio = container.querySelector(".native-audio") as HTMLAudioElement;
+  Object.defineProperty(audio, "currentTime", { value: currentTime, configurable: true, writable: true });
+  Object.defineProperty(audio, "duration", { value: duration, configurable: true, writable: true });
+  await act(async () => void fireEvent.timeUpdate(audio));
+};
+
+it("prefetches the next song's audio near the end of the current song, once per session (PR 2)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.player_cache_usage = async () => ({ bytes: 0, songs: 0, limitMb: 2048 });
+  overrides.player_cache_prefetch = async () => undefined;
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  await click(playButtons()[0]);
+  await waitFor(() => expect(container.querySelector(".player-dock")?.textContent).toContain("First song"));
+
+  // 30s left of a 200s song: the near-end trigger fires the audio prefetch for the
+  // second song (only the prefetch can produce this call).
+  invoke.mockClear();
+  await fireTimeUpdate(container, 170, 200);
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith(
+      "player_cache_prefetch",
+      expect.objectContaining({ videoId: "vid_second", audioQuality: "auto", requestId: expect.any(String) }),
+    ),
+  );
+  expect(invoke.mock.calls.filter(([command]) => command === "player_cache_usage")).toHaveLength(1);
+
+  // A second near-end tick in the same playback session must not fire again.
+  await fireTimeUpdate(container, 175, 200);
+  expect(invoke.mock.calls.filter(([command]) => command === "player_cache_prefetch")).toHaveLength(1);
+  expect(invoke.mock.calls.filter(([command]) => command === "player_cache_usage")).toHaveLength(1);
+});
+
+it("does not prefetch the next song's audio while the song is far from its end (PR 2)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.player_cache_usage = async () => ({ bytes: 0, songs: 0, limitMb: 2048 });
+  overrides.player_cache_prefetch = async () => undefined;
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  await click(playButtons()[0]);
+  await waitFor(() => expect(container.querySelector(".player-dock")?.textContent).toContain("First song"));
+
+  // 100s left: the threshold is 30s, so the trigger must not call the module at all.
+  invoke.mockClear();
+  await fireTimeUpdate(container, 100, 200);
+  // A macrotask, so any prefetch the tick might have started has landed by now.
+  await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+  expect(invoke.mock.calls.filter(([command]) => command === "player_cache_prefetch")).toHaveLength(0);
+  expect(invoke.mock.calls.filter(([command]) => command === "player_cache_usage")).toHaveLength(0);
+});
+
+it("does not prefetch the next song's audio at the end of the queue (PR 2)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.player_cache_usage = async () => ({ bytes: 0, songs: 0, limitMb: 2048 });
+  overrides.player_cache_prefetch = async () => undefined;
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  // Play the second song (last in the queue), then tick near its end: there is no
+  // next song, so the trigger must not call the module at all.
+  await click(playButtons()[1]);
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("ytm_player", expect.objectContaining({ videoId: "vid_second" })),
+  );
+  invoke.mockClear();
+  await fireTimeUpdate(container, 170, 200);
+  await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+  expect(invoke.mock.calls.filter(([command]) => command === "player_cache_prefetch")).toHaveLength(0);
+  expect(invoke.mock.calls.filter(([command]) => command === "player_cache_usage")).toHaveLength(0);
+});
+
+it("aborts the in-flight audio prefetch when the next song is played (PR 2)", async () => {
+  const song = (id: string, title: string) => ({
+    id,
+    kind: "song",
+    title,
+    subtitle: "Artist",
+    artists: [],
+    videoId: id,
+  });
+  const prefetchAudio = deferred<unknown>();
+  overrides.library_liked_songs = async () => [song("vid_first", "First song"), song("vid_second", "Second song")];
+  overrides.ytm_player = async (args) => {
+    const { videoId } = args as { videoId: string };
+    return {
+      videoId,
+      title: "First song",
+      artist: "Artist",
+      streamUrl: "https://example.test/first.mp3",
+      mimeType: "audio/mpeg",
+      bitrate: 128,
+      expiresInSeconds: 3600,
+      duration: 200,
+    };
+  };
+  overrides.player_cache_usage = async () => ({ bytes: 0, songs: 0, limitMb: 2048 });
+  overrides.player_cache_prefetch = async () => prefetchAudio.promise;
+  const { default: App } = await import("./App");
+  const { container } = await act(async () => render(<App />));
+  const click = async (element: HTMLElement) => act(async () => void fireEvent.click(element));
+  const playButtons = () => screen.getAllByRole("button", { name: "Play in Soluna" });
+
+  await click(screen.getByRole("button", { name: /Library/ }));
+  await click(screen.getByRole("button", { name: /Liked Songs/ }));
+  await screen.findByText("First song");
+  expect(playButtons()).toHaveLength(2);
+
+  await click(playButtons()[0]);
+  await waitFor(() => expect(container.querySelector(".player-dock")?.textContent).toContain("First song"));
+
+  // Fire near the end: the prefetch for the second song starts and stays pending.
+  invoke.mockClear();
+  await fireTimeUpdate(container, 170, 200);
+  let prefetchRequestId = "";
+  await waitFor(() => {
+    const call = invoke.mock.calls.find(([command]) => command === "player_cache_prefetch");
+    expect(call).toBeTruthy();
+    prefetchRequestId = (call![1] as { requestId: string }).requestId;
+  });
+  expect(typeof prefetchRequestId).toBe("string");
+  expect(prefetchRequestId.length).toBeGreaterThan(0);
+
+  // Playing the second song aborts the in-flight prefetch at the top of playItem.
+  await click(playButtons()[1]);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("request_cancel", { requestId: prefetchRequestId }));
+
+  // Let the held prefetch settle so nothing is left pending.
+  await act(async () => prefetchAudio.resolve(undefined));
+});

@@ -136,6 +136,7 @@ export const COMMANDS = {
   ytm_related: c("player", "remote-read"),
   ytm_queue_continuation: c("player", "remote-read"),
   ytm_player: c("player", "remote-read"),
+  player_cache_prefetch: c("player", "remote-read"),
   ytm_report_stream_failure: c("player", "write-local"),
   ytm_playback_report: c("player", "read-local"),
   library_player_cache: c("player", "read-local"),

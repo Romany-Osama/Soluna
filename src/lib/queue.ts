@@ -18,11 +18,11 @@ export type ShuffleOptions = { shuffle: boolean; playlistFirst: boolean; random?
 export type RepeatMode = "off" | "all" | "one";
 
 /**
- * The next song a lyrics prefetch may warm (PR 1): exactly one song ahead in the
- * arranged queue. Returns null when there is nothing safe to prefetch: end of
- * queue, single-item queue, repeat-one (the next song is the current one, so its
- * lyrics are already being fetched for this play), the next item is a local file,
- * or the next item is the same song as the current one (same id).
+ * The next song a prefetch may warm: exactly one song ahead in the arranged queue. Shared by
+ * the lyrics prefetch (PR 1) and the audio prefetch (PR 2) — the target rule is the same for
+ * both. Returns null when there is nothing safe to prefetch: end of queue, single-item queue,
+ * repeat-one (the next song is the current one, so it is already being fetched for this play),
+ * the next item is a local file, or the next item is the same song as the current one (same id).
  */
 export function nextLyricsPrefetchTarget<T extends Keyed & { localPath?: string | null }>(
   items: T[],

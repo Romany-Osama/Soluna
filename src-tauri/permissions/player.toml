@@ -6,6 +6,7 @@ description = "Commands owned by player (docs/ipc-commands.md)."
 permissions = [
   "allow-library-player-cache",
   "allow-player-cache-clear",
+  "allow-player-cache-prefetch",
   "allow-player-cache-remove",
   "allow-player-cache-usage",
   "allow-ytm-next",

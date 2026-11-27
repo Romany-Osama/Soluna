@@ -4,6 +4,8 @@
 //! scheduler keeps at most [`MAX_ACTIVE_JOBS`] fills alive. Starting a fill for a new song cancels every
 //! other fill (the user skipped), and cancelled fills still count until they have released their socket and
 //! file, so rapid skipping cannot pile up downloads. A fill notices cancellation within [`CANCEL_POLL`].
+//! A prefetch fill (PR 2, [`CacheJobs::start_prefetch`]) is the exception: it never cancels another fill,
+//! so a stale prefetch resolving after a skip cannot kill the new current song's fill.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -43,6 +45,23 @@ impl CacheJobs {
         }
         for flag in self.jobs.values() {
             flag.store(true, Ordering::Release);
+        }
+        if self.jobs.len() >= MAX_ACTIVE_JOBS {
+            return Start::Busy;
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        self.jobs.insert(song_id.to_owned(), flag.clone());
+        Start::Started(flag)
+    }
+
+    /// Starts a prefetch fill for the next song without cancelling the other fills (PR 2). A
+    /// prefetch is background work for a song that is not playing yet: if its resolve lands after
+    /// the user skipped, cancelling the new current song's fill (as [`CacheJobs::start`] does)
+    /// would make the song the user is actually listening to stream without caching. Bounded by
+    /// the same [`MAX_ACTIVE_JOBS`]: a prefetch that finds both slots taken simply does not run.
+    pub fn start_prefetch(&mut self, song_id: &str) -> Start {
+        if self.jobs.contains_key(song_id) {
+            return Start::AlreadyActive;
         }
         if self.jobs.len() >= MAX_ACTIVE_JOBS {
             return Start::Busy;
@@ -341,6 +360,69 @@ mod tests {
         };
         jobs.cancel("b");
         assert!(flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn prefetch_fill_never_cancels_the_current_fill() {
+        // PR 2: a stale prefetch resolving after a skip must not kill the new current song's fill.
+        let mut jobs = CacheJobs::default();
+        let Start::Started(current) = jobs.start("current") else {
+            panic!("current start");
+        };
+        let Start::Started(prefetch) = jobs.start_prefetch("next") else {
+            panic!("prefetch start");
+        };
+        assert!(
+            !current.load(Ordering::Acquire),
+            "prefetch must not cancel the current fill"
+        );
+        assert!(!prefetch.load(Ordering::Acquire));
+        assert_eq!(jobs.active(), 2);
+        jobs.finish("current");
+        // A later normal play still cancels a draining prefetch: only the prefetch
+        // direction is non-cancelling.
+        let Start::Started(newer) = jobs.start("newer") else {
+            panic!("newer start");
+        };
+        assert!(prefetch.load(Ordering::Acquire));
+        assert!(!newer.load(Ordering::Acquire));
+        jobs.finish("next");
+        jobs.finish("newer");
+        assert_eq!(jobs.active(), 0);
+    }
+
+    #[test]
+    fn prefetch_same_song_is_already_active() {
+        let mut jobs = CacheJobs::default();
+        let Start::Started(first) = jobs.start_prefetch("a") else {
+            panic!("first prefetch");
+        };
+        assert!(matches!(jobs.start_prefetch("a"), Start::AlreadyActive));
+        assert!(!first.load(Ordering::Acquire));
+        // A normal fill for the same song is already active too: the prefetch owns the slot.
+        assert!(matches!(jobs.start("a"), Start::AlreadyActive));
+        assert!(!first.load(Ordering::Acquire));
+        jobs.finish("a");
+        assert_eq!(jobs.active(), 0);
+    }
+
+    #[test]
+    fn prefetch_is_busy_when_both_slots_are_taken() {
+        let mut jobs = CacheJobs::default();
+        let Start::Started(_) = jobs.start("a") else {
+            panic!("a");
+        };
+        let Start::Started(_) = jobs.start_prefetch("b") else {
+            panic!("b");
+        };
+        assert!(matches!(jobs.start_prefetch("c"), Start::Busy));
+        assert!(matches!(jobs.start("c"), Start::Busy));
+        assert_eq!(jobs.active(), 2);
+        jobs.finish("a");
+        assert!(matches!(jobs.start_prefetch("c"), Start::Started(_)));
+        jobs.finish("b");
+        jobs.finish("c");
+        assert_eq!(jobs.active(), 0);
     }
 
     #[test]

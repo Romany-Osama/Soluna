@@ -51,6 +51,7 @@ const COMMANDS: &[&str] = &[
     "open_google_login",
     "open_spotify_login",
     "player_cache_clear",
+    "player_cache_prefetch",
     "player_cache_remove",
     "player_cache_usage",
     "playlist_download_cancel",

@@ -19,6 +19,8 @@ export type PlayerBarProps = {
   lyrics: LoadState<LyricsPayload> | null;
   openLyrics: (item: YtItem) => Promise<void>;
   openPlayerMenu: () => Promise<void>;
+  /** Near-end tick from the audio element (PR 2): fires the next song's audio prefetch. */
+  onNearEnd?: (currentTime: number, duration: number) => void;
   playbackSeconds: number;
   player: { item: YtItem; payload: PlayerPayload; session: number } | null;
   playerItemState: LibraryItemState | null;
