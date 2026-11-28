@@ -1,7 +1,7 @@
 {
   "name": "soluna-desktop",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.5.1",
   "license": "GPL-3.0-only",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
