@@ -4,6 +4,22 @@ All notable changes are listed here. Soluna was called Meld Desktop up to 0.3.0.
 
 ## [Unreleased]
 
+## [0.5.1] — Soluna: next-song prefetch, fullscreen queue fix, lyrics providers
+
+This is a pre-release: the in-app updater will not offer it until it is promoted. It gathers the fullscreen queue fix, the lyrics provider work and the next-song prefetch that landed after 0.5.0. The installer is not Authenticode-signed yet, so Windows SmartScreen may warn; downloads can be checked against `SHA256SUMS.txt`.
+
+### Added
+- **Fullscreen queue above the player (#69):** the queue, menus, dialogs and notices now open above the fullscreen player instead of underneath it.
+- **Lyrics Re-sync button (#70):** a Re-sync button in the lyrics view, and lyrics follow resumes automatically 8 seconds after you scroll away.
+- **Fullscreen lyrics look (#71):** the fullscreen lyrics view now has a gap ring, a bigger active line and a dimmer backdrop.
+- **Lyrics providers, official-first (#72):** the provider chain now tries official sources first (LrcLib, LyricsOvh) and only falls back to unofficial ones, with a strict title, artist and duration match, so wrong lyrics are rejected instead of shown; LrcLib word timings are used where available.
+- **YouTube lyrics cross-check (#73):** synced lyrics are cross-checked against plain YouTube text before being cached, so a wrong match is dropped instead of stored.
+- **Next-song lyrics prefetch (#74):** while a song plays, the next song's lyrics are fetched in advance through the checked lyrics path only, so they are ready when the song starts.
+- **Next-song audio prefetch (#75):** while a song plays, the next song's audio is downloaded into the disk playback cache in the last 30 seconds, so the next song starts from the cache; the prefetch never touches the checked lyrics.
+
+### Notes
+- **Live prefetch behaviour is unmeasured:** the next-song prefetch (lyrics and audio) has been verified by unit and integration tests and by Windows CI, but not yet by playing songs live in the real app — whether the prefetched lyrics and audio land before the next song starts, and how long the download takes, are unmeasured. Live testing on a real PC is still to be done.
+
 ## [0.5.0] — Soluna: fullscreen player, word-by-word lyrics, safer backups and sign-in
 
 Update recommended for everyone on 0.4.0: you get it inside the app (Settings → About, or the daily check). Your library, downloads, settings and sign-ins are kept. The installer is not Authenticode-signed yet, so Windows SmartScreen may warn; downloads can be checked against `SHA256SUMS.txt`.

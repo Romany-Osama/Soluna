@@ -28,7 +28,7 @@ Downloaded songs, temporary playback cache, imported local files, account sessio
 
 ## Getting started
 
-Download the latest portable package from the [Soluna Releases page](https://github.com/Romany-Osama/Soluna/releases). The current release is **Soluna v0.4.0**. Extract the complete ZIP folder and start `Soluna.exe`. Keep the `icons/taskbar` folder beside the executable so the Windows taskbar thumbnail controls can load their icons.
+Download the latest portable package from the [Soluna Releases page](https://github.com/Romany-Osama/Soluna/releases). The current release is **Soluna v0.5.1**. Extract the complete ZIP folder and start `Soluna.exe`. Keep the `icons/taskbar` folder beside the executable so the Windows taskbar thumbnail controls can load their icons.
 
 The first screen can be used without connecting an account for supported public browsing and playback. Connect Google/YouTube Music when you want account library actions, saved shows, subscriptions, or synchronized personal content. Connect Spotify only when you want Spotify library and playlist features.
 
@@ -70,7 +70,7 @@ Some mobile-only or service-dependent features are not part of the Windows appli
 
 ## Project status
 
-The current public release is [Soluna v0.4.0](https://github.com/Romany-Osama/Soluna/releases/tag/v0.4.0). Read [CHANGELOG.md](CHANGELOG.md) for the release history and the exact validation results.
+The current public release is [Soluna v0.5.1](https://github.com/Romany-Osama/Soluna/releases/tag/v0.5.1). Read [CHANGELOG.md](CHANGELOG.md) for the release history and the exact validation results.
 
 The application is **Soluna**. Releases before 0.4.0 were branded **Meld Desktop**; see [CHANGELOG.md](CHANGELOG.md) for the rename and what carries over from a Meld Desktop install.
 
